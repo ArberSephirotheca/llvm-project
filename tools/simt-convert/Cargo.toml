@@ -1,0 +1,15 @@
+[package]
+name = "simt-convert"
+version = "0.1.0"
+edition = "2021"
+resolver = "2"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+simt-step = { path = "../.." }
+melior = { version = "0.25" }
+
+[[bin]]
+name = "simt-convert"
+path = "src/main.rs"

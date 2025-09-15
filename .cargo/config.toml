@@ -1,0 +1,11 @@
+[env]
+# Ensure build scripts can *run* llvm-config and friends
+PATH = "/opt/homebrew/opt/llvm@20/bin:${PATH}"
+
+# Belt & suspenders: explicit discovery knobs many crates read
+LLVM_CONFIG_PATH     = "/opt/homebrew/opt/llvm@20/bin/llvm-config"
+LLVM_SYS_200_PREFIX  = "/opt/homebrew/opt/llvm@20"
+MLIR_SYS_200_PREFIX  = "/opt/homebrew/opt/llvm@20"
+TABLEGEN_20_PREFIX   = "/opt/homebrew/opt/llvm@20"
+LLVM_TBLGEN          = "/opt/homebrew/opt/llvm@20/bin/llvm-tblgen"
+MLIR_TBLGEN          = "/opt/homebrew/opt/llvm@20/bin/mlir-tblgen"

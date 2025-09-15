@@ -1,0 +1,40 @@
+[workspace]
+members = [".", "tools/simt-convert", "tools/simt-run"]
+
+[package]
+name = "simt-step"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "simt_step"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = "1"
+thiserror = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+indexmap = "2"
+smallvec = "1"
+llvm-sys = { version = "211.0.0-rc1" }
+# MLIR in Rust
+melior = {version = "0.25.0", features = ["ods-dialects", "helpers"]}
+
+# (Optional) JIT/AOT helpers later
+# inkwell = { version = "0.4", optional = true }
+
+[build-dependencies]
+cc = "1"
+
+[features]
+default = []
+# compiled-oracle = ["inkwell"]  # example if you later use inkwell directly
+
+[profile.dev]
+opt-level = 1
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
