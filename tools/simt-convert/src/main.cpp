@@ -1,3 +1,4 @@
+#include "simt-step/Dialect/SimtStep/SimtStepDialect.h"
 #include "simt-step/frontends/CUDA.h"
 #include "simt-step/frontends/HLSL.h"
 
@@ -11,6 +12,7 @@
 
 #include <memory>
 
+#include <mlir/IR/DialectRegistry.h>
 #include <mlir/IR/MLIRContext.h>
 
 using namespace simt;
@@ -52,7 +54,11 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    mlir::MLIRContext context;
+    mlir::DialectRegistry dialectRegistry;
+    simt::dialect::registerSimtStepDialect(dialectRegistry);
+
+    mlir::MLIRContext context(dialectRegistry);
+    context.loadDialect<simt::dialect::SimtStepDialect>();
     context.loadAllAvailableDialects();
 
     auto moduleOrErr = [&]() -> llvm::Expected<mlir::OwningOpRef<mlir::ModuleOp>> {

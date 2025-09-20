@@ -1,0 +1,57 @@
+//===- SimtStep.td - SIMT-Step Dialect  -------------------------*- tablegen -*-===//
+//
+// Defines the SIMT-Step dialect shell and a minimal set of ops. This is a
+// placeholder to bootstrap the TableGen-based workflow; the op set will be
+// expanded to match the design doc.
+//
+//===----------------------------------------------------------------------===//
+
+#ifndef SIMT_STEP_DIALECT_TD
+#define SIMT_STEP_DIALECT_TD
+
+include "mlir/IR/DialectBase.td"
+include "mlir/IR/OpBase.td"
+
+// Trait markers -------------------------------------------------------------
+def SimtStep_IndependentTrait : NativeOpTrait<"SimtIndependent">;
+def SimtStep_SynchronizedTrait : NativeOpTrait<"SimtSynchronized">;
+def SimtStep_CollectiveTrait : NativeOpTrait<"SimtCollective">;
+
+// Dialect definition -------------------------------------------------------
+def SimtStep_Dialect : Dialect {
+  let name = "simt_step";
+  let cppNamespace = "simt::dialect";
+  let summary = "SIMT semantics dialect";
+  let description = [{
+    Dialect capturing warp-level operations, synchronization, and plugin
+    extension points for SIMT semantics experiments.
+  }];
+}
+
+// Minimal op examples ------------------------------------------------------
+
+def SimtStep_WaveAllOp : Op<SimtStep_Dialect, "wave_all"> {
+  let summary = "Wave-level logical AND over lane predicates";
+  let description = [{
+    Computes whether all active lanes evaluate the predicate to true. The final
+    operation set will include operands for mask/scope. This stub takes a single
+    `i1` per-lane predicate and returns `i1`.
+  }];
+
+  let arguments = (ins I1:$predicate);
+  let results = (outs I1:$result);
+
+  let assemblyFormat = "`(` $predicate `)` attr-dict";
+}
+
+def SimtStep_BarrierOp : Op<SimtStep_Dialect, "barrier"> {
+  let summary = "Synchronize lanes at a given scope";
+  let description = [{
+    Placeholder barrier op; real version will use attributes for scope and
+    memory semantics.
+  }];
+
+  let assemblyFormat = "attr-dict";
+}
+
+#endif // SIMT_STEP_DIALECT_TD

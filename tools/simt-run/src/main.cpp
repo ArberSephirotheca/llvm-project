@@ -1,3 +1,4 @@
+#include "simt-step/Dialect/SimtStep/SimtStepDialect.h"
 #include "simt-step/frontends/CUDA.h"
 #include "simt-step/frontends/HLSL.h"
 #include "simt-step/plugins/Registry.h"
@@ -12,6 +13,7 @@
 #include <llvm/Support/JSON.h>
 #include <llvm/Support/raw_ostream.h>
 
+#include <mlir/IR/DialectRegistry.h>
 #include <mlir/IR/MLIRContext.h>
 
 using namespace simt;
@@ -24,7 +26,11 @@ int main(int argc, char **argv) {
 
     llvm::cl::ParseCommandLineOptions(argc, argv, "simt-run demo\n");
 
-    mlir::MLIRContext context;
+    mlir::DialectRegistry dialectRegistry;
+    simt::dialect::registerSimtStepDialect(dialectRegistry);
+
+    mlir::MLIRContext context(dialectRegistry);
+    context.loadDialect<simt::dialect::SimtStepDialect>();
     plugins::Registry registry;
 
     plugins::examples::registerReduceAdd(registry, Model);

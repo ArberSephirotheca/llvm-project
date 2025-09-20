@@ -35,7 +35,8 @@
 - Memory ops participate in MLIR’s memory effect interface and enforce legal scope/ordering combinations.
 
 ## Lowering Strategy
-- User IR stays in structured control flow; a dedicated lowering pass (or interpreter layer) materializes dynamic block frames and explicit mask transitions similar to the MiniHLSL interpreter.
+- User IR stays in structured control flow; a dedicated lowering pass converts `simt_step` regions into a **Structured SIMT dialect** that models block-based execution (labels, merge points, explicit mask operands) akin to SPIR-V and the dynamic-block representation used by the interpreter.
+- Another pass materializes dynamic block frames and mask transitions from the structured dialect for execution/analysis.
 - Specialization pass folds constant masks/values and simplifies collectives when possible.
 - Canonicalization cleans redundant mask operations and hoists invariants.
 - LLVM lowering translates traits to concrete intrinsics/runtime calls (`llvm.nvvm.barrier0`, shuffles, etc.).
@@ -57,6 +58,7 @@
 1. **TableGen Scaffolding**
    - Define `SimtStepDialect` in TableGen with core traits/interfaces.
    - Generate op classes for built-ins (mask ops, collectives, sync ops).
+   - Emit C++ registration stubs and hook them into the library build.
 2. **Trait Infrastructure**
    - Implement C++ trait interfaces (`SimtIndependentOpTrait`, `SimtSynchronizedOpTrait`, `SimtCollectiveOpTrait`, `SimtMaskModifierTrait`).
    - Connect `simt.custom` to the registry via `SimtPluginOpInterface`.

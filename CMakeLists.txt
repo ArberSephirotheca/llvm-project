@@ -29,6 +29,7 @@ message(STATUS "Using MLIR at ${MLIR_DIR}")
 
 list(APPEND CMAKE_MODULE_PATH "${MLIR_CMAKE_DIR}")
 include(TableGen)
+include(AddLLVM)
 include(AddMLIR)
 include(HandleLLVMOptions)
 
