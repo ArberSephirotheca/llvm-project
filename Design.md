@@ -1,7 +1,7 @@
-# SIMT-Step Semantics Framework (Rust + MLIR)
+# SIMT-Step Semantics Framework (C++20 + MLIR)
 
 ## Purpose
-A **unified, language-agnostic framework** to represent and execute GPU SIMT semantics in Rust using [melior](https://github.com/mlir-rs/melior).
+A **unified, language-agnostic framework** to represent and execute GPU SIMT semantics in modern C++ using MLIR + LLVM libraries. See `docs/DIALECT_DESIGN.md` for the current SIMT-Step dialect sketch and implementation roadmap.
 
 - **Inputs (frontends):** HLSL and CUDA, extensible via plugins.  
 - **Core:** MLIR `simt_step` dialect + generic `simt.custom` op.  
