@@ -17,6 +17,8 @@ void registerSimtStepDialect(::mlir::DialectRegistry &registry);
 // Generated declarations.
 #include "SimtStepDialect.h.inc"
 
+#include "SimtStepEnums.h.inc"
+
 #define GET_OP_CLASSES
 #include "SimtStepOps.h.inc"
 #undef GET_OP_CLASSES

@@ -4,6 +4,8 @@
 #include <mlir/IR/DialectImplementation.h>
 #include <mlir/IR/DialectRegistry.h>
 
+#include "SimtStepEnums.cpp.inc"
+
 using namespace mlir;
 
 namespace simt::dialect {

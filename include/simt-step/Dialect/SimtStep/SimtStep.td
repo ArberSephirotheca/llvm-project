@@ -11,11 +11,7 @@
 
 include "mlir/IR/DialectBase.td"
 include "mlir/IR/OpBase.td"
-
-// Trait markers -------------------------------------------------------------
-def SimtStep_IndependentTrait : NativeOpTrait<"SimtIndependent">;
-def SimtStep_SynchronizedTrait : NativeOpTrait<"SimtSynchronized">;
-def SimtStep_CollectiveTrait : NativeOpTrait<"SimtCollective">;
+include "mlir/IR/EnumAttr.td"
 
 // Dialect definition -------------------------------------------------------
 def SimtStep_Dialect : Dialect {
@@ -27,6 +23,32 @@ def SimtStep_Dialect : Dialect {
     extension points for SIMT semantics experiments.
   }];
 }
+
+// Trait markers -------------------------------------------------------------
+def SimtStep_IndependentTrait : NativeOpTrait<"SimtIndependent">;
+def SimtStep_SynchronizedTrait : NativeOpTrait<"SimtSynchronized">;
+def SimtStep_CollectiveTrait : NativeOpTrait<"SimtCollective">;
+
+// Enum attributes -----------------------------------------------------------
+
+def SimtStep_Scope : I32EnumAttr<"Scope", "SIMT scope",
+    [I32EnumAttrCase<"Thread", 0>,
+     I32EnumAttrCase<"Subgroup", 1>,
+     I32EnumAttrCase<"Workgroup", 2>]> {
+  let cppNamespace = "::simt::dialect";
+}
+def SimtStep_ScopeEnumAttr : EnumAttr<SimtStep_Dialect, SimtStep_Scope, "scope">;
+
+def SimtStep_MemorySemantics : I32EnumAttr<"MemorySemantics",
+    "SIMT memory semantics",
+    [I32EnumAttrCase<"None", 0>,
+     I32EnumAttrCase<"Acquire", 1>,
+     I32EnumAttrCase<"Release", 2>,
+     I32EnumAttrCase<"AcqRel", 3>]> {
+  let cppNamespace = "::simt::dialect";
+}
+def SimtStep_MemorySemanticsEnumAttr
+    : EnumAttr<SimtStep_Dialect, SimtStep_MemorySemantics, "memsem">;
 
 // Minimal op examples ------------------------------------------------------
 

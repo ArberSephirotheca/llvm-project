@@ -20,6 +20,10 @@ mlir_tablegen(SimtStepOps.h.inc -gen-op-decls
     ${_simt_tablegen_includes})
 mlir_tablegen(SimtStepOps.cpp.inc -gen-op-defs
     ${_simt_tablegen_includes})
+mlir_tablegen(SimtStepEnums.h.inc -gen-enum-decls
+    ${_simt_tablegen_includes})
+mlir_tablegen(SimtStepEnums.cpp.inc -gen-enum-defs
+    ${_simt_tablegen_includes})
 
 add_public_tablegen_target(SimtStepDialectIncGen)
 
