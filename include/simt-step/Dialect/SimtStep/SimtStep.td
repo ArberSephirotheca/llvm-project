@@ -12,6 +12,7 @@
 include "mlir/IR/DialectBase.td"
 include "mlir/IR/OpBase.td"
 include "mlir/IR/EnumAttr.td"
+include "mlir/IR/AttrTypeBase.td"
 
 // Dialect definition -------------------------------------------------------
 def SimtStep_Dialect : Dialect {
@@ -49,6 +50,33 @@ def SimtStep_MemorySemantics : I32EnumAttr<"MemorySemantics",
 }
 def SimtStep_MemorySemanticsEnumAttr
     : EnumAttr<SimtStep_Dialect, SimtStep_MemorySemantics, "memsem">;
+
+def SimtStep_MemorySpace : I32EnumAttr<"MemorySpace",
+    "SIMT memory space",
+    [I32EnumAttrCase<"Generic", 0>,
+     I32EnumAttrCase<"Global", 1>,
+     I32EnumAttrCase<"Shared", 2>,
+     I32EnumAttrCase<"Private", 3>]> {
+  let cppNamespace = "::simt::dialect";
+}
+def SimtStep_MemorySpaceEnumAttr
+    : EnumAttr<SimtStep_Dialect, SimtStep_MemorySpace, "memspace">;
+
+// Types --------------------------------------------------------------------
+
+def SimtStep_MaskType : TypeDef<SimtStep_Dialect, "Mask"> {
+  let mnemonic = "mask";
+  let summary = "Bitmask type representing active lanes";
+  let description = [{
+    Represents a lane activity mask. The bit width defaults to 64 but may be
+    customized via the `width` parameter.
+  }];
+
+  let parameters = (ins DefaultValuedParameter<"uint64_t", "64">:$width);
+  let assemblyFormat = [{ (`<` $width^ `>`)? }];
+  let genVerifyDecl = 1;
+
+}
 
 // Minimal op examples ------------------------------------------------------
 
@@ -93,6 +121,40 @@ def SimtStep_WaveBallotOp : Op<SimtStep_Dialect, "wave_ballot"> {
   let assemblyFormat = "`(` $predicate `)` attr-dict";
 }
 
+def SimtStep_MaskPushOp : Op<SimtStep_Dialect, "mask_push"> {
+  let summary = "Push an explicit mask onto the execution stack";
+  let description = [{
+    Pushes a new active mask. Placeholder for the structured lowering pipeline;
+    not expected to appear in source-level IR.
+  }];
+
+  let arguments = (ins I64:$mask);
+
+  let assemblyFormat = "$mask attr-dict";
+}
+
+def SimtStep_MaskPopOp : Op<SimtStep_Dialect, "mask_pop"> {
+  let summary = "Pop the currently active mask";
+  let description = [{
+    Restores the previous mask. Placeholder awaiting structured dialect and
+    interpreter lowering.
+  }];
+
+  let assemblyFormat = "attr-dict";
+}
+
+def SimtStep_MaskMergeOp : Op<SimtStep_Dialect, "mask_merge"> {
+  let summary = "Merge an incoming mask with the current active mask";
+  let description = [{
+    Combines control-flow masks. Returns the merged mask for downstream use.
+  }];
+
+  let arguments = (ins I64:$incoming);
+  let results = (outs I64:$merged);
+
+  let assemblyFormat = "$incoming attr-dict";
+}
+
 def SimtStep_BarrierOp : Op<SimtStep_Dialect, "barrier"> {
   let summary = "Synchronize lanes at a given scope";
   let description = [{
@@ -101,6 +163,7 @@ def SimtStep_BarrierOp : Op<SimtStep_Dialect, "barrier"> {
   }];
 
   let assemblyFormat = "attr-dict";
+  let hasVerifier = 1;
 }
 
 def SimtStep_FenceOp : Op<SimtStep_Dialect, "fence"> {
@@ -134,6 +197,40 @@ def SimtStep_ActiveMaskOp : Op<SimtStep_Dialect, "active_mask"> {
   let results = (outs I64:$mask);
 
   let assemblyFormat = "attr-dict";
+}
+
+def SimtStep_MemLoadOp : Op<SimtStep_Dialect, "mem_load"> {
+  let summary = "Load a value from memory";
+  let description = [{
+    Placeholder memory load op. Takes an address operand and yields a value.
+    Actual typing rules will be refined once the lowering pipeline is defined.
+  }];
+
+  let arguments = (ins AnyType:$address);
+  let results = (outs AnyType:$value);
+}
+
+def SimtStep_MemStoreOp : Op<SimtStep_Dialect, "mem_store"> {
+  let summary = "Store a value to memory";
+  let description = [{
+    Placeholder memory store op writing the supplied value to the given address.
+  }];
+
+  let arguments = (ins AnyType:$value, AnyType:$address);
+}
+
+def SimtStep_CustomOp : Op<SimtStep_Dialect, "custom"> {
+  let summary = "Extension hook for plugin-defined instructions";
+  let description = [{
+    Represents a plugin-provided instruction. Carries an `instr` string attribute
+    naming the instruction plus an optional `params` dictionary for structured
+    metadata.
+  }];
+
+  let arguments = (ins Variadic<AnyType>:$operands);
+  let results = (outs Variadic<AnyType>:$outputs);
+
+  let hasVerifier = 1;
 }
 
 #endif // SIMT_STEP_DIALECT_TD

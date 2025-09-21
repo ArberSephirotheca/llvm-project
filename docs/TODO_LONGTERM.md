@@ -1,11 +1,11 @@
 # SIMT-Step Extended Roadmap
 
 ## Dialect Foundations
-- [ ] Flesh out TableGen definitions for all core SIMT ops (mask modifiers, synchronizations, collectives, memory ops, state queries, `simt.custom`).
-- [ ] Implement custom attributes/types (ScopeAttr, MemSemAttr, MemorySpaceAttr, mask type) in C++.
-- [ ] Add trait classes tying MLIR traits to registry metadata, expose helpers and verification hooks.
-- [ ] Write per-op verifiers (operand/result checks, trait invariants) and diagnostic messages.
-- [ ] Create dialect documentation (tblgen docs + markdown reference) and integrate with MLIR doc build.
+- [x] Flesh out TableGen definitions for core SIMT ops (mask modifiers, synchronizations, collectives, memory ops, state queries, `simt.custom`).
+- [x] Implement custom attributes/types (scope, memory semantics, memory space enums, mask type) in C++.
+- [x] Add trait classes tying MLIR traits to registry metadata, expose helpers and verification hooks.
+- [x] Write per-op/type verifiers (barrier/custom ops, mask type) and diagnostic messages.
+- [x] Create dialect documentation (TableGen + `docs/SimtStepDialect.md`).
 
 ## Structured SIMT Dialect
 - [ ] Design a `simt_struct` dialect modeling block-based execution (labels, merges, mask operands, terminators).

@@ -7,6 +7,8 @@
 #include <mlir/IR/Operation.h>
 #include <mlir/IR/Region.h>
 
+#include "simt-step/Dialect/SimtStep/Traits.h"
+
 namespace simt::dialect {
 
 /// Register the SIMT-Step dialect with the given MLIR context.
@@ -18,6 +20,10 @@ void registerSimtStepDialect(::mlir::DialectRegistry &registry);
 #include "SimtStepDialect.h.inc"
 
 #include "SimtStepEnums.h.inc"
+
+#define GET_TYPEDEF_CLASSES
+#include "SimtStepTypes.h.inc"
+#undef GET_TYPEDEF_CLASSES
 
 #define GET_OP_CLASSES
 #include "SimtStepOps.h.inc"

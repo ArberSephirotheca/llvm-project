@@ -5,3 +5,32 @@
 
 #define GET_OP_CLASSES
 #include "SimtStepOps.cpp.inc"
+
+namespace simt::dialect {
+
+mlir::LogicalResult BarrierOp::verify() {
+    auto *op = getOperation();
+    if (auto attr = op->getAttr("scope")) {
+        if (!mlir::isa<mlir::IntegerAttr>(attr))
+            return emitOpError("expected 'scope' attribute to be an integer enum");
+    }
+    if (auto attr = op->getAttr("memsem")) {
+        if (!mlir::isa<mlir::IntegerAttr>(attr))
+            return emitOpError("expected 'memsem' attribute to be an integer enum");
+    }
+    return mlir::success();
+}
+
+mlir::LogicalResult CustomOp::verify() {
+    auto *op = getOperation();
+    auto instr = op->getAttrOfType<mlir::StringAttr>("instr");
+    if (!instr || instr.getValue().empty())
+        return emitOpError("requires non-empty 'instr' string attribute");
+    if (auto params = op->getAttr("params")) {
+        if (!mlir::isa<mlir::DictionaryAttr>(params))
+            return emitOpError("'params' must be a dictionary attribute when present");
+    }
+    return mlir::success();
+}
+
+} // namespace simt::dialect
