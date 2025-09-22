@@ -1,4 +1,5 @@
 #include "simt-step/Dialect/SimtStep/SimtStepDialect.h"
+#include "simt-step/Dialect/SimtStructured/StructuredDialect.h"
 #include "simt-step/frontends/CUDA.h"
 #include "simt-step/frontends/HLSL.h"
 #include "simt-step/plugins/Registry.h"
@@ -28,9 +29,11 @@ int main(int argc, char **argv) {
 
     mlir::DialectRegistry dialectRegistry;
     simt::dialect::registerSimtStepDialect(dialectRegistry);
+    simt::structured::registerSimtStructuredDialect(dialectRegistry);
 
     mlir::MLIRContext context(dialectRegistry);
-    context.loadDialect<simt::dialect::SimtStepDialect>();
+    context.loadDialect<simt::dialect::SimtStepDialect,
+                        simt::structured::SimtStructDialect>();
     plugins::Registry registry;
 
     plugins::examples::registerReduceAdd(registry, Model);

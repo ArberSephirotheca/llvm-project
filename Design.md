@@ -1,7 +1,7 @@
 # SIMT-Step Semantics Framework (C++20 + MLIR)
 
 ## Purpose
-A **unified, language-agnostic framework** to represent and execute GPU SIMT semantics in modern C++ using MLIR + LLVM libraries. See `docs/DIALECT_DESIGN.md` for the design sketch and `docs/SimtStepDialect.md` for the evolving dialect reference.
+A **unified, language-agnostic framework** to represent and execute GPU SIMT semantics in modern C++ using MLIR + LLVM libraries. See `docs/DIALECT_DESIGN.md` for the design sketch, `docs/SimtStepDialect.md` for the `simt_step` surface, and `docs/SimtStructuredDialect.md` for the structured control-flow layer.
 
 - **Inputs (frontends):** HLSL and CUDA, extensible via plugins.  
 - **Core:** MLIR `simt_step` dialect + generic `simt.custom` op.  

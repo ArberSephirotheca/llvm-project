@@ -8,10 +8,12 @@
 - [x] Create dialect documentation (TableGen + `docs/SimtStepDialect.md`).
 
 ## Structured SIMT Dialect
-- [ ] Design a `simt_struct` dialect modeling block-based execution (labels, merges, mask operands, terminators).
-- [ ] Implement TableGen + C++ scaffolding for block ops, branch ops, merge metadata, loop constructs.
+- [x] Design a `simt_struct` dialect modeling block-based execution (labels, merges, mask operands, terminators).
+- [x] Implement TableGen + C++ scaffolding for block ops, branch ops, merge metadata, loop constructs.
 - [ ] Ensure compatibility with MLIR’s ControlFlow / BranchOpInterface for analyses.
-- [ ] Document how this dialect corresponds to SPIR-V style structured CFG.
+- [x] Document how this dialect corresponds to SPIR-V style structured CFG and references the MiniHLSL interpreter.
+- [x] Expose reconvergence policy (post-dominator, explicit merge, none, etc.) as attributes and pass options.
+- [x] Provide mask/mask-stack ops to align with the HLSL interpreter model.
 
 ## Lowering Passes
 - [ ] Implement `SimtToStructuredPass` converting `simt_step` regions into `simt_struct` blocks (identify merges, maintain mask info, map to block attributes).

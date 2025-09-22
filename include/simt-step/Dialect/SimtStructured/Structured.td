@@ -1,0 +1,115 @@
+//===- Structured.td - Structured SIMT Dialect ------------*- tablegen -*-===//
+//
+// Explicit control-flow dialect modeling SIMT dynamic blocks and reconvergence.
+//
+//===----------------------------------------------------------------------===//
+
+#ifndef SIMT_STRUCTURED_DIALECT_TD
+#define SIMT_STRUCTURED_DIALECT_TD
+
+include "mlir/IR/DialectBase.td"
+include "mlir/IR/OpBase.td"
+include "mlir/IR/EnumAttr.td"
+include "mlir/IR/SymbolInterfaces.td"
+include "mlir/IR/RegionKindInterface.td"
+
+// Dialect -------------------------------------------------------------------
+
+def SimtStruct_Dialect : Dialect {
+  let name = "simt_struct";
+  let cppNamespace = "simt::structured";
+  let summary = "Structured SIMT control-flow dialect";
+  let description = [{
+    Represents SIMT control flow using explicit block entities, mask management,
+    and reconvergence hints. Lowering target for the higher-level simt_step
+    dialect prior to interpretation or backend emission.
+  }];
+}
+
+// Reconvergence policy enum -------------------------------------------------
+
+def SimtStruct_ReconvergencePolicy : I32EnumAttr<"ReconvergencePolicy",
+    "SIMT reconvergence policy",
+    [I32EnumAttrCase<"PostDominator", 0>,
+     I32EnumAttrCase<"Explicit", 1>,
+     I32EnumAttrCase<"None", 2>]> {
+  let cppNamespace = "::simt::structured";
+}
+def SimtStruct_ReconvergencePolicyAttr
+    : EnumAttr<SimtStruct_Dialect, SimtStruct_ReconvergencePolicy,
+               "reconvergence">;
+
+// Block op ------------------------------------------------------------------
+
+def SimtStruct_BlockOp : Op<SimtStruct_Dialect, "block",
+    [IsolatedFromAbove]> {
+  let summary = "Structured SIMT block";
+  let description = [{
+    Represents a basic block within the structured SIMT region. Each block has
+    a symbol name for branches to reference and holds exactly one region with a
+    single block of operations terminated by a structured terminator.
+  }];
+
+  let arguments = (ins SymbolNameAttr:$sym_name,
+                       OptionalAttr<FlatSymbolRefAttr>:$merge_target,
+                       OptionalAttr<FlatSymbolRefAttr>:$continue_target,
+                       OptionalAttr<SimtStruct_ReconvergencePolicyAttr>:$policy);
+  let regions = (region SizedRegion<1>:$body);
+
+}
+
+// Terminators ---------------------------------------------------------------
+
+def SimtStruct_BranchOp : Op<SimtStruct_Dialect, "branch",
+    [Terminator, HasParent<"BlockOp">]> {
+  let summary = "Unconditional branch with mask";
+  let arguments = (ins I64:$mask,
+                       FlatSymbolRefAttr:$dest);
+}
+
+def SimtStruct_CondBranchOp : Op<SimtStruct_Dialect, "cond_branch",
+    [Terminator, HasParent<"BlockOp">]> {
+  let summary = "Conditional branch with explicit masks";
+  let arguments = (ins I1:$condition,
+                       I64:$true_mask,
+                       FlatSymbolRefAttr:$true_dest,
+                       I64:$false_mask,
+                       FlatSymbolRefAttr:$false_dest,
+                       OptionalAttr<FlatSymbolRefAttr>:$merge_target,
+                       OptionalAttr<SimtStruct_ReconvergencePolicyAttr>:$policy);
+
+  let hasVerifier = 1;
+
+}
+
+def SimtStruct_ReturnOp : Op<SimtStruct_Dialect, "return",
+    [Terminator, HasParent<"BlockOp">]> {
+  let summary = "Return from structured SIMT region";
+}
+
+// Mask ops ------------------------------------------------------------------
+
+def SimtStruct_MaskPushOp : Op<SimtStruct_Dialect, "mask_push",
+    [HasParent<"BlockOp">]> {
+  let summary = "Push a mask and continuation target";
+  let arguments = (ins I64:$mask,
+                       OptionalAttr<FlatSymbolRefAttr>:$merge_target,
+                       OptionalAttr<FlatSymbolRefAttr>:$continue_target);
+}
+
+def SimtStruct_MaskPopOp : Op<SimtStruct_Dialect, "mask_pop",
+    [HasParent<"BlockOp">]> {
+  let summary = "Pop the next mask from the merge stack";
+  let results = (outs I64:$mask);
+}
+
+def SimtStruct_MaskMergeOp : Op<SimtStruct_Dialect, "mask_merge",
+    [HasParent<"BlockOp">]> {
+  let summary = "Merge an incoming mask with the active mask";
+  let arguments = (ins I64:$incoming);
+  let results = (outs I64:$merged);
+
+  let hasVerifier = 1;
+}
+
+#endif // SIMT_STRUCTURED_DIALECT_TD
