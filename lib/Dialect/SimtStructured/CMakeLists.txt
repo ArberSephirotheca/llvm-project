@@ -43,6 +43,7 @@ target_include_directories(simt-step
 target_link_libraries(simt-step
     PRIVATE
         MLIRIR
+        MLIRControlFlowInterfaces
 )
 
 add_dependencies(simt-step SimtStructuredDialectIncGen)

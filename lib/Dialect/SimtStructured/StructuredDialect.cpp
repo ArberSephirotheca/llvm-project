@@ -1,3 +1,5 @@
+#include <mlir/Interfaces/ControlFlowInterfaces.h>
+
 #include "simt-step/Dialect/SimtStructured/StructuredDialect.h"
 
 #include <mlir/IR/DialectImplementation.h>

@@ -14,29 +14,33 @@ in the MiniHLSL interpreter and supports configurable reconvergence policies.
 ## Operations
 
 ### `simt_struct.block`
-Represents a named SIMT block:
 ```
-simt_struct.block @label { ... }
+simt_struct.block %label {
+  ...
+}
 ```
-Attributes:
+Represents a structured SIMT block. Attributes:
 - `merge_target` (optional) – explicit reconvergence block.
 - `continue_target` (optional) – loop continue block.
 - `reconvergence` (optional) – overrides block-level policy.
-The block owns a single region whose terminator must be one of the structured
+The block owns a region whose terminator must be one of the structured
 terminators below.
 
-### Terminators
-- `simt_struct.branch %mask to @dest` – unconditional transfer with mask.
-- `simt_struct.cond_branch %cond ? %tmask -> @t : %fmask -> @f` – conditional
-  branch with explicit masks and optional `merge_target`/`reconvergence` attrs.
+### Structured terminators
+- `simt_struct.branch ^dest (%mask : i64)` – unconditional transfer with mask.
+- `simt_struct.cond_branch %cond, ^t (%tmask : i64), ^f (%fmask : i64)` –
+  conditional branch with explicit masks and optional `merge_target`/
+  `reconvergence` attributes.
 - `simt_struct.return` – exits the structured region.
+These terminators implement `BranchOpInterface` so generic MLIR control-flow
+analyses can operate on them.
 
 ### Mask stack helpers
-- `simt_struct.mask_push %mask` – pushes a mask (and optional merge/continue
-  targets) onto the merge stack.
+- `simt_struct.mask_push %mask {merge_target = @L}` – pushes a mask (and optional
+  merge/continue targets) onto the merge stack.
 - `simt_struct.mask_pop -> %mask` – pops the next mask from the stack.
 - `simt_struct.mask_merge %incoming -> %merged` – merges the incoming mask with
-  the active mask according to interpreter policy.
+  the active mask; both operands must share the same type.
 
 These operations correspond to the merge-stack management performed by the HLSL
 interpreter.

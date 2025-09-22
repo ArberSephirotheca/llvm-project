@@ -12,6 +12,7 @@ include "mlir/IR/OpBase.td"
 include "mlir/IR/EnumAttr.td"
 include "mlir/IR/SymbolInterfaces.td"
 include "mlir/IR/RegionKindInterface.td"
+include "mlir/Interfaces/ControlFlowInterfaces.td"
 
 // Dialect -------------------------------------------------------------------
 
@@ -42,7 +43,7 @@ def SimtStruct_ReconvergencePolicyAttr
 // Block op ------------------------------------------------------------------
 
 def SimtStruct_BlockOp : Op<SimtStruct_Dialect, "block",
-    [IsolatedFromAbove]> {
+    [IsolatedFromAbove, RegionBranchOpInterface]> {
   let summary = "Structured SIMT block";
   let description = [{
     Represents a basic block within the structured SIMT region. Each block has
@@ -56,30 +57,51 @@ def SimtStruct_BlockOp : Op<SimtStruct_Dialect, "block",
                        OptionalAttr<SimtStruct_ReconvergencePolicyAttr>:$policy);
   let regions = (region SizedRegion<1>:$body);
 
+  let extraClassDeclaration = [{
+    void getEntrySuccessorRegions(::llvm::ArrayRef<::mlir::Attribute> operands,
+                                  ::llvm::SmallVectorImpl<::mlir::RegionSuccessor> &regions);
+    void getSuccessorRegions(::mlir::RegionBranchPoint point,
+                             ::llvm::SmallVectorImpl<::mlir::RegionSuccessor> &regions);
+    bool areTypesCompatible(::mlir::Type lhs, ::mlir::Type rhs);
+  }];
+
 }
 
 // Terminators ---------------------------------------------------------------
 
 def SimtStruct_BranchOp : Op<SimtStruct_Dialect, "branch",
-    [Terminator, HasParent<"BlockOp">]> {
+    [Terminator, HasParent<"BlockOp">, BranchOpInterface]> {
   let summary = "Unconditional branch with mask";
-  let arguments = (ins I64:$mask,
-                       FlatSymbolRefAttr:$dest);
+  let arguments = (ins I64:$mask);
+  let successors = (successor AnySuccessor:$dest);
+
+  let extraClassDeclaration = [{
+    ::mlir::SuccessorOperands getSuccessorOperands(unsigned index);
+    ::std::optional<::mlir::BlockArgument> getSuccessorBlockArgument(unsigned operandIndex);
+    ::mlir::Block *getSuccessorForOperands(::llvm::ArrayRef<::mlir::Attribute> operands);
+    bool areTypesCompatible(::mlir::Type lhs, ::mlir::Type rhs);
+  }];
 }
 
 def SimtStruct_CondBranchOp : Op<SimtStruct_Dialect, "cond_branch",
-    [Terminator, HasParent<"BlockOp">]> {
+    [Terminator, HasParent<"BlockOp">, BranchOpInterface]> {
   let summary = "Conditional branch with explicit masks";
   let arguments = (ins I1:$condition,
                        I64:$true_mask,
-                       FlatSymbolRefAttr:$true_dest,
                        I64:$false_mask,
-                       FlatSymbolRefAttr:$false_dest,
                        OptionalAttr<FlatSymbolRefAttr>:$merge_target,
                        OptionalAttr<SimtStruct_ReconvergencePolicyAttr>:$policy);
+  let successors = (successor AnySuccessor:$trueDest,
+                    AnySuccessor:$falseDest);
 
   let hasVerifier = 1;
 
+  let extraClassDeclaration = [{
+    ::mlir::SuccessorOperands getSuccessorOperands(unsigned index);
+    ::std::optional<::mlir::BlockArgument> getSuccessorBlockArgument(unsigned operandIndex);
+    ::mlir::Block *getSuccessorForOperands(::llvm::ArrayRef<::mlir::Attribute> operands);
+    bool areTypesCompatible(::mlir::Type lhs, ::mlir::Type rhs);
+  }];
 }
 
 def SimtStruct_ReturnOp : Op<SimtStruct_Dialect, "return",
@@ -94,7 +116,8 @@ def SimtStruct_MaskPushOp : Op<SimtStruct_Dialect, "mask_push",
   let summary = "Push a mask and continuation target";
   let arguments = (ins I64:$mask,
                        OptionalAttr<FlatSymbolRefAttr>:$merge_target,
-                       OptionalAttr<FlatSymbolRefAttr>:$continue_target);
+    OptionalAttr<FlatSymbolRefAttr>:$continue_target,
+    OptionalAttr<I64Attr>:$loop_mask);
 }
 
 def SimtStruct_MaskPopOp : Op<SimtStruct_Dialect, "mask_pop",

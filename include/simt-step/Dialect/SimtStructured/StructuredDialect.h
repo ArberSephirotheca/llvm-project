@@ -8,6 +8,7 @@
 #include <mlir/IR/Region.h>
 #include <mlir/Bytecode/BytecodeOpInterface.h>
 #include <mlir/IR/Builders.h>
+#include <mlir/Interfaces/ControlFlowInterfaces.h>
 
 namespace simt::structured {
 
