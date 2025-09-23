@@ -72,6 +72,9 @@
 5. **Lowering Pipeline**
    - Implement lowering from structured control flow to explicit mask/dynamic block form for interpreter.
    - Provide LLVM dialect lowering that maps traits to intrinsics/runtime calls.
+   - Frontend lowering now produces `simt_step.if`/`simt_step.yield` for HLSL
+     conditionals; future work will extend this to loops and switch to keep
+     SIMT semantics explicit for experimentation.
 6. **Interpreter Integration**
    - Update interpreter dispatch to query traits/interfaces instead of hard-coded names.
    - Handle dynamic block construction per MiniHLSL strategy.

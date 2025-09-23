@@ -13,6 +13,9 @@ include "mlir/IR/DialectBase.td"
 include "mlir/IR/OpBase.td"
 include "mlir/IR/EnumAttr.td"
 include "mlir/IR/AttrTypeBase.td"
+include "mlir/IR/RegionKindInterface.td"
+include "mlir/Interfaces/SideEffectInterfaces.td"
+include "mlir/Interfaces/ControlFlowInterfaces.td"
 
 // Dialect definition -------------------------------------------------------
 def SimtStep_Dialect : Dialect {
@@ -154,6 +157,85 @@ def SimtStep_MaskMergeOp : Op<SimtStep_Dialect, "mask_merge"> {
   let results = (outs I64:$merged);
 
   let assemblyFormat = "$incoming attr-dict";
+}
+
+// Control flow --------------------------------------------------------------
+
+def SimtStep_YieldOp : Op<SimtStep_Dialect, "yield",
+    [Terminator, ParentOneOf<["IfOp", "LoopOp"]>]> {
+  let summary = "Yield from a structured SIMT region";
+  let arguments = (ins Variadic<AnyType>:$results);
+  let builders = [OpBuilder<(ins), [{ /* nothing to do */ }]>];
+  let assemblyFormat = [{ attr-dict ($results^ `:` type($results))? }];
+}
+
+def SimtStep_IfOp : Op<SimtStep_Dialect, "if",
+    [SingleBlockImplicitTerminator<"YieldOp">,
+     NoRegionArguments]> {
+  let summary = "SIMT if-then-else";
+  let description = [{
+    Control flow construct with optional else region producing SSA results.
+    Each region terminates with `simt_step.yield` to forward per-lane values.
+  }];
+
+  let arguments = (ins I1:$condition);
+  let results = (outs Variadic<AnyType>:$results);
+  let regions = (region SizedRegion<1>:$thenRegion,
+                 MaxSizedRegion<1>:$elseRegion);
+
+  let skipDefaultBuilders = 1;
+  let builders = [
+    OpBuilder<(ins "mlir::TypeRange":$resultTypes, "mlir::Value":$condition,
+                    "bool":$withElseRegion)>,
+    OpBuilder<(ins "mlir::Value":$condition, "bool":$withElseRegion)>
+  ];
+
+  let hasCustomAssemblyFormat = 1;
+  let hasVerifier = 1;
+}
+
+def SimtStep_ConditionOp : Op<SimtStep_Dialect, "condition",
+    [HasParent<"LoopOp">, Terminator]> {
+  let summary = "Loop continuation condition";
+  let description = [{
+    Terminator of the loop pre-header region. The first operand specifies
+    whether execution proceeds into the loop body. The remaining operands are
+    forwarded either to the body region or to the results of the loop.
+  }];
+
+  let arguments = (ins I1:$condition, Variadic<AnyType>:$forwarded);
+
+  let assemblyFormat =
+      [{ `(` $condition `)` attr-dict ($forwarded^ `:` type($forwarded))? }];
+}
+
+def SimtStep_LoopOp : Op<SimtStep_Dialect, "loop",
+    [SingleBlock, NoRegionArguments]> {
+  let summary = "SIMT structured loop";
+  let description = [{
+    Structured loop op with separate setup and body regions. The "prepare"
+    region evaluates the continuation condition and can forward values to the
+    body or loop results. The body region yields updated loop-carried values
+    back to the prepare region.
+  }];
+
+  let arguments = (ins Variadic<AnyType>:$inits);
+  let results = (outs Variadic<AnyType>:$results);
+  let regions = (region SizedRegion<1>:$prepareRegion,
+                 SizedRegion<1>:$bodyRegion);
+
+}
+
+def SimtStep_BreakOp : Op<SimtStep_Dialect, "break",
+    [Terminator, HasParent<"LoopOp">]> {
+  let summary = "Structured break from simt.loop";
+  let assemblyFormat = "attr-dict";
+}
+
+def SimtStep_ContinueOp : Op<SimtStep_Dialect, "continue",
+    [Terminator, HasParent<"LoopOp">]> {
+  let summary = "Structured continue within simt.loop";
+  let assemblyFormat = "attr-dict";
 }
 
 def SimtStep_BarrierOp : Op<SimtStep_Dialect, "barrier"> {

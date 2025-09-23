@@ -23,6 +23,8 @@ This produces the shared library `libsimt-step` and the command-line tools under
 
 - `simt-run` exercises the registry + interpreter infrastructure, loads the built-in `reduce_add` plugin example, and instantiates stub MLIR modules via the CUDA/HLSL frontend helpers.
 - `simt-convert` reads source text, runs the selected frontend (`--frontend=hlsl|cuda`), and prints the resulting MLIR module.
+- `check-simt-hlsl-import` runs lit-based regression tests for the HLSL
+  importer (requires the LLVM build tree’s `llvm-lit`).
 
 ## Environment
 
@@ -36,3 +38,7 @@ export LD_LIBRARY_PATH=/opt/llvm-hlsl/lib:$LD_LIBRARY_PATH
 ```
 
 These settings mirror `.cargo/config.toml` so both the legacy Rust pieces and the new CMake build can share one dependency layout.
+
+### HLSL builtin headers
+
+`simt-hlsl-import` relies on Clang’s bundled HLSL headers (`hlsl.h`, `hlsl_intrinsics.h`, …). When the tool cannot find an installed resource directory (for example on minimal developer machines), it automatically falls back to the checked-in headers under `llvm-project/clang/lib/Headers`. No manual configuration is required unless you want to override the search path—set `SIMT_CLANG_HEADERS_DIR` at build time or export `SIMT_IMPORT_DEBUG_RESOURCE=1` to print the resolved directory.

@@ -21,8 +21,14 @@
 #include "clang/Frontend/FrontendActions.h"
 #include "clang/Tooling/Tooling.h"
 
+#include <algorithm>
+#include <optional>
+
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/Twine.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/TargetParser/Triple.h"
 #include "llvm/Support/raw_ostream.h"
@@ -36,6 +42,7 @@ struct LoweringContext {
   mlir::Location defaultLoc;
   mlir::Type returnType;
   llvm::DenseMap<const clang::ValueDecl *, mlir::Value> valueMap;
+  llvm::SmallPtrSet<const clang::ValueDecl *, 8> mutatedVars;
   bool emittedTerminator = false;
   std::string &errorMessage;
   bool failed = false;
@@ -94,6 +101,44 @@ static mlir::Type convertType(const clang::QualType &qt, mlir::OpBuilder &builde
   return {};
 }
 
+static std::optional<std::string>
+buildDxilTripleForProfile(llvm::StringRef profile) {
+  llvm::SmallVector<llvm::StringRef, 4> parts;
+  profile.split(parts, '_', /*MaxSplit=*/3, /*KeepEmpty=*/false);
+  if (parts.empty())
+    return std::nullopt;
+
+  std::string stageLower = parts[0].lower();
+  llvm::StringRef environment;
+  if (stageLower == "cs")
+    environment = "compute";
+  else if (stageLower == "ps")
+    environment = "pixel";
+  else if (stageLower == "vs")
+    environment = "vertex";
+  else if (stageLower == "gs")
+    environment = "geometry";
+  else if (stageLower == "ds")
+    environment = "domain";
+  else if (stageLower == "hs")
+    environment = "hull";
+  else if (stageLower == "ms")
+    environment = "mesh";
+  else if (stageLower == "as")
+    environment = "amplification";
+  else if (stageLower == "lib" || stageLower == "library")
+    environment = "library";
+  else
+    return std::nullopt;
+
+  llvm::StringRef major = parts.size() > 1 ? parts[1] : "6";
+  llvm::StringRef minor = parts.size() > 2 ? parts[2] : "0";
+  std::string version = (llvm::Twine(major) + "." + minor).str();
+
+  return (llvm::Twine("dxil-pc-shadermodel") + version + "-" + environment)
+      .str();
+}
+
 static mlir::Location getLocation(const clang::Stmt *stmt,
                                   LoweringContext &ctx) {
   (void)stmt;
@@ -143,6 +188,75 @@ static mlir::Value lowerExpr(const clang::Expr *expr, LoweringContext &ctx) {
       return {};
 
     switch (binOp->getOpcode()) {
+    case clang::BinaryOperatorKind::BO_EQ:
+    case clang::BinaryOperatorKind::BO_NE:
+    case clang::BinaryOperatorKind::BO_LT:
+    case clang::BinaryOperatorKind::BO_LE:
+    case clang::BinaryOperatorKind::BO_GT:
+    case clang::BinaryOperatorKind::BO_GE: {
+      if (mlir::isa<mlir::IntegerType>(lhs.getType()) ||
+          mlir::isa<mlir::IndexType>(lhs.getType())) {
+        mlir::arith::CmpIPredicate predicate;
+        switch (binOp->getOpcode()) {
+        case clang::BinaryOperatorKind::BO_EQ:
+          predicate = mlir::arith::CmpIPredicate::eq;
+          break;
+        case clang::BinaryOperatorKind::BO_NE:
+          predicate = mlir::arith::CmpIPredicate::ne;
+          break;
+        case clang::BinaryOperatorKind::BO_LT:
+          predicate = mlir::arith::CmpIPredicate::slt;
+          break;
+        case clang::BinaryOperatorKind::BO_LE:
+          predicate = mlir::arith::CmpIPredicate::sle;
+          break;
+        case clang::BinaryOperatorKind::BO_GT:
+          predicate = mlir::arith::CmpIPredicate::sgt;
+          break;
+        case clang::BinaryOperatorKind::BO_GE:
+          predicate = mlir::arith::CmpIPredicate::sge;
+          break;
+        default:
+          llvm_unreachable("unsupported integer comparison");
+        }
+        return ctx.builder.create<mlir::arith::CmpIOp>(loc, predicate, lhs, rhs);
+      }
+      if (mlir::isa<mlir::FloatType>(lhs.getType())) {
+        mlir::arith::CmpFPredicate predicate;
+        switch (binOp->getOpcode()) {
+        case clang::BinaryOperatorKind::BO_EQ:
+          predicate = mlir::arith::CmpFPredicate::OEQ;
+          break;
+        case clang::BinaryOperatorKind::BO_NE:
+          predicate = mlir::arith::CmpFPredicate::UNE;
+          break;
+        case clang::BinaryOperatorKind::BO_LT:
+          predicate = mlir::arith::CmpFPredicate::OLT;
+          break;
+        case clang::BinaryOperatorKind::BO_LE:
+          predicate = mlir::arith::CmpFPredicate::OLE;
+          break;
+        case clang::BinaryOperatorKind::BO_GT:
+          predicate = mlir::arith::CmpFPredicate::OGT;
+          break;
+        case clang::BinaryOperatorKind::BO_GE:
+          predicate = mlir::arith::CmpFPredicate::OGE;
+          break;
+        default:
+          llvm_unreachable("unsupported float comparison");
+        }
+        return ctx.builder.create<mlir::arith::CmpFOp>(loc, predicate, lhs, rhs);
+      }
+      return ctx.fail("unsupported comparison operands"), mlir::Value();
+    }
+    case clang::BinaryOperatorKind::BO_LAnd:
+      if (lhs.getType() == ctx.builder.getI1Type())
+        return ctx.builder.create<mlir::arith::AndIOp>(loc, lhs, rhs);
+      return ctx.fail("logical and requires boolean operands"), mlir::Value();
+    case clang::BinaryOperatorKind::BO_LOr:
+      if (lhs.getType() == ctx.builder.getI1Type())
+        return ctx.builder.create<mlir::arith::OrIOp>(loc, lhs, rhs);
+      return ctx.fail("logical or requires boolean operands"), mlir::Value();
     case clang::BinaryOperatorKind::BO_Add:
       if (mlir::isa<mlir::IntegerType>(lhs.getType()))
         return ctx.builder.create<mlir::arith::AddIOp>(loc, lhs, rhs);
@@ -176,6 +290,7 @@ static mlir::Value lowerExpr(const clang::Expr *expr, LoweringContext &ctx) {
         auto it = ctx.valueMap.find(lhsDeclRef->getDecl());
         if (it != ctx.valueMap.end()) {
           it->second = rhs;
+          ctx.mutatedVars.insert(lhsDeclRef->getDecl());
           return rhs;
         }
       }
@@ -222,6 +337,119 @@ static bool lowerStatement(const clang::Stmt *stmt, LoweringContext &ctx) {
 
   if (const auto *compound = llvm::dyn_cast<clang::CompoundStmt>(stmt)) {
     lowerCompoundStmt(compound, ctx);
+    return true;
+  }
+
+  if (const auto *ifStmt = llvm::dyn_cast<clang::IfStmt>(stmt)) {
+    mlir::Value cond = lowerExpr(ifStmt->getCond(), ctx);
+    if (!cond)
+      return false;
+
+    mlir::Location loc = ctx.defaultLoc;
+    bool hasElse = ifStmt->getElse() != nullptr;
+
+    llvm::SmallVector<const clang::ValueDecl *, 8> mergeVars;
+    mergeVars.reserve(ctx.valueMap.size());
+    for (const auto &entry : ctx.valueMap)
+      mergeVars.push_back(entry.first);
+    std::sort(mergeVars.begin(), mergeVars.end());
+
+    llvm::SmallVector<mlir::Type, 8> resultTypes;
+    resultTypes.reserve(mergeVars.size());
+    for (const clang::ValueDecl *var : mergeVars)
+      resultTypes.push_back(ctx.valueMap[var].getType());
+
+    bool needElseRegion = hasElse || !mergeVars.empty();
+    auto ifOp = ctx.builder.create<simt::dialect::IfOp>(
+        loc, mlir::TypeRange(resultTypes), cond, needElseRegion);
+
+    const auto originalMap = ctx.valueMap;
+
+    // Lower then branch.
+    auto &thenRegion = ifOp.getThenRegion();
+    auto thenBuilder = mlir::OpBuilder(&thenRegion.front(),
+                                       thenRegion.front().begin());
+    LoweringContext thenCtx(thenBuilder, loc, ctx.returnType, ctx.errorMessage);
+    thenCtx.valueMap = ctx.valueMap;
+    thenCtx.mutatedVars.clear();
+    if (!lowerStatement(ifStmt->getThen(), thenCtx))
+      return false;
+    if (thenCtx.failed)
+      return false;
+
+    llvm::SmallVector<mlir::Value, 8> thenYieldValues;
+    if (!mergeVars.empty()) {
+      auto thenYield = llvm::cast<simt::dialect::YieldOp>(
+          thenRegion.front().getTerminator());
+      thenYieldValues.reserve(mergeVars.size());
+      for (const clang::ValueDecl *var : mergeVars) {
+        auto it = thenCtx.valueMap.find(var);
+        mlir::Value value = it != thenCtx.valueMap.end()
+                                ? it->second
+                                : originalMap.lookup(var);
+        thenYieldValues.push_back(value);
+      }
+      thenYield.getOperation()->setOperands(thenYieldValues);
+    }
+
+    // Lower else branch or provide fall-through yields.
+    llvm::SmallVector<mlir::Value, 8> elseYieldValues;
+    bool elseTerminates = false;
+    if (needElseRegion) {
+      auto &elseRegion = ifOp.getElseRegion();
+      if (hasElse) {
+        auto elseBuilder =
+            mlir::OpBuilder(&elseRegion.front(), elseRegion.front().begin());
+        LoweringContext elseCtx(elseBuilder, loc, ctx.returnType,
+                                ctx.errorMessage);
+        elseCtx.valueMap = ctx.valueMap;
+        elseCtx.mutatedVars.clear();
+        if (!lowerStatement(ifStmt->getElse(), elseCtx))
+          return false;
+        if (elseCtx.failed)
+          return false;
+        elseTerminates = elseCtx.emittedTerminator;
+
+        if (!mergeVars.empty()) {
+          auto elseYield = llvm::cast<simt::dialect::YieldOp>(
+              elseRegion.front().getTerminator());
+          elseYieldValues.reserve(mergeVars.size());
+          for (const clang::ValueDecl *var : mergeVars) {
+            auto it = elseCtx.valueMap.find(var);
+            mlir::Value value = it != elseCtx.valueMap.end()
+                                    ? it->second
+                                    : originalMap.lookup(var);
+            elseYieldValues.push_back(value);
+          }
+          elseYield.getOperation()->setOperands(elseYieldValues);
+        }
+      } else if (!mergeVars.empty()) {
+        auto elseYield = llvm::cast<simt::dialect::YieldOp>(
+            elseRegion.front().getTerminator());
+        elseYieldValues.reserve(mergeVars.size());
+        for (const clang::ValueDecl *var : mergeVars)
+          elseYieldValues.push_back(originalMap.lookup(var));
+        elseYield.getOperation()->setOperands(elseYieldValues);
+      }
+    }
+
+    // Update the incoming value map with SSA merges.
+    for (auto [index, var] : llvm::enumerate(mergeVars)) {
+      mlir::Value incoming = originalMap.lookup(var);
+      mlir::Value thenVal = thenYieldValues.empty() ? incoming
+                                                    : thenYieldValues[index];
+      mlir::Value elseVal = elseYieldValues.empty() ? incoming
+                                                    : elseYieldValues[index];
+      if (thenVal != incoming || elseVal != incoming)
+        ctx.mutatedVars.insert(var);
+      ctx.valueMap[var] = ifOp.getResult(index);
+    }
+
+    if (hasElse) {
+      if (thenCtx.emittedTerminator && elseTerminates)
+        ctx.emittedTerminator = true;
+    }
+
     return true;
   }
 
@@ -407,7 +635,7 @@ private:
 
 Result<mlir::OwningOpRef<mlir::ModuleOp>>
 translateComputeShader(mlir::MLIRContext &context, llvm::StringRef fileName,
-                       llvm::StringRef source, const TranslationOptions &) {
+                       llvm::StringRef source, const TranslationOptions &options) {
   context.loadDialect<mlir::func::FuncDialect, mlir::arith::ArithDialect,
                       simt::dialect::SimtStepDialect>();
 
@@ -419,6 +647,28 @@ translateComputeShader(mlir::MLIRContext &context, llvm::StringRef fileName,
   FunctionLoweringVisitor visitor(module, builder);
   std::vector<std::string> clangArgs = {
       "-x", "hlsl", "-std=hlsl2021", "-D__HLSL__"};
+
+  if (auto triple = buildDxilTripleForProfile(options.shaderProfile)) {
+    clangArgs.emplace_back("-target");
+    clangArgs.emplace_back(std::move(*triple));
+  } else {
+    return Result<mlir::OwningOpRef<mlir::ModuleOp>>::err(
+        "unsupported shader profile '" + options.shaderProfile + "'");
+  }
+
+  clangArgs.emplace_back("-Xclang");
+  clangArgs.emplace_back("-finclude-default-header");
+  clangArgs.emplace_back("-Wno-hlsl-dxc-compatability");
+
+  for (const std::string &dir : options.extraIncludeDirs) {
+    clangArgs.emplace_back("-isystem");
+    clangArgs.emplace_back(dir);
+  }
+
+  if (!options.resourceDir.empty()) {
+    clangArgs.emplace_back("-resource-dir");
+    clangArgs.emplace_back(options.resourceDir);
+  }
 
   auto action = std::make_unique<TranslationFrontendAction>(visitor);
   if (!clang::tooling::runToolOnCodeWithArgs(std::move(action), source.str(),

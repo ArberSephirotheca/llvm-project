@@ -2,6 +2,7 @@
 
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "llvm/ADT/StringRef.h"
 
@@ -17,7 +18,9 @@ class ModuleOp;
 namespace simt_hlsl_import {
 
 struct TranslationOptions {
-  std::string shaderProfile = "cs";
+  std::string shaderProfile = "cs_6_7";
+  std::string resourceDir;
+  std::vector<std::string> extraIncludeDirs;
 };
 
 Result<mlir::OwningOpRef<mlir::ModuleOp>>

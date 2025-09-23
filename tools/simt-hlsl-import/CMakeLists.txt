@@ -33,4 +33,8 @@ target_include_directories(simt-hlsl-import
         ${MLIR_INCLUDE_DIRS}
 )
 
+target_compile_definitions(simt-hlsl-import
+    PRIVATE
+        SIMT_CLANG_HEADERS_DIR="${CMAKE_SOURCE_DIR}/llvm-project/clang/lib/Headers")
+
 add_subdirectory(test)

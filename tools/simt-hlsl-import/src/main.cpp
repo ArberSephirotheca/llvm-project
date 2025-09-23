@@ -1,5 +1,8 @@
 #include "simt-hlsl-import/Lowering.h"
 
+#include "clang/Driver/Driver.h"
+#include "clang/Frontend/CompilerInvocation.h"
+
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -8,6 +11,12 @@
 
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/InitLLVM.h"
+#include "llvm/Support/FileSystem.h"
+#include "llvm/Support/Path.h"
+#include "llvm/Support/Process.h"
+#include "llvm/Support/Program.h"
+#include <cstdlib>
+#include <string_view>
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/raw_ostream.h"
 
@@ -40,6 +49,37 @@ int main(int argc, char **argv) {
 
   TranslationOptions options;
   options.shaderProfile = shaderProfile;
+  if (auto clangPath = llvm::sys::findProgramByName("clang"))
+    options.resourceDir = clang::driver::Driver::GetResourcesPath(*clangPath);
+  else
+    options.resourceDir = clang::CompilerInvocation::GetResourcesPath(
+        argv[0], reinterpret_cast<void *>(&main));
+
+  auto hasHLSLBuiltins = [](llvm::StringRef root) {
+    if (root.empty())
+      return false;
+    llvm::SmallString<256> candidate(root);
+    llvm::sys::path::append(candidate, "include", "hlsl.h");
+    if (llvm::sys::fs::exists(candidate))
+      return true;
+    candidate.assign(root);
+    llvm::sys::path::append(candidate, "hlsl.h");
+    return llvm::sys::fs::exists(candidate);
+  };
+
+#ifdef SIMT_CLANG_HEADERS_DIR
+  if (!hasHLSLBuiltins(options.resourceDir)) {
+    llvm::SmallString<256> fallback(SIMT_CLANG_HEADERS_DIR);
+    llvm::sys::path::append(fallback, "hlsl.h");
+    if (llvm::sys::fs::exists(fallback))
+      options.extraIncludeDirs.emplace_back(SIMT_CLANG_HEADERS_DIR);
+  }
+#endif
+
+  if (const char *env = std::getenv("SIMT_IMPORT_DEBUG_RESOURCE"))
+    if (std::string_view(env) == "1")
+      llvm::errs() << "[simt-hlsl-import] resource-dir="
+                   << options.resourceDir << "\n";
 
   auto result = translateComputeShader(context, inputPath, source, options);
   if (!result) {

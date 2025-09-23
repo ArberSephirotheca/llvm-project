@@ -8,6 +8,8 @@
 #include <mlir/IR/OpDefinition.h>
 #include <mlir/IR/Operation.h>
 #include <mlir/IR/Region.h>
+#include <mlir/Interfaces/ControlFlowInterfaces.h>
+#include <mlir/Interfaces/SideEffectInterfaces.h>
 
 #include "simt-step/Dialect/SimtStep/Traits.h"
 
