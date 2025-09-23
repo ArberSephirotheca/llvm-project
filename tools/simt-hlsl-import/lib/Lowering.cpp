@@ -37,6 +37,11 @@ namespace simt_hlsl_import {
 
 namespace {
 
+
+struct LoopFrame {
+  simt::dialect::LoopOp loop;
+  llvm::SmallVector<const clang::ValueDecl *, 8> carriedVars;
+};
 struct LoweringContext {
   mlir::OpBuilder &builder;
   mlir::Location defaultLoc;
@@ -46,6 +51,7 @@ struct LoweringContext {
   bool emittedTerminator = false;
   std::string &errorMessage;
   bool failed = false;
+  llvm::SmallVector<LoopFrame, 4> loopStack;
 
   LoweringContext(mlir::OpBuilder &builder, mlir::Location loc,
                   mlir::Type retType, std::string &error)
@@ -359,6 +365,42 @@ static bool lowerStatement(const clang::Stmt *stmt, LoweringContext &ctx) {
   if (const auto *forStmt = llvm::dyn_cast<clang::ForStmt>(stmt))
     return lowerForStmt(forStmt, ctx);
 
+  if (llvm::isa<clang::BreakStmt>(stmt)) {
+    if (ctx.loopStack.empty())
+      return true;
+    auto &frame = ctx.loopStack.back();
+    llvm::SmallVector<mlir::Value, 8> operands;
+    operands.reserve(frame.carriedVars.size());
+    for (auto [index, vd] : llvm::enumerate(frame.carriedVars)) {
+      mlir::Value value = ctx.valueMap.lookup(vd);
+      if (!value)
+        value = frame.loop.getResult(index);
+      operands.push_back(value);
+    }
+    ctx.builder.create<simt::dialect::BreakOp>(ctx.defaultLoc, operands);
+    ctx.mutatedVars.insert(frame.carriedVars.begin(), frame.carriedVars.end());
+    ctx.emittedTerminator = true;
+    return true;
+  }
+
+  if (llvm::isa<clang::ContinueStmt>(stmt)) {
+    if (ctx.loopStack.empty())
+      return true;
+    auto &frame = ctx.loopStack.back();
+    llvm::SmallVector<mlir::Value, 8> operands;
+    operands.reserve(frame.carriedVars.size());
+    for (auto [index, vd] : llvm::enumerate(frame.carriedVars)) {
+      mlir::Value value = ctx.valueMap.lookup(vd);
+      if (!value)
+        value = frame.loop.getResult(index);
+      operands.push_back(value);
+    }
+    ctx.builder.create<simt::dialect::ContinueOp>(ctx.defaultLoc, operands);
+    ctx.mutatedVars.insert(frame.carriedVars.begin(), frame.carriedVars.end());
+    ctx.emittedTerminator = true;
+    return true;
+  }
+
   if (const auto *ifStmt = llvm::dyn_cast<clang::IfStmt>(stmt)) {
     mlir::Value cond = lowerExpr(ifStmt->getCond(), ctx);
     if (!cond)
@@ -378,6 +420,7 @@ static bool lowerStatement(const clang::Stmt *stmt, LoweringContext &ctx) {
       outCtx = &*ctxStorage;
       outCtx->valueMap = ctx.valueMap;
       outCtx->mutatedVars.clear();
+      outCtx->loopStack = ctx.loopStack;
       if (body && !lowerStatement(body, *outCtx))
         return false;
       return !outCtx->failed;
@@ -563,6 +606,7 @@ static bool lowerForStmt(const clang::ForStmt *forStmt, LoweringContext &ctx) {
                                 ctx.errorMessage);
     analysisCtx.valueMap = ctx.valueMap;
     analysisCtx.mutatedVars.clear();
+    analysisCtx.loopStack = ctx.loopStack;
 
     if (const clang::Stmt *body = forStmt->getBody()) {
       if (!lowerStatement(body, analysisCtx) || analysisCtx.failed)
@@ -604,6 +648,9 @@ static bool lowerForStmt(const clang::ForStmt *forStmt, LoweringContext &ctx) {
 
   auto loopOp = ctx.builder.create<simt::dialect::LoopOp>(loc, resultTypes,
                                                           initValues);
+  LoopFrame frame{loopOp, {}};
+  frame.carriedVars.append(mutatedVars.begin(), mutatedVars.end());
+  ctx.loopStack.push_back(frame);
 
   auto &prepareRegion = loopOp.getPrepareRegion();
   if (prepareRegion.empty())
@@ -629,6 +676,7 @@ static bool lowerForStmt(const clang::ForStmt *forStmt, LoweringContext &ctx) {
     prepBuilder.setInsertionPointToStart(&prepareBlock);
     LoweringContext prepCtx(prepBuilder, loc, ctx.returnType, ctx.errorMessage);
     prepCtx.valueMap = ctx.valueMap;
+    prepCtx.loopStack = ctx.loopStack;
     for (auto [index, vd] : llvm::enumerate(mutatedVars))
       prepCtx.valueMap[vd] = prepareBlock.getArgument(index);
 
@@ -655,6 +703,7 @@ static bool lowerForStmt(const clang::ForStmt *forStmt, LoweringContext &ctx) {
     bodyBuilder.setInsertionPointToStart(&bodyBlock);
     LoweringContext bodyCtx(bodyBuilder, loc, ctx.returnType, ctx.errorMessage);
     bodyCtx.valueMap = ctx.valueMap;
+    bodyCtx.loopStack = ctx.loopStack;
     for (auto [index, vd] : llvm::enumerate(mutatedVars))
       bodyCtx.valueMap[vd] = bodyBlock.getArgument(index);
 
@@ -692,6 +741,8 @@ static bool lowerForStmt(const clang::ForStmt *forStmt, LoweringContext &ctx) {
     ctx.valueMap[vd] = loopOp.getResult(index);
     ctx.mutatedVars.insert(vd);
   }
+
+  ctx.loopStack.pop_back();
 
   return true;
 }
