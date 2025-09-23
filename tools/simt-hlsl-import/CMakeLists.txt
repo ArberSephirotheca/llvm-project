@@ -2,6 +2,7 @@ find_package(Clang REQUIRED CONFIG)
 
 add_executable(simt-hlsl-import
     src/main.cpp
+    lib/Lowering.cpp
 )
 
 set_target_properties(simt-hlsl-import PROPERTIES OUTPUT_NAME simt-hlsl-import)
@@ -26,6 +27,7 @@ target_link_libraries(simt-hlsl-import
 
 target_include_directories(simt-hlsl-import
     PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
         ${CLANG_INCLUDE_DIRS}
         ${LLVM_INCLUDE_DIRS}
         ${MLIR_INCLUDE_DIRS}
