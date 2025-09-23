@@ -4,16 +4,21 @@ project(SIMTStep LANGUAGES C CXX)
 
 # Allow build to locate LLVM/MLIR from common install prefix if the user
 # hasn't provided explicit cache entries. Matches the Rust config defaults.
-if (NOT LLVM_DIR AND EXISTS "/opt/llvm-20/lib/cmake/llvm")
-    set(LLVM_DIR "/opt/llvm-20/lib/cmake/llvm" CACHE PATH "" FORCE)
-endif()
-if (NOT MLIR_DIR AND EXISTS "/opt/llvm-20/lib/cmake/mlir")
-    set(MLIR_DIR "/opt/llvm-20/lib/cmake/mlir" CACHE PATH "" FORCE)
-endif()
+set(_simt_llvm_prefixes
+    "/opt/llvm-hlsl"
+)
 
-if (EXISTS "/opt/llvm-20/lib/cmake")
-    list(PREPEND CMAKE_PREFIX_PATH "/opt/llvm-20/lib/cmake")
-endif()
+foreach(_prefix IN LISTS _simt_llvm_prefixes)
+    if (NOT LLVM_DIR AND EXISTS "${_prefix}/lib/cmake/llvm")
+        set(LLVM_DIR "${_prefix}/lib/cmake/llvm" CACHE PATH "" FORCE)
+    endif()
+    if (NOT MLIR_DIR AND EXISTS "${_prefix}/lib/cmake/mlir")
+        set(MLIR_DIR "${_prefix}/lib/cmake/mlir" CACHE PATH "" FORCE)
+    endif()
+    if (EXISTS "${_prefix}/lib/cmake")
+        list(APPEND CMAKE_PREFIX_PATH "${_prefix}/lib/cmake")
+    endif()
+endforeach()
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

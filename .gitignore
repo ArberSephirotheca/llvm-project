@@ -1,4 +1,5 @@
 /target
 /build
 /DirectXShaderCompiler/
+/llvm-project/
 /*.pdf

@@ -10,7 +10,7 @@ set(_simt_tablegen_includes
     -I${MLIR_MAIN_INCLUDE_DIR}
     -I${LLVM_MAIN_INCLUDE_DIR}
     -I${PROJECT_SOURCE_DIR}/include
-    -I/opt/llvm-20/include)
+    -I/opt/llvm-hlsl/include)
 
 mlir_tablegen(SimtStepDialect.h.inc -gen-dialect-decls -dialect=simt_step
     ${_simt_tablegen_includes})
