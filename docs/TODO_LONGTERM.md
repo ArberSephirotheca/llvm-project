@@ -2,10 +2,10 @@
 
 ## Current Status (July 2025)
 - [x] Structured control-flow scaffolding for `simt_step` landed (if/loop/yield, break/continue) with TableGen + C++ plumbing.
-- [x] HLSL importer now targets Clang’s frontend directly, propagates DXIL shader model triples, and seeds SSA-aware value merging for conditionals.
+- [x] HLSL importer now targets Clang’s frontend directly, propagates DXIL shader model triples, and seeds SSA-aware value merging for conditionals and `for` loops.
 - [x] Build tooling wires in a fallback search path for the upstream Clang HLSL headers so developer builds remain hermetic.
-- [ ] Loop translation (while/for/do) and mask threading still pending; block argument merging is only implemented for `if` today.
-- [ ] Regression coverage is limited to straight-line + `if`; add lit tests for loops, break/continue, and mask semantics once implemented.
+- [ ] Remaining loop forms (`while`/`do-while`) plus `break` / `continue` lowering still pending; block argument merging exists only for `for` today.
+- [ ] Regression coverage extends to `if` and `for`; add lit tests for other loop shapes, break/continue, and mask semantics as they land.
 
 ## Dialect Foundations
 - [x] Flesh out TableGen definitions for core SIMT ops (mask modifiers, synchronizations, collectives, memory ops, state queries, `simt.custom`).
