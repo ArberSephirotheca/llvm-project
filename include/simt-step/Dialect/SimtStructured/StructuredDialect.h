@@ -6,6 +6,7 @@
 #include <mlir/IR/OpDefinition.h>
 #include <mlir/IR/Operation.h>
 #include <mlir/IR/Region.h>
+#include <mlir/IR/ImplicitLocOpBuilder.h>
 #include <mlir/Bytecode/BytecodeOpInterface.h>
 #include <mlir/IR/Builders.h>
 #include <mlir/Interfaces/ControlFlowInterfaces.h>

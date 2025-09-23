@@ -25,6 +25,7 @@ def SimtStruct_Dialect : Dialect {
     and reconvergence hints. Lowering target for the higher-level simt_step
     dialect prior to interpretation or backend emission.
   }];
+  let usePropertiesForAttributes = 0;
 }
 
 // Reconvergence policy enum -------------------------------------------------

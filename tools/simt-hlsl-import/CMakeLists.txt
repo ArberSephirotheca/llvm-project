@@ -18,11 +18,14 @@ target_link_libraries(simt-hlsl-import
     PRIVATE
         simt-step
         MLIRSupport
+        MLIRFuncDialect
         LLVMCore
+        clangTooling
 )
 
 target_include_directories(simt-hlsl-import
     PRIVATE
         ${CLANG_INCLUDE_DIRS}
         ${LLVM_INCLUDE_DIRS}
+        ${MLIR_INCLUDE_DIRS}
 )

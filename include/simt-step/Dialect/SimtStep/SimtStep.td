@@ -23,6 +23,7 @@ def SimtStep_Dialect : Dialect {
     Dialect capturing warp-level operations, synchronization, and plugin
     extension points for SIMT semantics experiments.
   }];
+  let usePropertiesForAttributes = 0;
 }
 
 // Trait markers -------------------------------------------------------------
