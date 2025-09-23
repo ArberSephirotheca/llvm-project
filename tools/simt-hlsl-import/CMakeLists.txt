@@ -19,6 +19,7 @@ target_link_libraries(simt-hlsl-import
         simt-step
         MLIRSupport
         MLIRFuncDialect
+        MLIRArithDialect
         LLVMCore
         clangTooling
 )
