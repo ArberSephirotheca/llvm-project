@@ -22,6 +22,40 @@ using namespace llvm;
 
 namespace {
 
+struct LoweringContext {
+  mlir::OpBuilder &builder;
+  mlir::Location defaultLoc;
+  bool emittedTerminator = false;
+};
+
+static mlir::Location getLocation(const clang::Stmt *stmt, mlir::OpBuilder &builder) {
+  (void)stmt;
+  return builder.getUnknownLoc();
+}
+
+static bool lowerStatement(const clang::Stmt *stmt, LoweringContext &ctx) {
+  if (const auto *ret = llvm::dyn_cast<clang::ReturnStmt>(stmt)) {
+    if (ret->getRetValue() != nullptr) {
+      llvm::errs() << "simt-hlsl-import: return values are not yet supported\n";
+    }
+    ctx.builder.create<mlir::func::ReturnOp>(getLocation(ret, ctx.builder));
+    ctx.emittedTerminator = true;
+    return true;
+  }
+
+  llvm::errs() << "simt-hlsl-import: ignoring unsupported statement\n";
+  return false;
+}
+
+static void lowerCompoundStmt(const clang::CompoundStmt *compound,
+                              LoweringContext &ctx) {
+  for (const clang::Stmt *child : compound->body()) {
+    if (ctx.emittedTerminator)
+      break;
+    lowerStatement(child, ctx);
+  }
+}
+
 class FunctionLoweringVisitor
     : public clang::RecursiveASTVisitor<FunctionLoweringVisitor> {
 public:
@@ -29,7 +63,7 @@ public:
       : module(module), moduleBuilder(builder) {}
 
   bool VisitFunctionDecl(const clang::FunctionDecl *decl) {
-    if (!decl->hasBody() || !decl->isDefinedOutsideFunctionOrMethod())
+    if (!decl->doesThisDeclarationHaveABody() || !decl->isThisDeclarationADefinition())
       return true;
 
     auto name = decl->getNameAsString();
@@ -43,11 +77,17 @@ public:
 
     mlir::Block *entry = func.addEntryBlock();
     mlir::OpBuilder funcBuilder(entry, entry->begin());
-
     auto mask = funcBuilder.create<simt::dialect::ActiveMaskOp>(loc,
                                                                 funcBuilder.getI64Type());
     (void)mask;
-    funcBuilder.create<mlir::func::ReturnOp>(loc);
+
+    LoweringContext ctx{funcBuilder, loc, false};
+    if (const auto *body = llvm::dyn_cast<clang::CompoundStmt>(decl->getBody()))
+      lowerCompoundStmt(body, ctx);
+
+    if (!ctx.emittedTerminator)
+      funcBuilder.create<mlir::func::ReturnOp>(loc);
+
     return true;
   }
 
