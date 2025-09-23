@@ -166,7 +166,6 @@ def SimtStep_YieldOp : Op<SimtStep_Dialect, "yield",
   let summary = "Yield from a structured SIMT region";
   let arguments = (ins Variadic<AnyType>:$results);
   let builders = [OpBuilder<(ins), [{ /* nothing to do */ }]>];
-  let assemblyFormat = [{ attr-dict ($results^ `:` type($results))? }];
 }
 
 def SimtStep_IfOp : Op<SimtStep_Dialect, "if",
@@ -190,7 +189,6 @@ def SimtStep_IfOp : Op<SimtStep_Dialect, "if",
     OpBuilder<(ins "mlir::Value":$condition, "bool":$withElseRegion)>
   ];
 
-  let hasCustomAssemblyFormat = 1;
   let hasVerifier = 1;
 }
 
@@ -278,8 +276,6 @@ def SimtStep_ActiveMaskOp : Op<SimtStep_Dialect, "active_mask"> {
   }];
 
   let results = (outs I64:$mask);
-
-  let assemblyFormat = "attr-dict";
 }
 
 def SimtStep_MemLoadOp : Op<SimtStep_Dialect, "mem_load"> {

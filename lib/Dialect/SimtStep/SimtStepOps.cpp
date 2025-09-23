@@ -3,6 +3,7 @@
 #include <mlir/IR/OpImplementation.h>
 #include <mlir/IR/PatternMatch.h>
 #include <mlir/IR/Builders.h>
+#include <llvm/Support/raw_ostream.h>
 
 #define GET_OP_CLASSES
 #include "SimtStepOps.cpp.inc"
@@ -63,58 +64,6 @@ mlir::LogicalResult IfOp::verify() {
     if (getNumResults() != 0 && getElseRegion().empty())
         return emitOpError("must have an else block if defining values");
     return mlir::success();
-}
-
-mlir::ParseResult IfOp::parse(mlir::OpAsmParser &parser,
-                              mlir::OperationState &result) {
-    result.regions.reserve(2);
-    auto *thenRegion = result.addRegion();
-    auto *elseRegion = result.addRegion();
-
-    mlir::OpAsmParser::UnresolvedOperand condition;
-    auto &builder = parser.getBuilder();
-    mlir::Type i1Type = builder.getI1Type();
-    if (parser.parseOperand(condition) ||
-        parser.resolveOperand(condition, i1Type, result.operands))
-        return mlir::failure();
-
-    if (parser.parseOptionalArrowTypeList(result.types))
-        return mlir::failure();
-
-    if (parser.parseRegion(*thenRegion, {}, {}))
-        return mlir::failure();
-    IfOp::ensureTerminator(*thenRegion, parser.getBuilder(), result.location);
-
-    if (!parser.parseOptionalKeyword("else")) {
-        if (parser.parseRegion(*elseRegion, {}, {}))
-            return mlir::failure();
-        IfOp::ensureTerminator(*elseRegion, parser.getBuilder(),
-                               result.location);
-    }
-
-    if (parser.parseOptionalAttrDict(result.attributes))
-        return mlir::failure();
-
-    if (!result.types.empty() && elseRegion->empty())
-        return parser.emitError(parser.getNameLoc(),
-                                "expected else block to yield results");
-    return mlir::success();
-}
-
-void IfOp::print(mlir::OpAsmPrinter &printer) {
-    bool printTerminators = !getResults().empty();
-    printer << ' ' << getCondition();
-    if (!getResults().empty())
-        printer << " -> (" << getResultTypes() << ')';
-    printer << ' ';
-    printer.printRegion(getThenRegion(), /*printEntryBlockArgs=*/false,
-                        /*printBlockTerminators=*/printTerminators);
-    if (!getElseRegion().empty()) {
-        printer << " else ";
-        printer.printRegion(getElseRegion(), /*printEntryBlockArgs=*/false,
-                            /*printBlockTerminators=*/printTerminators);
-    }
-    printer.printOptionalAttrDict((*this)->getAttrs());
 }
 
 } // namespace simt::dialect

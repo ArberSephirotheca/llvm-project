@@ -163,6 +163,13 @@ static mlir::Value lowerExpr(const clang::Expr *expr, LoweringContext &ctx) {
     return ctx.builder.create<mlir::arith::ConstantOp>(loc, attr);
   }
 
+  if (const auto *paren = llvm::dyn_cast<clang::ParenExpr>(expr))
+    return lowerExpr(paren->getSubExpr(), ctx);
+
+  if (const auto *implicitCast =
+          llvm::dyn_cast<clang::ImplicitCastExpr>(expr))
+    return lowerExpr(implicitCast->getSubExpr(), ctx);
+
   if (const auto *floatLit = llvm::dyn_cast<clang::FloatingLiteral>(expr)) {
     if (!mlir::isa<mlir::FloatType>(type))
       return ctx.fail("floating literal expects floating type"), mlir::Value();
@@ -348,110 +355,127 @@ static bool lowerStatement(const clang::Stmt *stmt, LoweringContext &ctx) {
     mlir::Location loc = ctx.defaultLoc;
     bool hasElse = ifStmt->getElse() != nullptr;
 
-    llvm::SmallVector<const clang::ValueDecl *, 8> mergeVars;
-    mergeVars.reserve(ctx.valueMap.size());
-    for (const auto &entry : ctx.valueMap)
-      mergeVars.push_back(entry.first);
-    std::sort(mergeVars.begin(), mergeVars.end());
+    auto lowerIntoRegion = [&](const clang::Stmt *body, mlir::Region &region,
+                               std::optional<mlir::OpBuilder> &builderStorage,
+                               std::optional<LoweringContext> &ctxStorage,
+                               LoweringContext *&outCtx) -> bool {
+      region.emplaceBlock();
+      builderStorage.emplace(ctx.builder.getContext());
+      builderStorage->setInsertionPointToEnd(&region.front());
+      ctxStorage.emplace(*builderStorage, loc, ctx.returnType, ctx.errorMessage);
+      outCtx = &*ctxStorage;
+      outCtx->valueMap = ctx.valueMap;
+      outCtx->mutatedVars.clear();
+      if (body && !lowerStatement(body, *outCtx))
+        return false;
+      return !outCtx->failed;
+    };
+
+    mlir::Region tmpThen;
+    std::optional<mlir::OpBuilder> tmpThenBuilderStorage;
+    std::optional<LoweringContext> tmpThenCtxStorage;
+    LoweringContext *tmpThenCtx = nullptr;
+    if (!lowerIntoRegion(ifStmt->getThen(), tmpThen, tmpThenBuilderStorage,
+                         tmpThenCtxStorage, tmpThenCtx))
+      return false;
+
+    std::optional<mlir::Region> tmpElse;
+    std::optional<mlir::OpBuilder> tmpElseBuilderStorage;
+    std::optional<LoweringContext> tmpElseCtxStorage;
+    LoweringContext *tmpElseCtx = nullptr;
+    if (hasElse) {
+      tmpElse.emplace();
+      if (!lowerIntoRegion(ifStmt->getElse(), *tmpElse, tmpElseBuilderStorage,
+                           tmpElseCtxStorage, tmpElseCtx))
+        return false;
+    }
+
+    llvm::SmallPtrSet<const clang::ValueDecl *, 8> mutatedSet;
+    llvm::SmallVector<const clang::ValueDecl *, 8> mutatedVars;
+    auto addMutations = [&](const llvm::SmallPtrSet<const clang::ValueDecl *, 8> &source) {
+      for (const clang::ValueDecl *vd : source)
+        if (mutatedSet.insert(vd).second)
+          mutatedVars.push_back(vd);
+    };
+    addMutations(tmpThenCtx->mutatedVars);
+    if (tmpElseCtx)
+      addMutations(tmpElseCtx->mutatedVars);
 
     llvm::SmallVector<mlir::Type, 8> resultTypes;
-    resultTypes.reserve(mergeVars.size());
-    for (const clang::ValueDecl *var : mergeVars)
-      resultTypes.push_back(ctx.valueMap[var].getType());
+    resultTypes.reserve(mutatedVars.size());
+    for (const clang::ValueDecl *vd : mutatedVars)
+      resultTypes.push_back(ctx.valueMap.lookup(vd).getType());
 
-    bool needElseRegion = hasElse || !mergeVars.empty();
-    auto ifOp = ctx.builder.create<simt::dialect::IfOp>(
-        loc, mlir::TypeRange(resultTypes), cond, needElseRegion);
+    bool needElseRegion = hasElse || !mutatedVars.empty();
+    auto ifOp = ctx.builder.create<simt::dialect::IfOp>(loc, resultTypes, cond,
+                                                        needElseRegion);
 
-    const auto originalMap = ctx.valueMap;
+    auto replaceRegionBody = [](mlir::Region &dest, mlir::Region &src) {
+      if (!dest.empty())
+        dest.front().erase();
+      dest.takeBody(src);
+      if (dest.empty())
+        dest.emplaceBlock();
+    };
 
-    // Lower then branch.
-    auto &thenRegion = ifOp.getThenRegion();
-    auto thenBuilder = mlir::OpBuilder(&thenRegion.front(),
-                                       thenRegion.front().begin());
-    LoweringContext thenCtx(thenBuilder, loc, ctx.returnType, ctx.errorMessage);
-    thenCtx.valueMap = ctx.valueMap;
-    thenCtx.mutatedVars.clear();
-    if (!lowerStatement(ifStmt->getThen(), thenCtx))
-      return false;
-    if (thenCtx.failed)
-      return false;
+    auto &finalThen = ifOp.getThenRegion();
+    replaceRegionBody(finalThen, tmpThen);
 
-    llvm::SmallVector<mlir::Value, 8> thenYieldValues;
-    if (!mergeVars.empty()) {
-      auto thenYield = llvm::cast<simt::dialect::YieldOp>(
-          thenRegion.front().getTerminator());
-      thenYieldValues.reserve(mergeVars.size());
-      for (const clang::ValueDecl *var : mergeVars) {
-        auto it = thenCtx.valueMap.find(var);
-        mlir::Value value = it != thenCtx.valueMap.end()
-                                ? it->second
-                                : originalMap.lookup(var);
-        thenYieldValues.push_back(value);
-      }
-      thenYield.getOperation()->setOperands(thenYieldValues);
-    }
-
-    // Lower else branch or provide fall-through yields.
-    llvm::SmallVector<mlir::Value, 8> elseYieldValues;
-    bool elseTerminates = false;
+    mlir::Region *finalElse = nullptr;
     if (needElseRegion) {
-      auto &elseRegion = ifOp.getElseRegion();
-      if (hasElse) {
-        auto elseBuilder =
-            mlir::OpBuilder(&elseRegion.front(), elseRegion.front().begin());
-        LoweringContext elseCtx(elseBuilder, loc, ctx.returnType,
-                                ctx.errorMessage);
-        elseCtx.valueMap = ctx.valueMap;
-        elseCtx.mutatedVars.clear();
-        if (!lowerStatement(ifStmt->getElse(), elseCtx))
-          return false;
-        if (elseCtx.failed)
-          return false;
-        elseTerminates = elseCtx.emittedTerminator;
-
-        if (!mergeVars.empty()) {
-          auto elseYield = llvm::cast<simt::dialect::YieldOp>(
-              elseRegion.front().getTerminator());
-          elseYieldValues.reserve(mergeVars.size());
-          for (const clang::ValueDecl *var : mergeVars) {
-            auto it = elseCtx.valueMap.find(var);
-            mlir::Value value = it != elseCtx.valueMap.end()
-                                    ? it->second
-                                    : originalMap.lookup(var);
-            elseYieldValues.push_back(value);
-          }
-          elseYield.getOperation()->setOperands(elseYieldValues);
-        }
-      } else if (!mergeVars.empty()) {
-        auto elseYield = llvm::cast<simt::dialect::YieldOp>(
-            elseRegion.front().getTerminator());
-        elseYieldValues.reserve(mergeVars.size());
-        for (const clang::ValueDecl *var : mergeVars)
-          elseYieldValues.push_back(originalMap.lookup(var));
-        elseYield.getOperation()->setOperands(elseYieldValues);
+      finalElse = &ifOp.getElseRegion();
+      if (tmpElse)
+        replaceRegionBody(*finalElse, *tmpElse);
+      else {
+        if (!finalElse->empty())
+          finalElse->front().erase();
+        finalElse->emplaceBlock();
       }
     }
 
-    // Update the incoming value map with SSA merges.
-    for (auto [index, var] : llvm::enumerate(mergeVars)) {
-      mlir::Value incoming = originalMap.lookup(var);
-      mlir::Value thenVal = thenYieldValues.empty() ? incoming
-                                                    : thenYieldValues[index];
-      mlir::Value elseVal = elseYieldValues.empty() ? incoming
-                                                    : elseYieldValues[index];
-      if (thenVal != incoming || elseVal != incoming)
-        ctx.mutatedVars.insert(var);
-      ctx.valueMap[var] = ifOp.getResult(index);
+    if (!mutatedVars.empty()) {
+      auto materializeYield = [&](mlir::Region &region,
+                                  const LoweringContext *branchCtx) {
+        llvm::SmallVector<mlir::Value, 8> operands;
+        operands.reserve(mutatedVars.size());
+        for (const clang::ValueDecl *vd : mutatedVars) {
+          if (branchCtx) {
+            auto it = branchCtx->valueMap.find(vd);
+            if (it != branchCtx->valueMap.end()) {
+              operands.push_back(it->second);
+              continue;
+            }
+          }
+          operands.push_back(ctx.valueMap.lookup(vd));
+        }
+        auto &block = region.front();
+        mlir::Operation *maybeTerm = block.empty() ? nullptr : &block.back();
+        if (!maybeTerm || !maybeTerm->hasTrait<mlir::OpTrait::IsTerminator>())
+          maybeTerm = mlir::OpBuilder::atBlockEnd(&block)
+                          .create<simt::dialect::YieldOp>(loc)
+                          .getOperation();
+        if (auto yield = llvm::dyn_cast<simt::dialect::YieldOp>(maybeTerm))
+          yield.getOperation()->setOperands(operands);
+      };
+
+      materializeYield(finalThen, tmpThenCtx);
+      if (finalElse)
+        materializeYield(*finalElse, tmpElseCtx);
     }
 
-    if (hasElse) {
-      if (thenCtx.emittedTerminator && elseTerminates)
-        ctx.emittedTerminator = true;
+    for (auto [index, vd] : llvm::enumerate(mutatedVars)) {
+      ctx.valueMap[vd] = ifOp.getResult(index);
+      ctx.mutatedVars.insert(vd);
     }
+
+    if (tmpThenCtx->emittedTerminator &&
+        (!needElseRegion || (tmpElseCtx && tmpElseCtx->emittedTerminator)))
+      ctx.emittedTerminator = true;
 
     return true;
   }
+
+
 
   if (const auto *ret = llvm::dyn_cast<clang::ReturnStmt>(stmt)) {
     bool expectsValue = static_cast<bool>(ctx.returnType) &&
