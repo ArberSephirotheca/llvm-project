@@ -1,0 +1,18 @@
+@LIT_SITE_CFG_IN_HEADER@
+
+import lit.formats
+
+config.test_exec_root = "@SIMT_HLSL_IMPORT_TEST_BINARY_DIR@"
+config.test_source_root = "@SIMT_HLSL_IMPORT_TEST_SOURCE_DIR@"
+
+lit_config.useProcesses = False
+lit_config.numWorkers = 1
+
+config.substitutions.extend([
+    ('%simt-hlsl-import', '@SIMT_HLSL_IMPORT_TEST_EXECUTABLE@'),
+    ('%mlir-file-check', '@MLIR_FILE_CHECK@'),
+])
+
+config.suffixes = ['.hlsl']
+config.name = 'simt-hlsl-import'
+config.test_format = lit.formats.ShTest(True, True)

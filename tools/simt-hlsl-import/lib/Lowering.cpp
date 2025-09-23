@@ -134,6 +134,59 @@ static mlir::Value lowerExpr(const clang::Expr *expr, LoweringContext &ctx) {
     return ctx.fail("reference to unknown value"), mlir::Value();
   }
 
+  if (const auto *binOp = llvm::dyn_cast<clang::BinaryOperator>(expr)) {
+    mlir::Value lhs = lowerExpr(binOp->getLHS(), ctx);
+    mlir::Value rhs = lowerExpr(binOp->getRHS(), ctx);
+    if (ctx.failed)
+      return {};
+    if (!lhs || !rhs)
+      return {};
+
+    switch (binOp->getOpcode()) {
+    case clang::BinaryOperatorKind::BO_Add:
+      if (mlir::isa<mlir::IntegerType>(lhs.getType()))
+        return ctx.builder.create<mlir::arith::AddIOp>(loc, lhs, rhs);
+      if (mlir::isa<mlir::FloatType>(lhs.getType()))
+        return ctx.builder.create<mlir::arith::AddFOp>(loc, lhs, rhs);
+      break;
+    case clang::BinaryOperatorKind::BO_Sub:
+      if (mlir::isa<mlir::IntegerType>(lhs.getType()))
+        return ctx.builder.create<mlir::arith::SubIOp>(loc, lhs, rhs);
+      if (mlir::isa<mlir::FloatType>(lhs.getType()))
+        return ctx.builder.create<mlir::arith::SubFOp>(loc, lhs, rhs);
+      break;
+    case clang::BinaryOperatorKind::BO_Mul:
+      if (mlir::isa<mlir::IntegerType>(lhs.getType()))
+        return ctx.builder.create<mlir::arith::MulIOp>(loc, lhs, rhs);
+      if (mlir::isa<mlir::FloatType>(lhs.getType()))
+        return ctx.builder.create<mlir::arith::MulFOp>(loc, lhs, rhs);
+      break;
+    case clang::BinaryOperatorKind::BO_Div:
+      if (mlir::isa<mlir::IntegerType>(lhs.getType()))
+        return ctx.builder.create<mlir::arith::DivSIOp>(loc, lhs, rhs);
+      if (mlir::isa<mlir::FloatType>(lhs.getType()))
+        return ctx.builder.create<mlir::arith::DivFOp>(loc, lhs, rhs);
+      break;
+    case clang::BinaryOperatorKind::BO_Rem:
+      if (mlir::isa<mlir::IntegerType>(lhs.getType()))
+        return ctx.builder.create<mlir::arith::RemSIOp>(loc, lhs, rhs);
+      break;
+    case clang::BinaryOperatorKind::BO_Assign:
+      if (auto *lhsDeclRef = llvm::dyn_cast<clang::DeclRefExpr>(binOp->getLHS())) {
+        auto it = ctx.valueMap.find(lhsDeclRef->getDecl());
+        if (it != ctx.valueMap.end()) {
+          it->second = rhs;
+          return rhs;
+        }
+      }
+      return ctx.fail("unsupported assignment target"), mlir::Value();
+    default:
+      break;
+    }
+
+    return ctx.fail("unsupported binary operator"), mlir::Value();
+  }
+
   return ctx.fail("unsupported expression lowering"), mlir::Value();
 }
 
@@ -152,6 +205,7 @@ static mlir::Value buildZeroValue(LoweringContext &ctx, mlir::Type type) {
 }
 
 static bool lowerStatement(const clang::Stmt *stmt, LoweringContext &ctx);
+static mlir::Value lowerExpr(const clang::Expr *expr, LoweringContext &ctx);
 
 static void lowerCompoundStmt(const clang::CompoundStmt *compound,
                               LoweringContext &ctx) {
@@ -165,6 +219,11 @@ static void lowerCompoundStmt(const clang::CompoundStmt *compound,
 static bool lowerStatement(const clang::Stmt *stmt, LoweringContext &ctx) {
   if (ctx.failed)
     return false;
+
+  if (const auto *compound = llvm::dyn_cast<clang::CompoundStmt>(stmt)) {
+    lowerCompoundStmt(compound, ctx);
+    return true;
+  }
 
   if (const auto *ret = llvm::dyn_cast<clang::ReturnStmt>(stmt)) {
     bool expectsValue = static_cast<bool>(ctx.returnType) &&
@@ -204,6 +263,11 @@ static bool lowerStatement(const clang::Stmt *stmt, LoweringContext &ctx) {
         ctx.valueMap[var] = initValue;
     }
     return true;
+  }
+
+  if (const auto *exprStmt = llvm::dyn_cast<clang::Expr>(stmt)) {
+    (void)lowerExpr(exprStmt, ctx);
+    return !ctx.failed;
   }
 
   return ctx.fail("unsupported statement");
@@ -251,6 +315,15 @@ public:
     auto funcType = moduleBuilder.getFunctionType(argTypes, resultTypes);
     auto func = moduleBuilder.create<mlir::func::FuncOp>(loc, name, funcType);
 
+    if (const auto *numThreads = decl->getAttr<clang::HLSLNumThreadsAttr>()) {
+      llvm::SmallVector<int64_t, 3> dims = {
+          static_cast<int64_t>(numThreads->getX()),
+          static_cast<int64_t>(numThreads->getY()),
+          static_cast<int64_t>(numThreads->getZ())};
+      auto attr = mlir::DenseI64ArrayAttr::get(func.getContext(), dims);
+      func->setAttr("simt.num_threads", attr);
+    }
+
     mlir::Block *entry = func.addEntryBlock();
     mlir::OpBuilder funcBuilder(entry, entry->begin());
     funcBuilder.create<simt::dialect::ActiveMaskOp>(loc,
@@ -278,9 +351,9 @@ public:
         mlir::Value zero = buildZeroValue(ctx, ctx.returnType);
         if (!zero)
           return false;
-        ctx.builder.create<mlir::func::ReturnOp>(loc, zero);
+        ctx.builder.create<mlir::func::ReturnOp>(ctx.builder.getUnknownLoc(), zero);
       } else {
-        ctx.builder.create<mlir::func::ReturnOp>(loc);
+        ctx.builder.create<mlir::func::ReturnOp>(ctx.builder.getUnknownLoc());
       }
     }
 

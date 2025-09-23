@@ -32,3 +32,5 @@ target_include_directories(simt-hlsl-import
         ${LLVM_INCLUDE_DIRS}
         ${MLIR_INCLUDE_DIRS}
 )
+
+add_subdirectory(test)
