@@ -4,6 +4,7 @@
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/Builders.h"
@@ -253,6 +254,123 @@ static mlir::Value lowerExpr(const clang::Expr *expr, LoweringContext &ctx) {
     if (it != ctx.valueMap.end())
       return it->second;
     return ctx.fail("reference to unknown value"), mlir::Value();
+  }
+
+  if (const auto *unOp = llvm::dyn_cast<clang::UnaryOperator>(expr)) {
+    mlir::Value operand = lowerExpr(unOp->getSubExpr(), ctx);
+    if (!operand)
+      return {};
+
+    auto makeIntegerConstant = [&](int64_t value,
+                                   mlir::IntegerType type) -> mlir::Value {
+      return ctx.builder
+          .create<mlir::arith::ConstantIntOp>(loc, value, type.getWidth())
+          .getResult();
+    };
+    auto makeFloatConstant = [&](double value,
+                                 mlir::FloatType type) -> mlir::Value {
+      auto attr = ctx.builder.getFloatAttr(type, value);
+      return ctx.builder.create<mlir::arith::ConstantOp>(loc, attr).getResult();
+    };
+
+    auto getMutableDeclRef = [&](const clang::Expr *expr)
+        -> const clang::ValueDecl * {
+      const clang::Expr *stripped = expr->IgnoreParenImpCasts();
+      if (const auto *ref = llvm::dyn_cast<clang::DeclRefExpr>(stripped))
+        return ref->getDecl();
+      return nullptr;
+    };
+
+    switch (unOp->getOpcode()) {
+    case clang::UnaryOperatorKind::UO_Plus:
+      return operand;
+    case clang::UnaryOperatorKind::UO_Minus: {
+      if (auto floatType = mlir::dyn_cast<mlir::FloatType>(operand.getType()))
+        return ctx.builder.create<mlir::arith::NegFOp>(loc, operand).getResult();
+      if (auto intType = mlir::dyn_cast<mlir::IntegerType>(operand.getType())) {
+        mlir::Value zero = makeIntegerConstant(0, intType);
+        return ctx.builder.create<mlir::arith::SubIOp>(loc, zero, operand)
+            .getResult();
+      }
+      return ctx.fail("unary minus requires numeric operand"), mlir::Value();
+    }
+    case clang::UnaryOperatorKind::UO_LNot: {
+      if (auto intType = mlir::dyn_cast<mlir::IntegerType>(operand.getType())) {
+        mlir::Value zero = makeIntegerConstant(0, intType);
+        return ctx.builder
+            .create<mlir::arith::CmpIOp>(loc, mlir::arith::CmpIPredicate::eq,
+                                         operand, zero)
+            .getResult();
+      }
+      if (auto floatType = mlir::dyn_cast<mlir::FloatType>(operand.getType())) {
+        mlir::Value zero = makeFloatConstant(0.0, floatType);
+        return ctx.builder
+            .create<mlir::arith::CmpFOp>(loc, mlir::arith::CmpFPredicate::OEQ,
+                                         operand, zero)
+            .getResult();
+      }
+      return ctx.fail("logical not requires scalar operand"), mlir::Value();
+    }
+    case clang::UnaryOperatorKind::UO_Not: {
+      if (auto intType = mlir::dyn_cast<mlir::IntegerType>(operand.getType())) {
+        mlir::Value allOnes = makeIntegerConstant(-1, intType);
+        return ctx.builder
+            .create<mlir::arith::XOrIOp>(loc, operand, allOnes)
+            .getResult();
+      }
+      return ctx.fail("bitwise not requires integer operand"), mlir::Value();
+    }
+    case clang::UnaryOperatorKind::UO_PreInc:
+    case clang::UnaryOperatorKind::UO_PreDec:
+    case clang::UnaryOperatorKind::UO_PostInc:
+    case clang::UnaryOperatorKind::UO_PostDec: {
+      const clang::ValueDecl *target =
+          getMutableDeclRef(unOp->getSubExpr());
+      if (!target)
+        return ctx.fail("increment/decrement requires simple variable"),
+               mlir::Value();
+
+      auto it = ctx.valueMap.find(target);
+      if (it == ctx.valueMap.end())
+        return ctx.fail("reference to unknown value"), mlir::Value();
+
+      mlir::Value original = operand;
+      mlir::Value updated;
+      bool isIncrement =
+          unOp->getOpcode() == clang::UnaryOperatorKind::UO_PreInc ||
+          unOp->getOpcode() == clang::UnaryOperatorKind::UO_PostInc;
+
+      if (auto intType = mlir::dyn_cast<mlir::IntegerType>(operand.getType())) {
+        mlir::Value one = makeIntegerConstant(1, intType);
+        updated = isIncrement
+                      ? ctx.builder.create<mlir::arith::AddIOp>(loc, operand, one)
+                            .getResult()
+                      : ctx.builder.create<mlir::arith::SubIOp>(loc, operand, one)
+                            .getResult();
+      } else if (auto floatType =
+                     mlir::dyn_cast<mlir::FloatType>(operand.getType())) {
+        mlir::Value one = makeFloatConstant(1.0, floatType);
+        updated = isIncrement
+                      ? ctx.builder.create<mlir::arith::AddFOp>(loc, operand, one)
+                            .getResult()
+                      : ctx.builder.create<mlir::arith::SubFOp>(loc, operand, one)
+                            .getResult();
+      } else {
+        return ctx.fail("increment/decrement requires numeric operand"),
+               mlir::Value();
+      }
+
+      ctx.valueMap[target] = updated;
+      ctx.mutatedVars.insert(target);
+
+      bool isPost =
+          unOp->getOpcode() == clang::UnaryOperatorKind::UO_PostInc ||
+          unOp->getOpcode() == clang::UnaryOperatorKind::UO_PostDec;
+      return isPost ? original : updated;
+    }
+    default:
+      return ctx.fail("unsupported unary operator"), mlir::Value();
+    }
   }
 
   if (const auto *binOp = llvm::dyn_cast<clang::BinaryOperator>(expr)) {
@@ -646,6 +764,20 @@ static mlir::Value buildZeroValue(LoweringContext &ctx, mlir::Type type) {
   if (mlir::isa<mlir::FloatType>(type)) {
     auto attr = ctx.builder.getFloatAttr(mlir::cast<mlir::FloatType>(type), 0.0);
     return ctx.builder.create<mlir::arith::ConstantOp>(loc, attr);
+  }
+  if (auto vectorType = mlir::dyn_cast<mlir::VectorType>(type)) {
+    mlir::Type elementType = vectorType.getElementType();
+    mlir::Attribute elementAttr;
+    if (auto intType = mlir::dyn_cast<mlir::IntegerType>(elementType))
+      elementAttr = ctx.builder.getIntegerAttr(intType, 0);
+    else if (auto floatType = mlir::dyn_cast<mlir::FloatType>(elementType))
+      elementAttr = ctx.builder.getFloatAttr(floatType, 0.0);
+    else
+      return ctx.fail("unable to build default value for return type"),
+             mlir::Value();
+
+    auto zeroAttr = mlir::DenseElementsAttr::get(vectorType, elementAttr);
+    return ctx.builder.create<mlir::arith::ConstantOp>(loc, zeroAttr);
   }
   ctx.fail("unable to build default value for return type");
   return {};
