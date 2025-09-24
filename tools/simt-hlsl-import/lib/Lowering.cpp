@@ -104,6 +104,15 @@ static mlir::Type convertType(const clang::QualType &qt, mlir::OpBuilder &builde
   if (!type)
     return {};
 
+  if (const auto *vectorType = llvm::dyn_cast<clang::VectorType>(type)) {
+    mlir::Type elementType = convertType(vectorType->getElementType(), builder);
+    if (!elementType)
+      return {};
+
+    auto numElements = static_cast<int64_t>(vectorType->getNumElements());
+    return mlir::VectorType::get({numElements}, elementType);
+  }
+
   if (const auto *builtin = llvm::dyn_cast<clang::BuiltinType>(type)) {
     switch (builtin->getKind()) {
     case clang::BuiltinType::Void:
