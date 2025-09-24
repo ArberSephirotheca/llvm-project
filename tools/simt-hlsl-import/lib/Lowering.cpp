@@ -45,6 +45,14 @@ struct LoopFrame {
   unsigned firstIterIndex = 0;
   mlir::Value currentFirstIterValue;
 };
+
+struct SwitchFrame {
+  llvm::SmallVector<const clang::ValueDecl *, 8> carriedVars;
+  unsigned matchedIndex = 0;
+  mlir::Value trueValue;
+  llvm::SmallVector<mlir::Value, 8> initialValues;
+  bool analysisOnly = false;
+};
 struct LoweringContext {
   mlir::OpBuilder &builder;
   mlir::Location defaultLoc;
@@ -55,6 +63,7 @@ struct LoweringContext {
   std::string &errorMessage;
   bool failed = false;
   llvm::SmallVector<LoopFrame, 4> loopStack;
+  llvm::SmallVector<SwitchFrame, 4> switchStack;
 
   LoweringContext(mlir::OpBuilder &builder, mlir::Location loc,
                   mlir::Type retType, std::string &error)
@@ -178,6 +187,9 @@ static mlir::Value lowerExpr(const clang::Expr *expr, LoweringContext &ctx) {
   if (const auto *implicitCast =
           llvm::dyn_cast<clang::ImplicitCastExpr>(expr))
     return lowerExpr(implicitCast->getSubExpr(), ctx);
+
+  if (const auto *constExpr = llvm::dyn_cast<clang::ConstantExpr>(expr))
+    return lowerExpr(constExpr->getSubExpr(), ctx);
 
   if (const auto *floatLit = llvm::dyn_cast<clang::FloatingLiteral>(expr)) {
     if (!mlir::isa<mlir::FloatType>(type))
@@ -340,6 +352,7 @@ static mlir::Value lowerExpr(const clang::Expr *expr, LoweringContext &ctx);
 static bool lowerForStmt(const clang::ForStmt *stmt, LoweringContext &ctx);
 static bool lowerWhileStmt(const clang::WhileStmt *stmt, LoweringContext &ctx);
 static bool lowerDoStmt(const clang::DoStmt *stmt, LoweringContext &ctx);
+static bool lowerSwitchStmt(const clang::SwitchStmt *stmt, LoweringContext &ctx);
 
 static void lowerCompoundStmt(const clang::CompoundStmt *compound,
                               LoweringContext &ctx) {
@@ -485,27 +498,63 @@ static bool lowerStatement(const clang::Stmt *stmt, LoweringContext &ctx) {
   if (const auto *doStmt = llvm::dyn_cast<clang::DoStmt>(stmt))
     return lowerDoStmt(doStmt, ctx);
 
+  if (const auto *switchStmt = llvm::dyn_cast<clang::SwitchStmt>(stmt))
+    return lowerSwitchStmt(switchStmt, ctx);
+
   if (llvm::isa<clang::BreakStmt>(stmt)) {
-    if (ctx.loopStack.empty())
+    if (!ctx.loopStack.empty()) {
+      auto &frame = ctx.loopStack.back();
+      llvm::SmallVector<mlir::Value, 8> operands;
+      operands.reserve(frame.carriedVars.size() + (frame.hasFirstIterFlag ? 1 : 0));
+      for (auto [index, vd] : llvm::enumerate(frame.carriedVars)) {
+        mlir::Value value = ctx.valueMap.lookup(vd);
+        if (!value)
+          value = frame.loop.getResult(index);
+        operands.push_back(value);
+      }
+      if (frame.hasFirstIterFlag) {
+        mlir::Value flag = frame.currentFirstIterValue;
+        if (!flag && frame.firstIterIndex < frame.loop.getNumResults())
+          flag = frame.loop.getResult(frame.firstIterIndex);
+        operands.push_back(flag);
+      }
+      ctx.builder.create<simt::dialect::BreakOp>(ctx.defaultLoc, operands);
+      ctx.mutatedVars.insert(frame.carriedVars.begin(), frame.carriedVars.end());
+      ctx.emittedTerminator = true;
       return true;
-    auto &frame = ctx.loopStack.back();
-    llvm::SmallVector<mlir::Value, 8> operands;
-    operands.reserve(frame.carriedVars.size() + (frame.hasFirstIterFlag ? 1 : 0));
-    for (auto [index, vd] : llvm::enumerate(frame.carriedVars)) {
-      mlir::Value value = ctx.valueMap.lookup(vd);
-      if (!value)
-        value = frame.loop.getResult(index);
-      operands.push_back(value);
     }
-    if (frame.hasFirstIterFlag) {
-      mlir::Value flag = frame.currentFirstIterValue;
-      if (!flag && frame.firstIterIndex < frame.loop.getNumResults())
-        flag = frame.loop.getResult(frame.firstIterIndex);
-      operands.push_back(flag);
+
+    if (!ctx.switchStack.empty()) {
+      auto &frame = ctx.switchStack.back();
+      if (frame.analysisOnly) {
+        ctx.emittedTerminator = true;
+        return true;
+      }
+
+      llvm::SmallVector<mlir::Value, 8> yieldOperands;
+      yieldOperands.reserve(frame.carriedVars.size() + 1);
+      for (auto [index, vd] : llvm::enumerate(frame.carriedVars)) {
+        mlir::Value value = ctx.valueMap.lookup(vd);
+        if (!value && index < frame.initialValues.size())
+          value = frame.initialValues[index];
+        if (!value) {
+          ctx.fail("switch break missing value for case variable");
+          return false;
+        }
+        yieldOperands.push_back(value);
+        ctx.mutatedVars.insert(vd);
+      }
+
+      mlir::Value trueVal = frame.trueValue;
+      if (!trueVal)
+        trueVal = ctx.builder.create<mlir::arith::ConstantIntOp>(ctx.defaultLoc, 1, 1);
+      yieldOperands.push_back(trueVal);
+
+      ctx.builder.create<simt::dialect::YieldOp>(ctx.defaultLoc, yieldOperands);
+      ctx.emittedTerminator = true;
+      return true;
     }
-    ctx.builder.create<simt::dialect::BreakOp>(ctx.defaultLoc, operands);
-    ctx.mutatedVars.insert(frame.carriedVars.begin(), frame.carriedVars.end());
-    ctx.emittedTerminator = true;
+
     return true;
   }
 
@@ -1085,6 +1134,210 @@ static bool lowerDoStmt(const clang::DoStmt *doStmt, LoweringContext &ctx) {
   }
 
   ctx.loopStack.pop_back();
+
+  return true;
+}
+
+static bool lowerSwitchStmt(const clang::SwitchStmt *switchStmt,
+                            LoweringContext &ctx) {
+  mlir::Location loc = ctx.defaultLoc;
+
+  if (const clang::Stmt *init = switchStmt->getInit()) {
+    if (!lowerStatement(init, ctx) || ctx.failed)
+      return false;
+  }
+
+  if (switchStmt->getConditionVariable())
+    return ctx.fail("switch condition variables are not supported");
+
+  struct CaseInfo {
+    const clang::SwitchCase *label = nullptr;
+    llvm::SmallVector<const clang::Stmt *, 8> statements;
+  };
+
+  llvm::SmallVector<CaseInfo, 8> cases;
+
+  const clang::Stmt *body = switchStmt->getBody();
+  if (const auto *compound = llvm::dyn_cast<clang::CompoundStmt>(body)) {
+    CaseInfo *current = nullptr;
+    for (const clang::Stmt *child : compound->body()) {
+      if (const auto *sc = llvm::dyn_cast<clang::SwitchCase>(child)) {
+        if (const auto *caseStmt = llvm::dyn_cast<clang::CaseStmt>(sc)) {
+          if (llvm::isa<clang::SwitchCase>(caseStmt->getSubStmt()))
+            return ctx.fail("switch fall-through is not supported");
+        }
+        cases.push_back({sc, {}});
+        current = &cases.back();
+        const clang::Stmt *sub = sc->getSubStmt();
+        if (sub && !llvm::isa<clang::SwitchCase>(sub))
+          current->statements.push_back(sub);
+      } else {
+        if (!current)
+          return ctx.fail("statement outside of switch cases is not supported");
+        current->statements.push_back(child);
+      }
+    }
+  } else if (const auto *singleCase = llvm::dyn_cast<clang::SwitchCase>(body)) {
+    CaseInfo info;
+    info.label = singleCase;
+    const clang::Stmt *sub = singleCase->getSubStmt();
+    if (const auto *caseStmt = llvm::dyn_cast<clang::CaseStmt>(singleCase)) {
+      if (llvm::isa<clang::SwitchCase>(sub))
+        return ctx.fail("switch fall-through is not supported");
+      (void)caseStmt;
+    }
+    if (sub && !llvm::isa<clang::SwitchCase>(sub))
+      info.statements.push_back(sub);
+    cases.push_back(std::move(info));
+  } else {
+    return ctx.fail("unsupported switch body form");
+  }
+
+  mlir::Value selector = lowerExpr(switchStmt->getCond(), ctx);
+  if (!selector)
+    return false;
+
+  llvm::SmallPtrSet<const clang::ValueDecl *, 8> mutatedSet;
+  for (const CaseInfo &info : cases) {
+    mlir::Region analysisRegion;
+    analysisRegion.emplaceBlock();
+    mlir::OpBuilder analysisBuilder(ctx.builder.getContext());
+    analysisBuilder.setInsertionPointToStart(&analysisRegion.front());
+    LoweringContext analysisCtx(analysisBuilder, loc, ctx.returnType,
+                                ctx.errorMessage);
+    analysisCtx.valueMap = ctx.valueMap;
+    analysisCtx.loopStack = ctx.loopStack;
+    analysisCtx.switchStack = ctx.switchStack;
+    SwitchFrame analysisFrame;
+    analysisFrame.analysisOnly = true;
+    analysisCtx.switchStack.push_back(analysisFrame);
+
+    for (const clang::Stmt *caseStmt : info.statements) {
+      if (!lowerStatement(caseStmt, analysisCtx) || analysisCtx.failed)
+        return false;
+      if (analysisCtx.emittedTerminator)
+        break;
+    }
+
+    analysisCtx.switchStack.pop_back();
+    mutatedSet.insert(analysisCtx.mutatedVars.begin(),
+                      analysisCtx.mutatedVars.end());
+  }
+
+  llvm::SmallVector<const clang::ValueDecl *, 8> mutatedVars(mutatedSet.begin(),
+                                                             mutatedSet.end());
+  llvm::sort(mutatedVars, [](const clang::ValueDecl *lhs,
+                              const clang::ValueDecl *rhs) { return lhs < rhs; });
+
+  llvm::SmallVector<mlir::Value, 8> currentValues;
+  currentValues.reserve(mutatedVars.size());
+  for (const clang::ValueDecl *vd : mutatedVars) {
+    mlir::Value initial = ctx.valueMap.lookup(vd);
+    if (!initial)
+      return ctx.fail("reference to unknown switch variable");
+    currentValues.push_back(initial);
+  }
+
+  mlir::Value falseConst = ctx.builder.create<mlir::arith::ConstantIntOp>(loc, 0, 1);
+  mlir::Value currentMatched = falseConst;
+
+  for (const CaseInfo &info : cases) {
+    mlir::Value notMatched = ctx.builder.create<mlir::arith::CmpIOp>(
+        loc, mlir::arith::CmpIPredicate::eq, currentMatched, falseConst);
+
+    mlir::Value caseCondition;
+    if (const auto *caseStmt = llvm::dyn_cast<clang::CaseStmt>(info.label)) {
+      mlir::Value caseValue = lowerExpr(caseStmt->getLHS(), ctx);
+      if (!caseValue)
+        return false;
+      mlir::Value isEqual = ctx.builder.create<mlir::arith::CmpIOp>(
+          loc, mlir::arith::CmpIPredicate::eq, selector, caseValue);
+      caseCondition = ctx.builder.create<mlir::arith::AndIOp>(loc, notMatched,
+                                                             isEqual);
+    } else {
+      caseCondition = notMatched;
+    }
+
+    llvm::SmallVector<mlir::Type, 8> resultTypes;
+    resultTypes.reserve(mutatedVars.size() + 1);
+    for (mlir::Value value : currentValues)
+      resultTypes.push_back(value.getType());
+    resultTypes.push_back(ctx.builder.getI1Type());
+
+    auto ifOp = ctx.builder.create<simt::dialect::IfOp>(loc, resultTypes,
+                                                        caseCondition,
+                                                        /*withElseRegion=*/true);
+
+    auto &thenBlock = ifOp.getThenRegion().front();
+    thenBlock.clear();
+    mlir::OpBuilder thenBuilder(ctx.builder.getContext());
+    thenBuilder.setInsertionPointToStart(&thenBlock);
+
+    LoweringContext caseCtx(thenBuilder, loc, ctx.returnType, ctx.errorMessage);
+    caseCtx.valueMap = ctx.valueMap;
+    caseCtx.loopStack = ctx.loopStack;
+    caseCtx.switchStack = ctx.switchStack;
+    for (auto [vd, value] : llvm::zip(mutatedVars, currentValues))
+      caseCtx.valueMap[vd] = value;
+
+    SwitchFrame frame;
+    frame.carriedVars = mutatedVars;
+    frame.matchedIndex = mutatedVars.size();
+    frame.trueValue = thenBuilder.create<mlir::arith::ConstantIntOp>(loc, 1, 1);
+    frame.initialValues.assign(currentValues.begin(), currentValues.end());
+    caseCtx.switchStack.push_back(frame);
+
+    for (const clang::Stmt *caseStmt : info.statements) {
+      if (!lowerStatement(caseStmt, caseCtx) || caseCtx.failed)
+        return false;
+      if (caseCtx.emittedTerminator)
+        break;
+    }
+
+    SwitchFrame &activeFrame = caseCtx.switchStack.back();
+
+    if (!caseCtx.emittedTerminator) {
+      llvm::SmallVector<mlir::Value, 8> yieldValues;
+      yieldValues.reserve(mutatedVars.size() + 1);
+      for (auto [index, vd] : llvm::enumerate(mutatedVars)) {
+        mlir::Value value = caseCtx.valueMap.lookup(vd);
+        if (!value && index < currentValues.size())
+          value = currentValues[index];
+        if (!value) {
+          caseCtx.fail("switch case missing value for variable");
+          return false;
+        }
+        yieldValues.push_back(value);
+        caseCtx.mutatedVars.insert(vd);
+      }
+      yieldValues.push_back(activeFrame.trueValue);
+      thenBuilder.create<simt::dialect::YieldOp>(loc, yieldValues);
+    }
+
+    caseCtx.switchStack.pop_back();
+    ctx.mutatedVars.insert(caseCtx.mutatedVars.begin(),
+                           caseCtx.mutatedVars.end());
+
+    auto &elseBlock = ifOp.getElseRegion().front();
+    elseBlock.clear();
+    mlir::OpBuilder elseBuilder(ctx.builder.getContext());
+    elseBuilder.setInsertionPointToStart(&elseBlock);
+
+    llvm::SmallVector<mlir::Value, 8> elseValues = currentValues;
+    elseValues.push_back(currentMatched);
+    elseBuilder.create<simt::dialect::YieldOp>(loc, elseValues);
+
+    currentValues.clear();
+    currentValues.reserve(mutatedVars.size());
+    for (size_t index = 0; index < mutatedVars.size(); ++index)
+      currentValues.push_back(ifOp.getResult(index));
+    currentMatched = ifOp.getResult(mutatedVars.size());
+  }
+
+  for (auto [vd, value] : llvm::zip(mutatedVars, currentValues))
+    ctx.valueMap[vd] = value;
+
+  ctx.mutatedVars.insert(mutatedVars.begin(), mutatedVars.end());
 
   return true;
 }
