@@ -1,4 +1,4 @@
-// MLIR-LABEL: func.func @main(
+// MLIR-LABEL: "func.func"() <{function_type = (i32) -> (), sym_name = "main"}>
 // MLIR: %[[MASK:.*]] = "simt_step.active_mask"() : () -> i64
 // MLIR: %[[ACC_INIT:.*]] = "arith.constant"() <{value = 0 : i32}> : () -> i32
 // MLIR: %[[I_INIT:.*]] = "arith.constant"() <{value = 0 : i32}> : () -> i32
@@ -14,3 +14,4 @@
 // MLIR:     %[[I_NEXT:.*]] = "arith.addi"(%[[I_BODY]], %[[ONE]]) {{.*}}
 // MLIR:     "simt_step.yield"(%[[ACC_NEXT]], %[[I_NEXT]]) : (i32, i32) -> ()
 // MLIR: }) : (i32, i32) -> (i32, i32)
+// MLIR: "func.return"() : () -> ()

@@ -1,4 +1,4 @@
-// RUN: %simt-hlsl-import %s | %mlir-file-check %S/simple.mlir
+// RUN: %simt-hlsl-import %s | %mlir-file-check --check-prefix=MLIR %S/simple.mlir
 
 [numthreads(8, 4, 1)]
 void main(uint tid : SV_DispatchThreadID) {
