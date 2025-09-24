@@ -6,13 +6,13 @@ void main(uint tid : SV_DispatchThreadID) {
   uint result = 0;
   switch (value) {
   case 0:
-    result = 1;
-    break;
   case 1:
     result = 2;
     break;
+  case 2:
+    result = 5;
   default:
-    result = 3;
+    result = 7;
     break;
   }
 }
