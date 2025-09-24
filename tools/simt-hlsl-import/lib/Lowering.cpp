@@ -17,6 +17,7 @@
 #include "clang/AST/Expr.h"
 #include "clang/AST/RecursiveASTVisitor.h"
 #include "clang/AST/Stmt.h"
+#include "clang/Basic/SourceManager.h"
 #include "clang/Frontend/CompilerInstance.h"
 #include "clang/Frontend/FrontendActions.h"
 #include "clang/Tooling/Tooling.h"
@@ -33,6 +34,10 @@
 #include "llvm/ADT/StringRef.h"
 #include "llvm/TargetParser/Triple.h"
 #include "llvm/Support/raw_ostream.h"
+
+namespace clang {
+class SourceManager;
+}
 
 namespace simt_hlsl_import {
 
@@ -77,11 +82,13 @@ struct LoweringContext {
   llvm::SmallVector<LoopFrame, 4> loopStack;
   llvm::SmallVector<SwitchFrame, 4> switchStack;
   llvm::SmallVector<ControlEntry, 8> controlStack;
+  const clang::SourceManager *sourceManager = nullptr;
 
   LoweringContext(mlir::OpBuilder &builder, mlir::Location loc,
-                  mlir::Type retType, std::string &error)
+                  mlir::Type retType, std::string &error,
+                  const clang::SourceManager *sm = nullptr)
       : builder(builder), defaultLoc(loc), returnType(retType),
-        errorMessage(error) {}
+        errorMessage(error), sourceManager(sm) {}
 
   bool fail(llvm::StringRef msg) {
     if (!failed)
@@ -172,8 +179,26 @@ buildDxilTripleForProfile(llvm::StringRef profile) {
 
 static mlir::Location getLocation(const clang::Stmt *stmt,
                                   LoweringContext &ctx) {
-  (void)stmt;
-  return ctx.defaultLoc;
+  if (!stmt || !ctx.sourceManager)
+    return ctx.defaultLoc;
+
+  const clang::SourceManager &sm = *ctx.sourceManager;
+  clang::SourceLocation loc = stmt->getBeginLoc();
+  if (loc.isInvalid())
+    loc = stmt->getEndLoc();
+  if (loc.isInvalid())
+    return ctx.defaultLoc;
+
+  loc = sm.getExpansionLoc(loc);
+  clang::PresumedLoc presumed = sm.getPresumedLoc(loc);
+  if (!presumed.isValid())
+    return ctx.defaultLoc;
+
+  mlir::MLIRContext *mlirCtx = ctx.builder.getContext();
+  mlir::StringAttr fileAttr =
+      mlir::StringAttr::get(mlirCtx, presumed.getFilename());
+  return mlir::FileLineColLoc::get(fileAttr, presumed.getLine(),
+                                   presumed.getColumn());
 }
 
 static mlir::Value lowerExpr(const clang::Expr *expr, LoweringContext &ctx) {
@@ -403,7 +428,7 @@ static bool collectLoopMutations(
   analysisBuilder.setInsertionPointToStart(&analysisRegion.front());
 
   LoweringContext analysisCtx(analysisBuilder, ctx.defaultLoc, ctx.returnType,
-                              ctx.errorMessage);
+                              ctx.errorMessage, ctx.sourceManager);
   analysisCtx.valueMap = ctx.valueMap;
   analysisCtx.loopStack = ctx.loopStack;
   analysisCtx.switchStack = ctx.switchStack;
@@ -632,7 +657,8 @@ static bool lowerStatement(const clang::Stmt *stmt, LoweringContext &ctx) {
       region.emplaceBlock();
       builderStorage.emplace(ctx.builder.getContext());
       builderStorage->setInsertionPointToEnd(&region.front());
-      ctxStorage.emplace(*builderStorage, loc, ctx.returnType, ctx.errorMessage);
+      ctxStorage.emplace(*builderStorage, loc, ctx.returnType, ctx.errorMessage,
+                         ctx.sourceManager);
       outCtx = &*ctxStorage;
       outCtx->valueMap = ctx.valueMap;
       outCtx->mutatedVars.clear();
@@ -843,7 +869,8 @@ static bool lowerForStmt(const clang::ForStmt *forStmt, LoweringContext &ctx) {
   {
     mlir::OpBuilder prepBuilder(ctx.builder.getContext());
     prepBuilder.setInsertionPointToStart(prepareBlock);
-    LoweringContext prepCtx(prepBuilder, loc, ctx.returnType, ctx.errorMessage);
+    LoweringContext prepCtx(prepBuilder, loc, ctx.returnType, ctx.errorMessage,
+                            ctx.sourceManager);
     prepCtx.valueMap = ctx.valueMap;
     prepCtx.loopStack = ctx.loopStack;
     prepCtx.switchStack = ctx.switchStack;
@@ -876,7 +903,8 @@ static bool lowerForStmt(const clang::ForStmt *forStmt, LoweringContext &ctx) {
   {
     mlir::OpBuilder bodyBuilder(ctx.builder.getContext());
     bodyBuilder.setInsertionPointToStart(bodyBlock);
-    LoweringContext bodyCtx(bodyBuilder, loc, ctx.returnType, ctx.errorMessage);
+    LoweringContext bodyCtx(bodyBuilder, loc, ctx.returnType, ctx.errorMessage,
+                            ctx.sourceManager);
     bodyCtx.valueMap = ctx.valueMap;
     bodyCtx.loopStack = ctx.loopStack;
     bodyCtx.switchStack = ctx.switchStack;
@@ -957,7 +985,8 @@ static bool lowerWhileStmt(const clang::WhileStmt *whileStmt,
   {
     mlir::OpBuilder prepBuilder(ctx.builder.getContext());
     prepBuilder.setInsertionPointToStart(prepareBlock);
-    LoweringContext prepCtx(prepBuilder, loc, ctx.returnType, ctx.errorMessage);
+    LoweringContext prepCtx(prepBuilder, loc, ctx.returnType, ctx.errorMessage,
+                            ctx.sourceManager);
     prepCtx.valueMap = ctx.valueMap;
     prepCtx.loopStack = ctx.loopStack;
     for (auto [index, vd] : llvm::enumerate(mutatedVars))
@@ -984,7 +1013,8 @@ static bool lowerWhileStmt(const clang::WhileStmt *whileStmt,
   {
     mlir::OpBuilder bodyBuilder(ctx.builder.getContext());
     bodyBuilder.setInsertionPointToStart(bodyBlock);
-    LoweringContext bodyCtx(bodyBuilder, loc, ctx.returnType, ctx.errorMessage);
+    LoweringContext bodyCtx(bodyBuilder, loc, ctx.returnType, ctx.errorMessage,
+                            ctx.sourceManager);
     bodyCtx.valueMap = ctx.valueMap;
     bodyCtx.loopStack = ctx.loopStack;
     for (auto [index, vd] : llvm::enumerate(mutatedVars))
@@ -1051,7 +1081,8 @@ static bool lowerDoStmt(const clang::DoStmt *doStmt, LoweringContext &ctx) {
   {
     mlir::OpBuilder prepBuilder(ctx.builder.getContext());
     prepBuilder.setInsertionPointToStart(prepareBlock);
-    LoweringContext prepCtx(prepBuilder, loc, ctx.returnType, ctx.errorMessage);
+    LoweringContext prepCtx(prepBuilder, loc, ctx.returnType, ctx.errorMessage,
+                            ctx.sourceManager);
     prepCtx.valueMap = ctx.valueMap;
     prepCtx.loopStack = ctx.loopStack;
     for (auto [index, vd] : llvm::enumerate(mutatedVars))
@@ -1093,7 +1124,7 @@ static bool lowerDoStmt(const clang::DoStmt *doStmt, LoweringContext &ctx) {
         auto &elseBlock = condIf.getElseRegion().front();
         mlir::OpBuilder elseBuilder(&elseBlock, elseBlock.end());
         LoweringContext condCtx(elseBuilder, loc, ctx.returnType,
-                                ctx.errorMessage);
+                                ctx.errorMessage, ctx.sourceManager);
         condCtx.valueMap = prepCtx.valueMap;
         condCtx.loopStack = prepCtx.loopStack;
         condCtx.switchStack = prepCtx.switchStack;
@@ -1152,7 +1183,8 @@ static bool lowerDoStmt(const clang::DoStmt *doStmt, LoweringContext &ctx) {
   {
     mlir::OpBuilder bodyBuilder(ctx.builder.getContext());
     bodyBuilder.setInsertionPointToStart(bodyBlock);
-    LoweringContext bodyCtx(bodyBuilder, loc, ctx.returnType, ctx.errorMessage);
+    LoweringContext bodyCtx(bodyBuilder, loc, ctx.returnType, ctx.errorMessage,
+                            ctx.sourceManager);
     bodyCtx.valueMap = ctx.valueMap;
     bodyCtx.loopStack = ctx.loopStack;
     bodyCtx.switchStack = ctx.switchStack;
@@ -1273,7 +1305,7 @@ static bool lowerSwitchStmt(const clang::SwitchStmt *switchStmt,
     mlir::OpBuilder analysisBuilder(ctx.builder.getContext());
     analysisBuilder.setInsertionPointToStart(&analysisRegion.front());
     LoweringContext analysisCtx(analysisBuilder, loc, ctx.returnType,
-                                ctx.errorMessage);
+                                ctx.errorMessage, ctx.sourceManager);
     analysisCtx.valueMap = ctx.valueMap;
     analysisCtx.loopStack = ctx.loopStack;
     analysisCtx.switchStack = ctx.switchStack;
@@ -1357,7 +1389,8 @@ static bool lowerSwitchStmt(const clang::SwitchStmt *switchStmt,
     mlir::OpBuilder thenBuilder(ctx.builder.getContext());
     thenBuilder.setInsertionPointToStart(&thenBlock);
 
-    LoweringContext caseCtx(thenBuilder, loc, ctx.returnType, ctx.errorMessage);
+    LoweringContext caseCtx(thenBuilder, loc, ctx.returnType, ctx.errorMessage,
+                            ctx.sourceManager);
     caseCtx.valueMap = ctx.valueMap;
     caseCtx.loopStack = ctx.loopStack;
     caseCtx.switchStack = ctx.switchStack;
@@ -1498,9 +1531,12 @@ public:
     funcBuilder.create<simt::dialect::ActiveMaskOp>(loc,
                                                    funcBuilder.getI64Type());
 
+    const clang::SourceManager &sourceManager =
+        decl->getASTContext().getSourceManager();
+
     LoweringContext ctx(funcBuilder, loc,
                         resultTypes.empty() ? mlir::Type() : resultTypes.front(),
-                        errorMessage);
+                        errorMessage, &sourceManager);
     for (auto [param, arg] : llvm::zip(decl->parameters(), entry->getArguments()))
       ctx.valueMap[param] = arg;
 
