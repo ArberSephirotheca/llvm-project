@@ -1333,6 +1333,23 @@ static mlir::Value lowerExpr(const clang::Expr *expr, LoweringContext &ctx) {
     case clang::UnaryOperatorKind::UO_Plus:
       return operand;
     case clang::UnaryOperatorKind::UO_Minus: {
+      if (isEmitContext(ctx)) {
+        EmitInterpreter interp(ctx);
+        simt_hlsl_import::SourceLoc src{unOp, loc};
+        if (auto floatType = mlir::dyn_cast<mlir::FloatType>(operand.getType())) {
+          std::string tag = buildFloatTag(floatType);
+          mlir::Value zero = interp.emitConstantFloat(0.0, tag.c_str(), src);
+          return interp.emitArithmetic(simt_hlsl_import::ArithOp::Sub, zero,
+                                       operand, src);
+        }
+        if (auto intType = mlir::dyn_cast<mlir::IntegerType>(operand.getType())) {
+          std::string tag = buildIntegerTag(intType);
+          mlir::Value zero =
+              interp.emitConstantInt(0, tag.c_str(), src);
+          return interp.emitArithmetic(simt_hlsl_import::ArithOp::Sub, zero,
+                                       operand, src);
+        }
+      }
       if (auto floatType = mlir::dyn_cast<mlir::FloatType>(operand.getType()))
         return ctx.builder.create<mlir::arith::NegFOp>(loc, operand)
             .getResult();
@@ -1344,6 +1361,23 @@ static mlir::Value lowerExpr(const clang::Expr *expr, LoweringContext &ctx) {
       return ctx.fail("unary minus requires numeric operand"), mlir::Value();
     }
     case clang::UnaryOperatorKind::UO_LNot: {
+      if (isEmitContext(ctx)) {
+        EmitInterpreter interp(ctx);
+        simt_hlsl_import::SourceLoc src{unOp, loc};
+        if (auto intType = mlir::dyn_cast<mlir::IntegerType>(operand.getType())) {
+          std::string tag = buildIntegerTag(intType);
+          mlir::Value zero = interp.emitConstantInt(0, tag.c_str(), src);
+          return interp.emitCompare(simt_hlsl_import::CmpOp::EQ, operand, zero,
+                                    src);
+        }
+        if (auto floatType = mlir::dyn_cast<mlir::FloatType>(operand.getType())) {
+          std::string tag = buildFloatTag(floatType);
+          mlir::Value zero =
+              interp.emitConstantFloat(0.0, tag.c_str(), src);
+          return interp.emitCompare(simt_hlsl_import::CmpOp::EQ, operand, zero,
+                                    src);
+        }
+      }
       if (auto intType = mlir::dyn_cast<mlir::IntegerType>(operand.getType())) {
         mlir::Value zero = makeIntegerConstant(0, intType);
         return ctx.builder
@@ -1361,6 +1395,17 @@ static mlir::Value lowerExpr(const clang::Expr *expr, LoweringContext &ctx) {
       return ctx.fail("logical not requires scalar operand"), mlir::Value();
     }
     case clang::UnaryOperatorKind::UO_Not: {
+      if (isEmitContext(ctx)) {
+        EmitInterpreter interp(ctx);
+        if (auto intType = mlir::dyn_cast<mlir::IntegerType>(operand.getType())) {
+          simt_hlsl_import::SourceLoc src{unOp, loc};
+          std::string tag = buildIntegerTag(intType);
+          mlir::Value allOnes =
+              interp.emitConstantInt(-1, tag.c_str(), src);
+          return interp.emitArithmetic(simt_hlsl_import::ArithOp::BitXor,
+                                       operand, allOnes, src);
+        }
+      }
       if (auto intType = mlir::dyn_cast<mlir::IntegerType>(operand.getType())) {
         mlir::Value allOnes = makeIntegerConstant(-1, intType);
         return ctx.builder.create<mlir::arith::XOrIOp>(loc, operand, allOnes)
@@ -1386,6 +1431,36 @@ static mlir::Value lowerExpr(const clang::Expr *expr, LoweringContext &ctx) {
       bool isIncrement =
           unOp->getOpcode() == clang::UnaryOperatorKind::UO_PreInc ||
           unOp->getOpcode() == clang::UnaryOperatorKind::UO_PostInc;
+
+      if (isEmitContext(ctx)) {
+        EmitInterpreter interp(ctx);
+        simt_hlsl_import::SourceLoc src{unOp, loc};
+        if (auto intType = mlir::dyn_cast<mlir::IntegerType>(operand.getType())) {
+          std::string tag = buildIntegerTag(intType);
+          mlir::Value one = interp.emitConstantInt(1, tag.c_str(), src);
+          updated = interp.emitArithmetic(isIncrement
+                                              ? simt_hlsl_import::ArithOp::Add
+                                              : simt_hlsl_import::ArithOp::Sub,
+                                          operand, one, src);
+        } else if (auto floatType =
+                       mlir::dyn_cast<mlir::FloatType>(operand.getType())) {
+          std::string tag = buildFloatTag(floatType);
+          mlir::Value one = interp.emitConstantFloat(1.0, tag.c_str(), src);
+          updated = interp.emitArithmetic(isIncrement
+                                              ? simt_hlsl_import::ArithOp::Add
+                                              : simt_hlsl_import::ArithOp::Sub,
+                                          operand, one, src);
+        } else {
+          return ctx.fail("increment/decrement requires numeric operand"),
+                 mlir::Value();
+        }
+        ctx.valueMap[target] = updated;
+        ctx.mutatedVars.insert(target);
+        interp.noteMutation(target);
+        bool isPost = unOp->getOpcode() == clang::UnaryOperatorKind::UO_PostInc ||
+                      unOp->getOpcode() == clang::UnaryOperatorKind::UO_PostDec;
+        return isPost ? original : updated;
+      }
 
       if (auto intType = mlir::dyn_cast<mlir::IntegerType>(operand.getType())) {
         mlir::Value one = makeIntegerConstant(1, intType);
@@ -2130,11 +2205,18 @@ static mlir::Value lowerAssignment(const clang::BinaryOperator *binOp,
   if (!rhs)
     return {};
 
+  bool emitMode = isEmitContext(ctx);
+
   const clang::Expr *lhsExpr = binOp->getLHS()->IgnoreParenImpCasts();
   if (const auto *lhsDeclRef = llvm::dyn_cast<clang::DeclRefExpr>(lhsExpr)) {
     const clang::ValueDecl *vd = lhsDeclRef->getDecl();
     auto it = ctx.valueMap.find(vd);
     if (it != ctx.valueMap.end()) {
+      if (emitMode) {
+        EmitInterpreter interp(ctx);
+        interp.bindVariable(vd, rhs);
+        interp.noteMutation(vd);
+      }
       it->second = rhs;
       ctx.mutatedVars.insert(vd);
       return rhs;
