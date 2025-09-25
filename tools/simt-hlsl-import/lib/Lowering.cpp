@@ -4,6 +4,7 @@
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/BuiltinTypes.h"
@@ -150,6 +151,8 @@ static mlir::Type convertType(const clang::QualType &qt, mlir::OpBuilder &builde
   return {};
 }
 
+static mlir::Value buildZeroValue(LoweringContext &ctx, mlir::Type type);
+
 static std::optional<std::string>
 buildDxilTripleForProfile(llvm::StringRef profile) {
   llvm::SmallVector<llvm::StringRef, 4> parts;
@@ -254,6 +257,64 @@ static mlir::Value lowerExpr(const clang::Expr *expr, LoweringContext &ctx) {
     if (it != ctx.valueMap.end())
       return it->second;
     return ctx.fail("reference to unknown value"), mlir::Value();
+  }
+
+  if (const auto *vecElem =
+          llvm::dyn_cast<clang::ExtVectorElementExpr>(expr)) {
+    if (vecElem->isArrow())
+      return ctx.fail("pointer-based vector swizzles are unsupported"),
+             mlir::Value();
+
+    mlir::Value base = lowerExpr(vecElem->getBase(), ctx);
+    if (!base)
+      return {};
+
+    auto baseVecType = mlir::dyn_cast<mlir::VectorType>(base.getType());
+    if (!baseVecType || baseVecType.getRank() != 1)
+      return ctx.fail("vector element access requires 1-D vector operand"),
+             mlir::Value();
+
+    llvm::SmallVector<uint32_t, 4> elementIndices32;
+    vecElem->getEncodedElementAccess(elementIndices32);
+    llvm::SmallVector<int64_t, 4> elements;
+    elements.reserve(elementIndices32.size());
+    for (uint32_t idx : elementIndices32) {
+      if (idx >= baseVecType.getShape()[0])
+        return ctx.fail("vector element index out of range"), mlir::Value();
+      elements.push_back(static_cast<int64_t>(idx));
+    }
+    if (elements.empty())
+      return ctx.fail("vector element access with no components"),
+             mlir::Value();
+
+    if (elements.size() == 1) {
+      llvm::SmallVector<int64_t, 1> position = {elements[0]};
+      return ctx.builder
+          .create<mlir::vector::ExtractOp>(loc, base, position)
+          .getResult();
+    }
+
+    mlir::Type elementType = baseVecType.getElementType();
+    auto resultType = mlir::VectorType::get(
+        {static_cast<int64_t>(elements.size())}, elementType);
+    mlir::Value result = buildZeroValue(ctx, resultType);
+    if (!result)
+      return {};
+
+    for (auto [outIdx, elementIndex] : llvm::enumerate(elements)) {
+      llvm::SmallVector<int64_t, 1> extractPos = {elementIndex};
+      mlir::Value component =
+          ctx.builder.create<mlir::vector::ExtractOp>(loc, base, extractPos)
+              .getResult();
+      llvm::SmallVector<int64_t, 1> insertPos = {
+          static_cast<int64_t>(outIdx)};
+      result = ctx.builder
+                    .create<mlir::vector::InsertOp>(loc, component, result,
+                                                    insertPos)
+                    .getResult();
+    }
+
+    return result;
   }
 
   if (const auto *unOp = llvm::dyn_cast<clang::UnaryOperator>(expr)) {
@@ -2143,6 +2204,7 @@ Result<mlir::OwningOpRef<mlir::ModuleOp>>
 translateComputeShader(mlir::MLIRContext &context, llvm::StringRef fileName,
                        llvm::StringRef source, const TranslationOptions &options) {
   context.loadDialect<mlir::func::FuncDialect, mlir::arith::ArithDialect,
+                      mlir::vector::VectorDialect,
                       simt::dialect::SimtStepDialect>();
 
   mlir::OpBuilder builder(&context);
