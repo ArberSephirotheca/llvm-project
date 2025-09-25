@@ -20,6 +20,8 @@
 #include "clang/AST/Expr.h"
 #include "clang/AST/RecursiveASTVisitor.h"
 #include "clang/AST/Stmt.h"
+#include "clang/AST/Type.h"
+#include "clang/Basic/AddressSpaces.h"
 #include "clang/Basic/SourceManager.h"
 #include "clang/Frontend/CompilerInstance.h"
 #include "clang/Frontend/FrontendActions.h"
@@ -103,6 +105,7 @@ struct LoweringContext {
 
 static mlir::Type convertType(const clang::QualType &qt,
                               mlir::OpBuilder &builder) {
+  clang::LangAS addressSpace = qt.getAddressSpace();
   const clang::Type *type = qt.getCanonicalType().getTypePtrOrNull();
   if (!type)
     return {};
@@ -162,6 +165,18 @@ static mlir::Type convertType(const clang::QualType &qt,
     return mlir::VectorType::get({numElements}, elementType);
   }
 
+  if (const auto *arrayType = llvm::dyn_cast<clang::ArrayType>(type)) {
+    if (addressSpace == clang::LangAS::hlsl_groupshared) {
+      mlir::Type elementType =
+          convertType(arrayType->getElementType(), builder);
+      if (!elementType)
+        return {};
+      return simt::dialect::ResourceType::get(builder.getContext(),
+                                              simt::dialect::MemorySpace::Shared,
+                                              elementType);
+    }
+  }
+
   if (const auto *builtin = llvm::dyn_cast<clang::BuiltinType>(type)) {
     switch (builtin->getKind()) {
     case clang::BuiltinType::Void:
@@ -200,77 +215,27 @@ static mlir::Type convertType(const clang::QualType &qt,
 
 static mlir::Value buildZeroValue(LoweringContext &ctx, mlir::Type type);
 
-static mlir::Location getLocation(const clang::Stmt *stmt,
-                                  LoweringContext &ctx);
-static mlir::Value lowerExpr(const clang::Expr *expr, LoweringContext &ctx);
-
 struct BufferAccessInfo {
   mlir::Value resource;
   mlir::Value index;
   simt::dialect::ResourceType resourceType;
+  const clang::ValueDecl *decl = nullptr;
 };
 
 static std::optional<BufferAccessInfo>
+getBufferAccessInfo(const clang::Expr *baseExpr, const clang::Expr *indexExpr,
+                    LoweringContext &ctx);
+
+static std::optional<BufferAccessInfo>
 lowerBufferAccessOperands(const clang::CXXOperatorCallExpr *opCall,
-                          LoweringContext &ctx) {
-  if (!opCall || opCall->getNumArgs() < 2)
-    return std::nullopt;
-
-  mlir::Value resource = lowerExpr(opCall->getArg(0), ctx);
-  if (!resource)
-    return std::nullopt;
-
-  auto resourceType =
-      mlir::dyn_cast<simt::dialect::ResourceType>(resource.getType());
-  if (!resourceType)
-    return ctx.fail("subscript base must be a buffer resource"), std::nullopt;
-
-  mlir::Value index = lowerExpr(opCall->getArg(1), ctx);
-  if (!index)
-    return std::nullopt;
-  if (!mlir::isa<mlir::IntegerType>(index.getType()))
-    return ctx.fail("buffer subscript index must be integer"), std::nullopt;
-
-  return BufferAccessInfo{resource, index, resourceType};
-}
+                          LoweringContext &ctx);
 
 static mlir::Value lowerAssignment(const clang::BinaryOperator *binOp,
-                                   LoweringContext &ctx) {
-  mlir::Location loc = getLocation(binOp, ctx);
-  mlir::Value rhs = lowerExpr(binOp->getRHS(), ctx);
-  if (!rhs)
-    return {};
+                                   LoweringContext &ctx);
 
-  const clang::Expr *lhsExpr = binOp->getLHS()->IgnoreParenImpCasts();
-  if (const auto *lhsDeclRef = llvm::dyn_cast<clang::DeclRefExpr>(lhsExpr)) {
-    const clang::ValueDecl *vd = lhsDeclRef->getDecl();
-    auto it = ctx.valueMap.find(vd);
-    if (it != ctx.valueMap.end()) {
-      it->second = rhs;
-      ctx.mutatedVars.insert(vd);
-      return rhs;
-    }
-    return ctx.fail("reference to unknown value"), mlir::Value();
-  }
-
-  if (const auto *subscript =
-          llvm::dyn_cast<clang::CXXOperatorCallExpr>(lhsExpr)) {
-    if (subscript->getOperator() == clang::OO_Subscript) {
-      auto infoOpt = lowerBufferAccessOperands(subscript, ctx);
-      if (!infoOpt)
-        return {};
-      const auto &info = *infoOpt;
-      if (rhs.getType() != info.resourceType.getElementType())
-        return ctx.fail("assignment value must match buffer element type"),
-               mlir::Value();
-      ctx.builder.create<simt::dialect::BufferStoreOp>(loc, info.resource,
-                                                       info.index, rhs);
-      return rhs;
-    }
-  }
-
-  return ctx.fail("unsupported assignment target"), mlir::Value();
-}
+static mlir::Location getLocation(const clang::Stmt *stmt,
+                                  LoweringContext &ctx);
+static mlir::Value lowerExpr(const clang::Expr *expr, LoweringContext &ctx);
 
 static std::optional<std::string>
 buildDxilTripleForProfile(llvm::StringRef profile) {
@@ -387,6 +352,17 @@ static mlir::Value lowerExpr(const clang::Expr *expr, LoweringContext &ctx) {
           .create<simt::dialect::BufferLoadOp>(loc, info.resource, info.index)
           .getResult();
     }
+  }
+
+  if (const auto *arraySub = llvm::dyn_cast<clang::ArraySubscriptExpr>(expr)) {
+    auto infoOpt = getBufferAccessInfo(arraySub->getBase(), arraySub->getIdx(),
+                                       ctx);
+    if (!infoOpt)
+      return {};
+    const auto &info = *infoOpt;
+    return ctx.builder
+        .create<simt::dialect::BufferLoadOp>(loc, info.resource, info.index)
+        .getResult();
   }
 
   if (const auto *vecElem = llvm::dyn_cast<clang::ExtVectorElementExpr>(expr)) {
@@ -1067,6 +1043,101 @@ static mlir::Value lowerExpr(const clang::Expr *expr, LoweringContext &ctx) {
   }
 
   return ctx.fail("unsupported expression lowering"), mlir::Value();
+}
+
+static std::optional<BufferAccessInfo>
+getBufferAccessInfo(const clang::Expr *baseExpr, const clang::Expr *indexExpr,
+                    LoweringContext &ctx) {
+  if (!baseExpr || !indexExpr)
+    return std::nullopt;
+
+  baseExpr = baseExpr->IgnoreParenImpCasts();
+  indexExpr = indexExpr->IgnoreParenImpCasts();
+
+  mlir::Value resource = lowerExpr(baseExpr, ctx);
+  if (!resource)
+    return std::nullopt;
+
+  auto resourceType =
+      mlir::dyn_cast<simt::dialect::ResourceType>(resource.getType());
+  if (!resourceType)
+    return ctx.fail("subscript base must be a buffer resource"), std::nullopt;
+
+  mlir::Value index = lowerExpr(indexExpr, ctx);
+  if (!index)
+    return std::nullopt;
+  if (!mlir::isa<mlir::IntegerType>(index.getType()))
+    return ctx.fail("buffer subscript index must be integer"), std::nullopt;
+
+  const clang::ValueDecl *decl = nullptr;
+  if (const auto *declRef = llvm::dyn_cast<clang::DeclRefExpr>(baseExpr))
+    decl = declRef->getDecl();
+
+  return BufferAccessInfo{resource, index, resourceType, decl};
+}
+
+static std::optional<BufferAccessInfo>
+lowerBufferAccessOperands(const clang::CXXOperatorCallExpr *opCall,
+                          LoweringContext &ctx) {
+  if (!opCall || opCall->getNumArgs() < 2)
+    return std::nullopt;
+  return getBufferAccessInfo(opCall->getArg(0), opCall->getArg(1), ctx);
+}
+
+static mlir::Value lowerAssignment(const clang::BinaryOperator *binOp,
+                                   LoweringContext &ctx) {
+  mlir::Location loc = getLocation(binOp, ctx);
+  mlir::Value rhs = lowerExpr(binOp->getRHS(), ctx);
+  if (!rhs)
+    return {};
+
+  const clang::Expr *lhsExpr = binOp->getLHS()->IgnoreParenImpCasts();
+  if (const auto *lhsDeclRef = llvm::dyn_cast<clang::DeclRefExpr>(lhsExpr)) {
+    const clang::ValueDecl *vd = lhsDeclRef->getDecl();
+    auto it = ctx.valueMap.find(vd);
+    if (it != ctx.valueMap.end()) {
+      it->second = rhs;
+      ctx.mutatedVars.insert(vd);
+      return rhs;
+    }
+    return ctx.fail("reference to unknown value"), mlir::Value();
+  }
+
+  if (const auto *subscript =
+          llvm::dyn_cast<clang::CXXOperatorCallExpr>(lhsExpr)) {
+    if (subscript->getOperator() == clang::OO_Subscript) {
+      auto infoOpt = lowerBufferAccessOperands(subscript, ctx);
+      if (!infoOpt)
+        return {};
+      const auto &info = *infoOpt;
+      if (rhs.getType() != info.resourceType.getElementType())
+        return ctx.fail("assignment value must match buffer element type"),
+               mlir::Value();
+      ctx.builder.create<simt::dialect::BufferStoreOp>(loc, info.resource,
+                                                       info.index, rhs);
+      if (info.decl)
+        ctx.mutatedVars.insert(info.decl);
+      return rhs;
+    }
+  }
+
+  if (const auto *arraySub = llvm::dyn_cast<clang::ArraySubscriptExpr>(lhsExpr)) {
+    auto infoOpt =
+        getBufferAccessInfo(arraySub->getBase(), arraySub->getIdx(), ctx);
+    if (!infoOpt)
+      return {};
+    const auto &info = *infoOpt;
+    if (rhs.getType() != info.resourceType.getElementType())
+      return ctx.fail("assignment value must match buffer element type"),
+             mlir::Value();
+    ctx.builder.create<simt::dialect::BufferStoreOp>(loc, info.resource,
+                                                     info.index, rhs);
+    if (info.decl)
+      ctx.mutatedVars.insert(info.decl);
+    return rhs;
+  }
+
+  return ctx.fail("unsupported assignment target"), mlir::Value();
 }
 
 static mlir::Value buildZeroValue(LoweringContext &ctx, mlir::Type type) {
@@ -2223,6 +2294,26 @@ public:
       return true;
 
     mlir::Type type = convertType(decl->getType(), moduleBuilder);
+    if (!type) {
+      clang::LangAS addressSpace = decl->getType().getAddressSpace();
+      if (addressSpace == clang::LangAS::hlsl_groupshared) {
+        clang::QualType varType = decl->getType();
+        const clang::Type *elementTy =
+            varType.getCanonicalType().getTypePtrOrNull();
+        if (!elementTy)
+          return true;
+        while (auto *arrayTy = llvm::dyn_cast<clang::ArrayType>(elementTy))
+          elementTy =
+              arrayTy->getElementType().getCanonicalType().getTypePtr();
+        mlir::Type elementType = convertType(clang::QualType(elementTy, 0),
+                                             moduleBuilder);
+        if (!elementType)
+          return true;
+        type = simt::dialect::ResourceType::get(
+            moduleBuilder.getContext(),
+            simt::dialect::MemorySpace::Shared, elementType);
+      }
+    }
     if (!type)
       return true;
 

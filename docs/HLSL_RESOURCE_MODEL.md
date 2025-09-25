@@ -16,7 +16,7 @@ as `buffer[idx]` can be lowered faithfully.
   operations, leaving a substantial portion of practical HLSL unhandled.
 
 ## Goals
-1. Represent buffer resource handles and their element types in the SimtStep dialect.
+1. Represent buffer resource handles (global and shared) and their element types in the SimtStep dialect.
 2. Lower reads/writes (and eventually atomics) to explicit MLIR operations with
    well-defined memory effects.
 3. Preserve SSA mutation tracking so loops and conditionals continue to work
@@ -25,8 +25,8 @@ as `buffer[idx]` can be lowered faithfully.
 
 ## Proposed Solution
 ### 1. Dialect Extensions
-- Add a `simt.resource<memspace, element-type>` handle type that, for now,
-  captures global or shared buffer resources.
+- Add a `simt.resource<memspace, element-type>` handle type capturing global
+  and shared buffer resources.
 - Introduce operations such as:
   - `simt_step.buffer.load %handle, %index : (!simt.resource<Global, !type>, i32) -> !type`
   - `simt_step.buffer.store %handle, %index, %value : ...`
