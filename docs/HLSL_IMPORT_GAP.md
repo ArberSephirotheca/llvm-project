@@ -34,11 +34,12 @@ built-in handling.
 - **Intrinsics and built-ins**
   - Importer has no modelling for HLSL thread IDs, buffers, wave intrinsics, or
     barriers, and therefore cannot lower such calls today.
-  - Recent work introduces compatibility wrappers for a minimal subset:
-    `WaveActiveAllTrue`, `WaveActiveAnyTrue`, and `WaveGetLaneIndex` now lower
-    to the corresponding `simt_step.wave_*` / `simt_step.lane_id` operations.
-    `GroupMemoryBarrierWithGroupSync` is recognized (currently lowered to a
-    placeholder no-op) so shaders using it no longer fail during parsing.
+  - Compatibility wrappers cover the initial wave suite and count helper:
+    `WaveActiveAllTrue`, `WaveActiveAnyTrue`, `WaveActiveCountBits`, and
+    `WaveGetLaneIndex` now lower to the corresponding `simt_step.wave_*`,
+    maths `ctpop`, and `simt_step.lane_id` operations.
+    `GroupMemoryBarrierWithGroupSync` is accepted for parsing (still lowered to
+    a placeholder until the dialect semantics land).
   - Interpreter simulates threadgroups and waves, tracks built-in state, and
     recognises the associated intrinsic call patterns.
 

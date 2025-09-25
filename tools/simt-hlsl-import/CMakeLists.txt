@@ -21,6 +21,7 @@ target_link_libraries(simt-hlsl-import
         MLIRSupport
         MLIRFuncDialect
         MLIRArithDialect
+        MLIRMathDialect
         MLIRVectorDialect
         LLVMCore
         clangTooling

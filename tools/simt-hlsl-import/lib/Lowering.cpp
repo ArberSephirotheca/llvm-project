@@ -4,7 +4,10 @@
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/Math/IR/Math.h"
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
+#include "mlir/IR/BuiltinTypes.h"
+#include "llvm/Support/Casting.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -553,6 +556,55 @@ lowerWaveIntrinsicCall(const clang::CallExpr *call, LoweringContext &ctx) {
     return ctx.builder
         .create<simt::dialect::WaveAnyOp>(loc, boolType, operand)
         .getResult();
+  }
+
+  if (name == "WaveActiveCountBits") {
+    if (call->getNumArgs() != 1)
+      return ctx.fail("WaveActiveCountBits expects one argument"),
+             std::optional<mlir::Value>(mlir::Value());
+
+    mlir::Value operand = lowerExpr(call->getArg(0), ctx);
+    if (!operand)
+      return mlir::Value();
+
+    mlir::Type resultType = convertType(call->getType(), ctx.builder);
+    if (!resultType)
+      return ctx.fail("unsupported return type for WaveActiveCountBits"),
+             std::optional<mlir::Value>(mlir::Value());
+
+    mlir::Value mask =
+        ctx.builder
+            .create<simt::dialect::WaveBallotOp>(loc, ctx.builder.getI64Type(),
+                                                 operand)
+            .getMask();
+    mlir::Value pop =
+        ctx.builder.create<mlir::math::CtPopOp>(loc, mask).getResult();
+
+    if (pop.getType() == resultType)
+      return pop;
+
+    if (auto intType = llvm::dyn_cast<mlir::IntegerType>(resultType)) {
+      unsigned targetWidth = intType.getWidth();
+      unsigned sourceWidth =
+          llvm::cast<mlir::IntegerType>(pop.getType()).getWidth();
+      if (targetWidth == sourceWidth)
+        return pop;
+      if (targetWidth < sourceWidth)
+        return ctx.builder
+            .create<mlir::arith::TruncIOp>(loc, resultType, pop)
+            .getResult();
+      return ctx.builder
+          .create<mlir::arith::ExtUIOp>(loc, resultType, pop)
+          .getResult();
+    }
+
+    if (llvm::isa<mlir::IndexType>(resultType))
+      return ctx.builder
+          .create<mlir::arith::IndexCastOp>(loc, resultType, pop)
+          .getResult();
+
+    return ctx.fail("unsupported result type for WaveActiveCountBits"),
+           std::optional<mlir::Value>(mlir::Value());
   }
 
   if (name == "WaveGetLaneIndex") {
@@ -2956,7 +3008,7 @@ translateComputeShader(mlir::MLIRContext &context, llvm::StringRef fileName,
                        llvm::StringRef source,
                        const TranslationOptions &options) {
   context.loadDialect<mlir::func::FuncDialect, mlir::arith::ArithDialect,
-                      mlir::vector::VectorDialect,
+                      mlir::math::MathDialect, mlir::vector::VectorDialect,
                       simt::dialect::SimtStepDialect>();
 
   mlir::OpBuilder builder(&context);
