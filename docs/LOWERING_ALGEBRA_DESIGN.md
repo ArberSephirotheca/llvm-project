@@ -50,15 +50,15 @@ enum class ValueClass { ScalarInt, ScalarFloat, Vector, Pointer, Unknown };
 
 enum class ArithOp { Add, Sub, Mul, Div, Rem, Neg, BitAnd, BitOr, BitXor };
 enum class CmpOp { EQ, NE, LT, LE, GT, GE };
-enum class BarrierKind { WorkgroupSync, DeviceSync, AllSync };
+enum class BarrierKind { Workgroup, Device, All };
 
 template <typename Self>
 struct LoweringAlgebra {
   using Value = typename Self::ValueType;
 
   // Expressions
-  Value emitConstantInt(int64_t v, llvm::StringRef tag, SourceLoc);
-  Value emitConstantFloat(double v, llvm::StringRef tag, SourceLoc);
+  Value emitConstantInt(int64_t v, const char *tag, SourceLoc);
+  Value emitConstantFloat(double v, const char *tag, SourceLoc);
   Value emitArithmetic(ArithOp, Value lhs, Value rhs, SourceLoc);
   Value emitCompare(CmpOp, Value lhs, Value rhs, SourceLoc);
   Value emitSelect(Value cond, Value trueV, Value falseV, SourceLoc);
@@ -81,27 +81,24 @@ struct LoweringAlgebra {
   void emitElse(IfScope &scope);
 
   void emitYield(ArrayRef<Value> values, SourceLoc);
-  void emitReturn(Optional<Value>, SourceLoc);
+  void emitReturn(std::optional<Value>, SourceLoc);
 
   void emitBarrier(BarrierKind, SourceLoc);
-  void emitFence(BarrierKind, llvm::StringRef memSpace, SourceLoc);
+  void emitFence(BarrierKind, const char *memSpace, SourceLoc);
 
   // Diagnostics / tracing
-  void trace(llvm::StringRef message, SourceLoc);
-  void reportError(SourceLoc, llvm::StringRef message);
-
-  static Self &get(LoweringContext &ctx);
+  void trace(const char *message, SourceLoc);
 };
 ```
 
 Notes:
 
 - The algebra is intentionally minimal. We add hooks as we refactor existing
-  lowering helpers. Value tags (`llvm::StringRef tag`) are symbolic tokens such
+  lowering helpers. Value tags (`const char *tag`) are symbolic tokens such
   as `"i32"`, `"f64"`, `"vector<4xf32>"`.
 - `Value` is interpreter-specific; the emit interpreter aliases it to
   `mlir::Value` while analysis stores a small `SymValue` (e.g., `{ValueClass,
-  Optional<unsigned> elementCount, Optional<bool> isConst}`).
+  std::optional<unsigned> elementCount, std::optional<bool> isConst`).
 - `SourceLoc` carries the clang node for analysis errors and the MLIR location
   for emit.
 
@@ -125,7 +122,7 @@ struct EmitInterpreter : LoweringAlgebra<EmitInterpreter> {
   AnchoredBuilder ab;
   DiagSink &diag;
 
-  Value emitConstantInt(int64_t v, llvm::StringRef tag, SourceLoc loc);
+  Value emitConstantInt(int64_t v, const char *tag, SourceLoc loc);
   // ... build real MLIR ops as today ...
 };
 ```
@@ -135,8 +132,8 @@ struct EmitInterpreter : LoweringAlgebra<EmitInterpreter> {
 ```cpp
 struct SymValue {
   ValueClass kind;
-  Optional<unsigned> elementCount;
-  Optional<bool> isConst;
+  std::optional<unsigned> elementCount;
+  std::optional<bool> isConst;
   // Additional metadata as needed (e.g., pointer space).
 };
 
@@ -147,7 +144,7 @@ struct AnalysisInterpreter : LoweringAlgebra<AnalysisInterpreter> {
   llvm::SmallPtrSet<const clang::ValueDecl *, 8> mutated;
   DiagSink &diag;
 
-  Value emitConstantInt(int64_t v, llvm::StringRef tag, SourceLoc); // record tag
+  Value emitConstantInt(int64_t v, const char *tag, SourceLoc); // record tag
   // ... other methods just update metadata, never emit MLIR
 };
 ```
@@ -161,7 +158,7 @@ struct TraceInterpreter : LoweringAlgebra<TraceInterpreter<Inner>> {
   Inner inner;
   raw_ostream &os;
 
-  ValueType emitConstantInt(int64_t v, llvm::StringRef tag, SourceLoc loc) {
+  ValueType emitConstantInt(int64_t v, const char *tag, SourceLoc loc) {
     os << "const " << tag << " = " << v << "\n";
     return inner.emitConstantInt(v, tag, loc);
   }
@@ -174,16 +171,100 @@ struct TraceInterpreter : LoweringAlgebra<TraceInterpreter<Inner>> {
 1. **Introduce the algebra scaffolding** (templates + interpreters) without
    changing behaviour. Emit interpreter forwards to existing `OpBuilder`
    helper functions; analysis interpreter mirrors the logic but only records
-   facts.
+   facts. **Status:** Landed via `LoweringAlgebra.h`; `Lowering.cpp` now
+   instantiates `EmitInterpreter`/`AnalysisInterpreter` with fork support for
+   nested regions.
 2. **Refactor barrier + buffer intrinsics first** – replace direct builder
    calls with algebra calls. Run both interpreters: analysis should produce no
-   MLIR; emit should pass existing tests.
+   MLIR; emit should pass existing tests. **Status:** Barrier/fence calls use
+   the new interpreters; buffer ops still rely on the legacy helpers.
 3. **Gradually migrate remaining helpers** (expressions, control flow, returns,
-   etc.). After each stage run `mlir::verify` + unit tests.
+   etc.). After each stage run `mlir::verify` + unit tests. **Status:** In
+   progress. Statement lowering now routes `DeclStmt` variable binding,
+   barrier utilities, and `ReturnStmt` emission through the algebra; expression
+   helpers still hard-code `LoweringContext`.
 4. **Introduce trace interpreter** for debugging and optional unit tests.
-5. **Once fully migrated**, delete direct builder access from lowering helpers.
-   The only way to emit IR will be through the algebra, guaranteeing analysis
-   walks are side-effect free.
+   **Status:** Not started.
+5. **Once fully migrated**, delete direct builder access from lowering helpers
+   and remove the scratch builder path used by analysis. **Status:** Blocked on
+   the tasks below.
+
+## Current Status Snapshot (July 2025)
+
+- Header `tools/simt-hlsl-import/include/simt-hlsl-import/LoweringAlgebra.h`
+  exposes the minimal algebra surface used by the barrier interpreters
+  (constants, arithmetic, variable binding, barriers/fences, diagnostics).
+- `Lowering.cpp` still owns the full `LoweringContext` stacks. `lowerStatement`
+  instantiates `EmitInterpreter`/`AnalysisInterpreter` (with `fork` for loops
+  and switch cases) so barrier utilities, local declarations, and returns now
+  flow through the algebra.
+- Analysis mode continues to run with a detached `OpBuilder`. The algebraized
+  paths suppress barrier/fence emission, and emit-mode literals / basic
+  arithmetic/comparisons now go through the algebra. Expression helpers still
+  materialise IR during analysis.
+- No dedicated diagnostics sink exists yet; all errors continue to flow through
+  `LoweringContext::fail`.
+
+## Detailed TODO Breakdown
+
+1. **Unify Interpreter Entry Points**
+   - Templatise `lowerExpr`, `lowerStatement`, and the helper family
+     (`lowerAssignment`, `lowerWaveIntrinsicCall`, etc.) on an interpreter type
+     `Interp`. Each helper should consume an `Interp &` instead of the raw
+     `LoweringContext`/`OpBuilder` pairs.
+   - Replace direct `OpBuilder` usage with algebra calls (`emitArithmetic`,
+     `emitCompare`, `emitSelect`, `emitReturn`, `emitBarrier`, `emitFence`).
+   - Ensure shared utilities (e.g., `lowerBufferAccessOperands`) return
+     interpreter values or algebra-friendly structs so both emit and analysis
+     paths can reuse them.
+
+2. **Expand Algebra Surface While Migrating**
+   - Add structured control-flow hooks promised in the sketch (`LoopScope`,
+     `IfScope`, `emitYield`) once the first helper requires them. Keep the API
+     conservative—only introduce a new hook when a migrated helper cannot be
+     expressed with the existing ones.
+   - Extend `BarrierKind` / mem-space tags as the codebase demands. The C++
+     enum currently uses `{Workgroup, Device, All}`; keep the documentation in
+     sync with the implementation.
+   - Introduce optional type-tag helpers (e.g., `ValueTag`) if needed for
+     vector/matrix lowering so the analysis interpreter can stay metadata-only.
+
+3. **Interpreters Beyond Barriers**
+   - Flesh out `EmitInterpreter` with real implementations that wrap
+     `OpBuilder`. Constructor already asserts an anchored builder; arithmetic
+     and constant hooks still need real implementations.
+   - Implement `AnalysisInterpreter` to produce symbolic `SymValue`s. The value
+     should record class, width, and const-ness so existing analyses can reason
+     about mutations without grabbing `mlir::Value` instances.
+   - Barrier-specific interpreters have been removed; ensure the generic
+     interpreters cover the remaining helper surfaces before deleting direct
+     `OpBuilder` usage.
+
+4. **Diagnostics and Tracing**
+   - Thread a `DiagSink` through the interpreters. Emit mode turns `SourceLoc`
+     into `mlir::Location` and issues `emitError`; analysis mode records
+     human-readable diagnostics without relying on `LoweringContext::fail`.
+   - Add the optional `TraceInterpreter` wrapper for debugging (forwarding to an
+     inner interpreter and logging calls). This becomes useful once more helpers
+     are algebra-based.
+
+5. **Context Simplification**
+   - Slim `LoweringContext` down to shared state (loop stacks, result types,
+     diagnostics). The interpreter becomes the single façade for IR emission and
+     analysis bookkeeping.
+   - Replace manual push/pop bookkeeping with RAII guards once the interpreter
+     exposes `LoopScope` / `IfScope`. Update the loop/switch helpers to use
+     these guards and delete the ad-hoc `controlStack` management.
+
+6. **Testing & Verification**
+   - Add regression coverage for both interpreters. At a minimum, ensure the
+     analysis interpreter leaves the module untouched (e.g., `CHECK-NOT` on
+     emitted IR) and that emit mode continues to pass existing importer tests.
+   - Consider unit-testing individual helpers with the `TraceInterpreter` or a
+     mock interpreter to confirm we do not regress analysis-only behaviour.
+
+Work through the items in order—the algebra surface may need to grow as each
+helper migrates, but the list above keeps the scope explicit for code review.
 
 ## Implementation Notes
 
