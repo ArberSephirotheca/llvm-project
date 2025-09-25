@@ -8,7 +8,9 @@
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "llvm/Support/Casting.h"
+#include "llvm/Support/ErrorHandling.h"
 #include "mlir/IR/Builders.h"
+#include "simt-hlsl-import/LoweringAlgebra.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/BuiltinTypes.h"
@@ -106,6 +108,156 @@ struct LoweringContext {
     return false;
   }
 };
+
+namespace {
+
+struct UnitValue {};
+
+struct EmitBarrierInterpreter
+    : simt_hlsl_import::LoweringAlgebra<EmitBarrierInterpreter, mlir::Value> {
+
+  LoweringContext &ctx;
+  mlir::Location loc;
+
+  EmitBarrierInterpreter(LoweringContext &ctx, mlir::Location loc)
+      : ctx(ctx), loc(loc) {}
+
+  // Only barrier/fence hooks are used for now. Other entry points are marked
+  // unreachable to surface accidental usage while the migration is in
+  // progress.
+
+  Value emitConstantInt(int64_t, const char *, simt_hlsl_import::SourceLoc) {
+    llvm_unreachable("emitConstantInt unused in barrier interpreter");
+  }
+  Value emitConstantFloat(double, const char *,
+                              simt_hlsl_import::SourceLoc) {
+    llvm_unreachable("emitConstantFloat unused in barrier interpreter");
+  }
+  Value emitArithmetic(simt_hlsl_import::ArithOp, Value, Value,
+                           simt_hlsl_import::SourceLoc) {
+    llvm_unreachable("emitArithmetic unused in barrier interpreter");
+  }
+  Value emitCompare(simt_hlsl_import::CmpOp, Value, Value,
+                        simt_hlsl_import::SourceLoc) {
+    llvm_unreachable("emitCompare unused in barrier interpreter");
+  }
+  Value emitSelect(Value, Value, Value,
+                       simt_hlsl_import::SourceLoc) {
+    llvm_unreachable("emitSelect unused in barrier interpreter");
+  }
+  Value lookupVariable(const clang::ValueDecl *) {
+    llvm_unreachable("lookupVariable unused in barrier interpreter");
+  }
+  void bindVariable(const clang::ValueDecl *, Value) {
+    llvm_unreachable("bindVariable unused in barrier interpreter");
+  }
+  void noteMutation(const clang::ValueDecl *) {
+    llvm_unreachable("noteMutation unused in barrier interpreter");
+  }
+  void emitReturn(std::optional<Value>,
+                  simt_hlsl_import::SourceLoc) {
+    llvm_unreachable("emitReturn unused in barrier interpreter");
+  }
+
+  void emitBarrier(simt_hlsl_import::BarrierKind, simt_hlsl_import::SourceLoc);
+  void emitFence(simt_hlsl_import::BarrierKind, const char *memSpace,
+                 simt_hlsl_import::SourceLoc);
+
+  void trace(const char *, simt_hlsl_import::SourceLoc) {}
+
+  void reportError(simt_hlsl_import::SourceLoc, const char *message) {
+    ctx.fail(message);
+  }
+};
+
+struct AnalysisBarrierInterpreter
+    : simt_hlsl_import::LoweringAlgebra<AnalysisBarrierInterpreter, UnitValue> {
+
+  LoweringContext &ctx;
+
+  AnalysisBarrierInterpreter(LoweringContext &ctx) : ctx(ctx) {}
+
+  Value emitConstantInt(int64_t, const char *,
+                            simt_hlsl_import::SourceLoc) {
+    return {};
+  }
+  Value emitConstantFloat(double, const char *,
+                              simt_hlsl_import::SourceLoc) {
+    return {};
+  }
+  Value emitArithmetic(simt_hlsl_import::ArithOp, Value, Value,
+                           simt_hlsl_import::SourceLoc) {
+    return {};
+  }
+  Value emitCompare(simt_hlsl_import::CmpOp, Value, Value,
+                        simt_hlsl_import::SourceLoc) {
+    return {};
+  }
+  Value emitSelect(Value, Value, Value,
+                       simt_hlsl_import::SourceLoc) {
+    return {};
+  }
+  Value lookupVariable(const clang::ValueDecl *) { return {}; }
+  void bindVariable(const clang::ValueDecl *, Value) {}
+  void noteMutation(const clang::ValueDecl *) {}
+  void emitReturn(std::optional<Value>,
+                  simt_hlsl_import::SourceLoc) {}
+
+  void emitBarrier(simt_hlsl_import::BarrierKind,
+                   simt_hlsl_import::SourceLoc) {}
+  void emitFence(simt_hlsl_import::BarrierKind, const char *,
+                 simt_hlsl_import::SourceLoc) {}
+
+  void trace(const char *, simt_hlsl_import::SourceLoc) {}
+
+  void reportError(simt_hlsl_import::SourceLoc, const char *message) {
+    ctx.fail(message);
+  }
+};
+
+} // namespace
+
+void EmitBarrierInterpreter::emitBarrier(simt_hlsl_import::BarrierKind kind,
+                                         simt_hlsl_import::SourceLoc) {
+  auto *context = ctx.builder.getContext();
+  auto scopeAttr =
+      simt::dialect::ScopeAttr::get(context, simt::dialect::Scope::Workgroup);
+  auto memSemAttr = simt::dialect::MemorySemanticsAttr::get(
+      context, simt::dialect::MemorySemantics::AcqRel);
+  (void)kind; // For now all barriers are workgroup scoped.
+  ctx.builder.create<simt::dialect::BarrierOp>(loc, scopeAttr, memSemAttr);
+}
+
+static std::optional<simt::dialect::MemorySpace>
+decodeMemorySpace(llvm::StringRef memSpace) {
+  if (memSpace == "Shared")
+    return simt::dialect::MemorySpace::Shared;
+  if (memSpace == "Global")
+    return simt::dialect::MemorySpace::Global;
+  if (memSpace == "Generic")
+    return simt::dialect::MemorySpace::Generic;
+  return std::nullopt;
+}
+
+void EmitBarrierInterpreter::emitFence(simt_hlsl_import::BarrierKind kind,
+                                       const char *memSpace,
+                                       simt_hlsl_import::SourceLoc) {
+  auto *context = ctx.builder.getContext();
+  auto scopeAttr =
+      simt::dialect::ScopeAttr::get(context, simt::dialect::Scope::Workgroup);
+  auto memSemAttr = simt::dialect::MemorySemanticsAttr::get(
+      context, simt::dialect::MemorySemantics::AcqRel);
+  (void)kind;
+  auto decoded = decodeMemorySpace(memSpace);
+  if (!decoded) {
+    ctx.fail("unrecognised memory space for barrier");
+    return;
+  }
+  ctx.builder.create<simt::dialect::FenceOp>(
+      loc, scopeAttr, memSemAttr,
+      simt::dialect::MemorySpaceAttr::get(context, *decoded));
+}
+
 
 static mlir::Type convertType(const clang::QualType &qt,
                               mlir::OpBuilder &builder) {
@@ -632,85 +784,63 @@ lowerWaveIntrinsicCall(const clang::CallExpr *call, LoweringContext &ctx) {
   return std::nullopt;
 }
 
-static bool lowerBarrierUtilityCall(const clang::CallExpr *call,
-                                    LoweringContext &ctx) {
-  if (!call)
-    return false;
-
+template <typename Interpreter>
+static bool lowerBarrierWithInterpreter(const clang::CallExpr *call,
+                                        LoweringContext &ctx,
+                                        Interpreter &interp) {
   const auto *callee = call->getDirectCallee();
   if (!callee)
     return false;
 
   llvm::StringRef name = callee->getName();
-  if (!(name == "GroupMemoryBarrier" ||
-        name == "GroupMemoryBarrierWithGroupSync" ||
-        name == "DeviceMemoryBarrier" ||
-        name == "DeviceMemoryBarrierWithGroupSync" ||
-        name == "AllMemoryBarrier" ||
-        name == "AllMemoryBarrierWithGroupSync"))
+  bool emitGroupSync = false;
+  const char *memSpace = nullptr;
+
+  if (name == "GroupMemoryBarrier")
+    memSpace = "Shared";
+  else if (name == "GroupMemoryBarrierWithGroupSync") {
+    memSpace = "Shared";
+    emitGroupSync = true;
+  } else if (name == "DeviceMemoryBarrier")
+    memSpace = "Global";
+  else if (name == "DeviceMemoryBarrierWithGroupSync") {
+    memSpace = "Global";
+    emitGroupSync = true;
+  } else if (name == "AllMemoryBarrier")
+    memSpace = "Generic";
+  else if (name == "AllMemoryBarrierWithGroupSync") {
+    memSpace = "Generic";
+    emitGroupSync = true;
+  } else {
     return false;
+  }
 
   if (call->getNumArgs() != 0)
     return ctx.fail("memory barrier utilities do not take arguments"), false;
 
-  auto *context = ctx.builder.getContext();
-  mlir::Location loc = getLocation(call, ctx);
+  simt_hlsl_import::SourceLoc src{call, getLocation(call, ctx)};
 
-  auto scopeAttr = simt::dialect::ScopeAttr::get(context,
-                                                 simt::dialect::Scope::Workgroup);
-  auto memSemAttr = simt::dialect::MemorySemanticsAttr::get(
-      context, simt::dialect::MemorySemantics::AcqRel);
+  interp.emitFence(simt_hlsl_import::BarrierKind::Workgroup, memSpace, src);
+  if (emitGroupSync)
+    interp.emitBarrier(simt_hlsl_import::BarrierKind::Workgroup, src);
+  return true;
+}
 
-  auto emitFence = [&](simt::dialect::MemorySpace space) {
-    mlir::Block *insertBlock = ctx.builder.getInsertionBlock();
-    if (!insertBlock || !insertBlock->getParentOp())
-      return;
-    ctx.builder.create<simt::dialect::FenceOp>(
-        loc, scopeAttr, memSemAttr,
-        simt::dialect::MemorySpaceAttr::get(context, space));
-  };
+static bool lowerBarrierUtilityCall(const clang::CallExpr *call,
+                                    LoweringContext &ctx) {
+  if (!call)
+    return false;
 
-  auto emitBarrier = [&]() {
-    mlir::Block *insertBlock = ctx.builder.getInsertionBlock();
-    if (!insertBlock || !insertBlock->getParentOp())
-      return;
-    ctx.builder.create<simt::dialect::BarrierOp>(loc, scopeAttr, memSemAttr);
-  };
+  mlir::Block *insertBlock = ctx.builder.getInsertionBlock();
+  bool emitMode = insertBlock && insertBlock->getParentOp();
 
-  if (name == "GroupMemoryBarrier") {
-    emitFence(simt::dialect::MemorySpace::Shared);
-    return true;
+  if (emitMode) {
+    EmitBarrierInterpreter interp(ctx, getLocation(call, ctx));
+    return lowerBarrierWithInterpreter(call, ctx, interp);
   }
 
-  if (name == "GroupMemoryBarrierWithGroupSync") {
-    emitFence(simt::dialect::MemorySpace::Shared);
-    emitBarrier();
-    return true;
-  }
-
-  if (name == "DeviceMemoryBarrier") {
-    emitFence(simt::dialect::MemorySpace::Global);
-    return true;
-  }
-
-  if (name == "DeviceMemoryBarrierWithGroupSync") {
-    emitFence(simt::dialect::MemorySpace::Global);
-    emitBarrier();
-    return true;
-  }
-
-  if (name == "AllMemoryBarrier") {
-    emitFence(simt::dialect::MemorySpace::Generic);
-    return true;
-  }
-
-  if (name == "AllMemoryBarrierWithGroupSync") {
-    emitFence(simt::dialect::MemorySpace::Generic);
-    emitBarrier();
-    return true;
-  }
-
-  return false;
+  AnalysisBarrierInterpreter interp(ctx);
+  return lowerBarrierWithInterpreter(call, ctx, interp);
 }
 
 static std::optional<std::string>
