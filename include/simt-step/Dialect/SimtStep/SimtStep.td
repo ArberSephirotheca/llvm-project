@@ -217,6 +217,176 @@ def SimtStep_BufferStoreOp : Op<SimtStep_Dialect, "buffer.store",
   ];
 }
 
+def SimtStep_BufferAtomicAddOp : Op<SimtStep_Dialect, "buffer.atomic_add",
+    [MemoryEffects<[MemWrite, MemRead]>]> {
+  let summary = "Atomic add on a buffer element";
+  let description = [{
+    Performs an atomic add on the buffer resource at the given index. Returns
+    the original value prior to the addition.
+  }];
+
+  let arguments = (ins SimtStep_ResourceType:$resource,
+                       AnyInteger:$index,
+                       AnyType:$value);
+  let results = (outs AnyType:$oldValue);
+
+  let hasVerifier = 1;
+  let skipDefaultBuilders = 1;
+  let builders = [
+    OpBuilder<(ins "mlir::Value":$resource, "mlir::Value":$index,
+                    "mlir::Value":$value)>
+  ];
+}
+
+def SimtStep_BufferAtomicExchangeOp : Op<SimtStep_Dialect,
+    "buffer.atomic_exchange", [MemoryEffects<[MemWrite, MemRead]>]> {
+  let summary = "Atomic exchange on a buffer element";
+  let description = [{
+    Performs an atomic exchange, writing the provided value and returning the
+    value previously stored at the buffer index.
+  }];
+
+  let arguments = (ins SimtStep_ResourceType:$resource,
+                       AnyInteger:$index,
+                       AnyType:$value);
+  let results = (outs AnyType:$oldValue);
+
+  let hasVerifier = 1;
+  let skipDefaultBuilders = 1;
+  let builders = [
+    OpBuilder<(ins "mlir::Value":$resource, "mlir::Value":$index,
+                    "mlir::Value":$value)>
+  ];
+}
+
+def SimtStep_BufferAtomicCompareExchangeOp : Op<SimtStep_Dialect,
+    "buffer.atomic_compare_exchange", [MemoryEffects<[MemWrite, MemRead]>]> {
+  let summary = "Atomic compare-and-exchange on a buffer element";
+  let description = [{
+    Performs an atomic compare-and-exchange. If the current element value
+    matches `compare`, it is replaced with `value`. The previous element value
+    is returned regardless of whether the swap occurred.
+  }];
+
+  let arguments = (ins SimtStep_ResourceType:$resource,
+                       AnyInteger:$index,
+                       AnyType:$compare,
+                       AnyType:$value);
+  let results = (outs AnyType:$oldValue);
+
+  let hasVerifier = 1;
+  let skipDefaultBuilders = 1;
+  let builders = [
+    OpBuilder<(ins "mlir::Value":$resource, "mlir::Value":$index,
+                    "mlir::Value":$compare, "mlir::Value":$value)>
+  ];
+}
+
+def SimtStep_BufferAtomicMinOp : Op<SimtStep_Dialect,
+    "buffer.atomic_min", [MemoryEffects<[MemWrite, MemRead]>]> {
+  let summary = "Atomic minimum on a buffer element";
+  let description = [{
+    Replaces the buffer element with the minimum of the current value and the
+    operand, returning the original value.
+  }];
+
+  let arguments = (ins SimtStep_ResourceType:$resource,
+                       AnyInteger:$index,
+                       AnyType:$value);
+  let results = (outs AnyType:$oldValue);
+
+  let hasVerifier = 1;
+  let skipDefaultBuilders = 1;
+  let builders = [
+    OpBuilder<(ins "mlir::Value":$resource, "mlir::Value":$index,
+                    "mlir::Value":$value)>
+  ];
+}
+
+def SimtStep_BufferAtomicMaxOp : Op<SimtStep_Dialect,
+    "buffer.atomic_max", [MemoryEffects<[MemWrite, MemRead]>]> {
+  let summary = "Atomic maximum on a buffer element";
+  let description = [{
+    Replaces the buffer element with the maximum of the current value and the
+    operand, returning the original value.
+  }];
+
+  let arguments = (ins SimtStep_ResourceType:$resource,
+                       AnyInteger:$index,
+                       AnyType:$value);
+  let results = (outs AnyType:$oldValue);
+
+  let hasVerifier = 1;
+  let skipDefaultBuilders = 1;
+  let builders = [
+    OpBuilder<(ins "mlir::Value":$resource, "mlir::Value":$index,
+                    "mlir::Value":$value)>
+  ];
+}
+
+def SimtStep_BufferAtomicAndOp : Op<SimtStep_Dialect,
+    "buffer.atomic_and", [MemoryEffects<[MemWrite, MemRead]>]> {
+  let summary = "Atomic bitwise AND on a buffer element";
+  let description = [{
+    Applies a bitwise AND with the operand and the buffer element. Returns the
+    previous element value.
+  }];
+
+  let arguments = (ins SimtStep_ResourceType:$resource,
+                       AnyInteger:$index,
+                       AnyType:$value);
+  let results = (outs AnyType:$oldValue);
+
+  let hasVerifier = 1;
+  let skipDefaultBuilders = 1;
+  let builders = [
+    OpBuilder<(ins "mlir::Value":$resource, "mlir::Value":$index,
+                    "mlir::Value":$value)>
+  ];
+}
+
+def SimtStep_BufferAtomicOrOp : Op<SimtStep_Dialect, "buffer.atomic_or",
+    [MemoryEffects<[MemWrite, MemRead]>]> {
+  let summary = "Atomic bitwise OR on a buffer element";
+  let description = [{
+    Applies a bitwise OR with the operand and the buffer element. Returns the
+    previous element value.
+  }];
+
+  let arguments = (ins SimtStep_ResourceType:$resource,
+                       AnyInteger:$index,
+                       AnyType:$value);
+  let results = (outs AnyType:$oldValue);
+
+  let hasVerifier = 1;
+  let skipDefaultBuilders = 1;
+  let builders = [
+    OpBuilder<(ins "mlir::Value":$resource, "mlir::Value":$index,
+                    "mlir::Value":$value)>
+  ];
+}
+
+def SimtStep_BufferAtomicXorOp : Op<SimtStep_Dialect, "buffer.atomic_xor",
+    [MemoryEffects<[MemWrite, MemRead]>]> {
+  let summary = "Atomic bitwise XOR on a buffer element";
+  let description = [{
+    Applies a bitwise XOR with the operand and the buffer element. Returns the
+    previous element value.
+  }];
+
+  let arguments = (ins SimtStep_ResourceType:$resource,
+                       AnyInteger:$index,
+                       AnyType:$value);
+  let results = (outs AnyType:$oldValue);
+
+  let hasVerifier = 1;
+  let skipDefaultBuilders = 1;
+  let builders = [
+    OpBuilder<(ins "mlir::Value":$resource, "mlir::Value":$index,
+                    "mlir::Value":$value)>
+  ];
+}
+
 // Control flow --------------------------------------------------------------
 
 def SimtStep_YieldOp : Op<SimtStep_Dialect, "yield",

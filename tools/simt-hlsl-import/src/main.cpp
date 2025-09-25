@@ -76,6 +76,10 @@ int main(int argc, char **argv) {
   }
 #endif
 
+#ifdef SIMT_HLSL_INTRINSICS_COMPAT
+  options.forcedIncludeFiles.emplace_back(SIMT_HLSL_INTRINSICS_COMPAT);
+#endif
+
   if (const char *env = std::getenv("SIMT_IMPORT_DEBUG_RESOURCE"))
     if (std::string_view(env) == "1")
       llvm::errs() << "[simt-hlsl-import] resource-dir="

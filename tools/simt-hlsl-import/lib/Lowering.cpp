@@ -36,6 +36,7 @@
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/ADT/StringSwitch.h"
 #include "llvm/ADT/Twine.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/raw_ostream.h"
@@ -140,6 +141,41 @@ static mlir::Type convertType(const clang::QualType &qt,
     return nullptr;
   }();
 
+  if (!tmplSpec) {
+    if (const auto *recordType = llvm::dyn_cast<clang::RecordType>(type)) {
+      const auto *cxxRecord =
+          llvm::dyn_cast<clang::CXXRecordDecl>(recordType->getDecl());
+      if (cxxRecord) {
+        llvm::SmallPtrSet<const clang::CXXRecordDecl *, 8> visited;
+        std::function<const clang::ClassTemplateSpecializationDecl *(
+            const clang::CXXRecordDecl *)>
+            findResourceBase = [&](const clang::CXXRecordDecl *record)
+                -> const clang::ClassTemplateSpecializationDecl * {
+          if (!record || !visited.insert(record).second)
+            return nullptr;
+          if (const auto *spec =
+                  llvm::dyn_cast<clang::ClassTemplateSpecializationDecl>(
+                      record))
+            return spec;
+          for (const clang::CXXBaseSpecifier &base : record->bases()) {
+            const clang::Type *baseType =
+                base.getType().getCanonicalType().getTypePtrOrNull();
+            if (!baseType)
+              continue;
+            baseType = baseType->getUnqualifiedDesugaredType();
+            if (const auto *baseRecord =
+                    baseType->getAsCXXRecordDecl())
+              if (const auto *spec = findResourceBase(baseRecord))
+                return spec;
+          }
+          return nullptr;
+        };
+
+        tmplSpec = findResourceBase(cxxRecord);
+      }
+    }
+  }
+
   if (tmplSpec) {
     auto name = tmplSpec->getName();
     if ((name == "Buffer" || name == "RWBuffer") &&
@@ -152,6 +188,64 @@ static mlir::Type convertType(const clang::QualType &qt,
         auto memorySpace = simt::dialect::MemorySpace::Global;
         return simt::dialect::ResourceType::get(builder.getContext(),
                                                 memorySpace, elementType);
+      }
+    }
+  }
+
+  if (const auto *recordType = llvm::dyn_cast<clang::RecordType>(type)) {
+    const auto *recordDecl = recordType->getDecl();
+    llvm::StringRef recordName = recordDecl->getName();
+    if (recordName == "ByteAddressBuffer" || recordName == "RWByteAddressBuffer") {
+      mlir::Type elementType = builder.getIntegerType(32);
+      auto memorySpace = simt::dialect::MemorySpace::Global;
+      return simt::dialect::ResourceType::get(builder.getContext(), memorySpace,
+                                              elementType);
+    }
+
+    if (const auto *cxxRecord =
+            llvm::dyn_cast<clang::CXXRecordDecl>(recordDecl)) {
+      for (const auto *annot :
+           cxxRecord->specific_attrs<clang::AnnotateAttr>()) {
+        llvm::StringRef text = annot->getAnnotation();
+        if (!text.consume_front("simt.resource:"))
+          continue;
+
+        llvm::StringRef memSpaceStr;
+        llvm::StringRef elementStr;
+        std::tie(memSpaceStr, elementStr) = text.split(':');
+        if (elementStr.empty())
+          continue;
+
+        auto memorySpace = simt::dialect::MemorySpace::Global;
+        if (memSpaceStr == "Shared")
+          memorySpace = simt::dialect::MemorySpace::Shared;
+        else if (memSpaceStr == "Private")
+          memorySpace = simt::dialect::MemorySpace::Private;
+        else if (memSpaceStr == "Generic")
+          memorySpace = simt::dialect::MemorySpace::Generic;
+        else if (!memSpaceStr.empty() && memSpaceStr != "Global")
+          continue;
+
+        mlir::Type elementType;
+        if (elementStr == "i8")
+          elementType = builder.getIntegerType(8);
+        else if (elementStr == "i16")
+          elementType = builder.getIntegerType(16);
+        else if (elementStr == "i32")
+          elementType = builder.getIntegerType(32);
+        else if (elementStr == "i64")
+          elementType = builder.getIntegerType(64);
+        else if (elementStr == "f16")
+          elementType = builder.getF16Type();
+        else if (elementStr == "f32")
+          elementType = builder.getF32Type();
+        else if (elementStr == "f64")
+          elementType = builder.getF64Type();
+        else
+          continue;
+
+        return simt::dialect::ResourceType::get(builder.getContext(), memorySpace,
+                                                elementType);
       }
     }
   }
@@ -222,6 +316,17 @@ struct BufferAccessInfo {
   const clang::ValueDecl *decl = nullptr;
 };
 
+enum class BufferAtomicKind {
+  Add,
+  Exchange,
+  CompareExchange,
+  Min,
+  Max,
+  And,
+  Or,
+  Xor,
+};
+
 static std::optional<BufferAccessInfo>
 getBufferAccessInfo(const clang::Expr *baseExpr, const clang::Expr *indexExpr,
                     LoweringContext &ctx);
@@ -233,9 +338,267 @@ lowerBufferAccessOperands(const clang::CXXOperatorCallExpr *opCall,
 static mlir::Value lowerAssignment(const clang::BinaryOperator *binOp,
                                    LoweringContext &ctx);
 
+static std::optional<mlir::Value>
+lowerAtomicMemberCall(const clang::CXXMemberCallExpr *call,
+                      LoweringContext &ctx);
+
 static mlir::Location getLocation(const clang::Stmt *stmt,
                                   LoweringContext &ctx);
 static mlir::Value lowerExpr(const clang::Expr *expr, LoweringContext &ctx);
+
+static std::optional<mlir::Value>
+lowerAtomicCall(const clang::CallExpr *call, LoweringContext &ctx);
+
+static std::optional<mlir::Value>
+lowerWaveIntrinsicCall(const clang::CallExpr *call, LoweringContext &ctx);
+
+static std::optional<mlir::Value>
+lowerBarrierUtilityCall(const clang::CallExpr *call, LoweringContext &ctx);
+
+static mlir::Value emitBufferAtomicOp(BufferAtomicKind kind,
+                                      const BufferAccessInfo &info,
+                                      mlir::Value compareValue,
+                                      mlir::Value valueValue,
+                                      mlir::Location loc,
+                                      LoweringContext &ctx) {
+  switch (kind) {
+  case BufferAtomicKind::Add:
+    return ctx.builder
+        .create<simt::dialect::BufferAtomicAddOp>(loc, info.resource,
+                                                  info.index, valueValue)
+        .getOldValue();
+  case BufferAtomicKind::Exchange:
+    return ctx.builder
+        .create<simt::dialect::BufferAtomicExchangeOp>(loc, info.resource,
+                                                        info.index, valueValue)
+        .getOldValue();
+  case BufferAtomicKind::CompareExchange:
+    return ctx.builder
+        .create<simt::dialect::BufferAtomicCompareExchangeOp>(
+            loc, info.resource, info.index, compareValue, valueValue)
+        .getOldValue();
+  case BufferAtomicKind::Min:
+    return ctx.builder
+        .create<simt::dialect::BufferAtomicMinOp>(loc, info.resource,
+                                                  info.index, valueValue)
+        .getOldValue();
+  case BufferAtomicKind::Max:
+    return ctx.builder
+        .create<simt::dialect::BufferAtomicMaxOp>(loc, info.resource,
+                                                  info.index, valueValue)
+        .getOldValue();
+  case BufferAtomicKind::And:
+    return ctx.builder
+        .create<simt::dialect::BufferAtomicAndOp>(loc, info.resource,
+                                                  info.index, valueValue)
+        .getOldValue();
+  case BufferAtomicKind::Or:
+    return ctx.builder
+        .create<simt::dialect::BufferAtomicOrOp>(loc, info.resource,
+                                                 info.index, valueValue)
+        .getOldValue();
+  case BufferAtomicKind::Xor:
+    return ctx.builder
+        .create<simt::dialect::BufferAtomicXorOp>(loc, info.resource,
+                                                  info.index, valueValue)
+        .getOldValue();
+  }
+
+  llvm_unreachable("unknown buffer atomic kind");
+}
+
+static std::optional<BufferAccessInfo>
+getBufferAccessInfoFromLValue(const clang::Expr *expr,
+                              LoweringContext &ctx) {
+  if (!expr)
+    return std::nullopt;
+
+  expr = expr->IgnoreParenImpCasts();
+
+  if (const auto *subscript =
+          llvm::dyn_cast<clang::CXXOperatorCallExpr>(expr)) {
+    if (subscript->getOperator() == clang::OO_Subscript)
+      return lowerBufferAccessOperands(subscript, ctx);
+  }
+
+  if (const auto *arraySub = llvm::dyn_cast<clang::ArraySubscriptExpr>(expr))
+    return getBufferAccessInfo(arraySub->getBase(), arraySub->getIdx(), ctx);
+
+  return std::nullopt;
+}
+
+static std::optional<mlir::Value>
+lowerAtomicCall(const clang::CallExpr *call, LoweringContext &ctx) {
+  if (!call)
+    return std::nullopt;
+
+  const auto *callee = call->getDirectCallee();
+  if (!callee)
+    return std::nullopt;
+
+  auto kind = llvm::StringSwitch<std::optional<BufferAtomicKind>>(callee->getName())
+                  .Case("InterlockedAdd", BufferAtomicKind::Add)
+                  .Case("InterlockedExchange", BufferAtomicKind::Exchange)
+                  .Case("InterlockedCompareExchange",
+                        BufferAtomicKind::CompareExchange)
+                  .Case("InterlockedMin", BufferAtomicKind::Min)
+                  .Case("InterlockedMax", BufferAtomicKind::Max)
+                  .Case("InterlockedAnd", BufferAtomicKind::And)
+                  .Case("InterlockedOr", BufferAtomicKind::Or)
+                  .Case("InterlockedXor", BufferAtomicKind::Xor)
+                  .Default(std::nullopt);
+  if (!kind)
+    return std::nullopt;
+
+  unsigned numArgs = call->getNumArgs();
+  unsigned valueOperandCount =
+      *kind == BufferAtomicKind::CompareExchange ? 2U : 1U;
+  unsigned baseArgCount = 1 + valueOperandCount;
+  if (numArgs != baseArgCount && numArgs != baseArgCount + 1)
+    return ctx.fail("unexpected argument count for atomic call"),
+           std::optional<mlir::Value>(mlir::Value());
+
+  const clang::Expr *destArg = call->getArg(0);
+  if (!destArg)
+    return ctx.fail("atomic call missing destination argument"),
+           std::optional<mlir::Value>(mlir::Value());
+
+  destArg = destArg->IgnoreParenImpCasts();
+  if (const auto *outExpr =
+          llvm::dyn_cast<clang::HLSLOutArgExpr>(destArg))
+    destArg = outExpr->getArgLValue()->IgnoreParenImpCasts();
+
+  auto infoOpt = getBufferAccessInfoFromLValue(destArg, ctx);
+  if (!infoOpt)
+    return ctx.fail("atomic destination must be a buffer element"),
+           std::optional<mlir::Value>(mlir::Value());
+
+  BufferAccessInfo info = *infoOpt;
+  mlir::Location loc = getLocation(call, ctx);
+
+  unsigned argIndex = 1;
+
+  mlir::Value compareValue;
+  mlir::Value valueValue;
+  if (*kind == BufferAtomicKind::CompareExchange) {
+    compareValue = lowerExpr(call->getArg(argIndex++), ctx);
+    if (!compareValue)
+      return mlir::Value();
+    valueValue = lowerExpr(call->getArg(argIndex++), ctx);
+    if (!valueValue)
+      return mlir::Value();
+  } else {
+    valueValue = lowerExpr(call->getArg(argIndex++), ctx);
+    if (!valueValue)
+      return mlir::Value();
+  }
+
+  const clang::Expr *outArg = nullptr;
+  if (numArgs == baseArgCount + 1)
+    outArg = call->getArg(argIndex++);
+
+  mlir::Value oldValue =
+      emitBufferAtomicOp(*kind, info, compareValue, valueValue, loc, ctx);
+
+  if (info.decl)
+    ctx.mutatedVars.insert(info.decl);
+
+  if (outArg) {
+    const clang::Expr *stripped = outArg->IgnoreParenImpCasts();
+    if (const auto *outExpr =
+            llvm::dyn_cast<clang::HLSLOutArgExpr>(stripped))
+      stripped = outExpr->getArgLValue()->IgnoreParenImpCasts();
+    const clang::ValueDecl *outDecl = nullptr;
+    if (const auto *declRef =
+            llvm::dyn_cast<clang::DeclRefExpr>(stripped))
+      outDecl = declRef->getDecl();
+    if (!outDecl)
+      return ctx.fail(
+                 "atomic original value argument must reference a variable"),
+             std::optional<mlir::Value>(mlir::Value());
+    ctx.valueMap[outDecl] = oldValue;
+    ctx.mutatedVars.insert(outDecl);
+  }
+
+  return mlir::Value();
+}
+
+static std::optional<mlir::Value>
+lowerWaveIntrinsicCall(const clang::CallExpr *call, LoweringContext &ctx) {
+  if (!call)
+    return std::nullopt;
+
+  const auto *callee = call->getDirectCallee();
+  if (!callee)
+    return std::nullopt;
+
+  llvm::StringRef name = callee->getName();
+  mlir::Location loc = getLocation(call, ctx);
+
+  if (name == "WaveActiveAllTrue" || name == "WaveActiveAnyTrue") {
+    if (call->getNumArgs() != 1)
+      return ctx.fail("wave intrinsic expects one argument"),
+             std::optional<mlir::Value>(mlir::Value());
+    mlir::Value operand = lowerExpr(call->getArg(0), ctx);
+    if (!operand)
+      return mlir::Value();
+    mlir::Type boolType = convertType(call->getType(), ctx.builder);
+    if (!boolType)
+      return ctx.fail("unsupported return type for wave intrinsic"),
+             std::optional<mlir::Value>(mlir::Value());
+    if (name == "WaveActiveAllTrue")
+      return ctx.builder
+          .create<simt::dialect::WaveAllOp>(loc, boolType, operand)
+          .getResult();
+    return ctx.builder
+        .create<simt::dialect::WaveAnyOp>(loc, boolType, operand)
+        .getResult();
+  }
+
+  if (name == "WaveGetLaneIndex") {
+    if (call->getNumArgs() != 0)
+      return ctx.fail("WaveGetLaneIndex expects no arguments"),
+             std::optional<mlir::Value>(mlir::Value());
+    mlir::Type expectedType = convertType(call->getType(), ctx.builder);
+    if (!expectedType)
+      return ctx.fail("unsupported return type for WaveGetLaneIndex"),
+             std::optional<mlir::Value>(mlir::Value());
+    mlir::Value laneIndex =
+        ctx.builder
+            .create<simt::dialect::LaneIdOp>(loc, ctx.builder.getIndexType())
+            .getLane();
+    if (mlir::isa<mlir::IndexType>(expectedType))
+      return laneIndex;
+    if (mlir::isa<mlir::IntegerType>(expectedType))
+      return ctx.builder
+          .create<mlir::arith::IndexCastOp>(loc, expectedType, laneIndex)
+          .getResult();
+    return ctx.fail("unsupported result type for WaveGetLaneIndex"),
+           std::optional<mlir::Value>(mlir::Value());
+  }
+
+  return std::nullopt;
+}
+
+static std::optional<mlir::Value>
+lowerBarrierUtilityCall(const clang::CallExpr *call, LoweringContext &ctx) {
+  if (!call)
+    return std::nullopt;
+
+  const auto *callee = call->getDirectCallee();
+  if (!callee)
+    return std::nullopt;
+
+  llvm::StringRef name = callee->getName();
+  if (name != "GroupMemoryBarrierWithGroupSync")
+    return std::nullopt;
+
+  if (call->getNumArgs() != 0)
+    return ctx.fail("memory barrier utilities do not take arguments"),
+           std::optional<mlir::Value>(mlir::Value());
+
+  return mlir::Value();
+}
 
 static std::optional<std::string>
 buildDxilTripleForProfile(llvm::StringRef profile) {
@@ -352,6 +715,20 @@ static mlir::Value lowerExpr(const clang::Expr *expr, LoweringContext &ctx) {
           .create<simt::dialect::BufferLoadOp>(loc, info.resource, info.index)
           .getResult();
     }
+  }
+
+  if (const auto *memberCall = llvm::dyn_cast<clang::CXXMemberCallExpr>(expr)) {
+    if (auto lowered = lowerAtomicMemberCall(memberCall, ctx))
+      return *lowered;
+  }
+
+  if (const auto *callExpr = llvm::dyn_cast<clang::CallExpr>(expr)) {
+    if (auto lowered = lowerAtomicCall(callExpr, ctx))
+      return *lowered;
+    if (auto lowered = lowerWaveIntrinsicCall(callExpr, ctx))
+      return *lowered;
+    if (auto lowered = lowerBarrierUtilityCall(callExpr, ctx))
+      return *lowered;
   }
 
   if (const auto *arraySub = llvm::dyn_cast<clang::ArraySubscriptExpr>(expr)) {
@@ -1082,6 +1459,109 @@ lowerBufferAccessOperands(const clang::CXXOperatorCallExpr *opCall,
   if (!opCall || opCall->getNumArgs() < 2)
     return std::nullopt;
   return getBufferAccessInfo(opCall->getArg(0), opCall->getArg(1), ctx);
+}
+
+static std::optional<mlir::Value>
+lowerAtomicMemberCall(const clang::CXXMemberCallExpr *call,
+                      LoweringContext &ctx) {
+  if (!call)
+    return std::nullopt;
+
+  const auto *methodDecl = call->getMethodDecl();
+  if (!methodDecl)
+    return std::nullopt;
+
+  auto kind = llvm::StringSwitch<std::optional<BufferAtomicKind>>(
+                  methodDecl->getName())
+                  .Case("InterlockedAdd", BufferAtomicKind::Add)
+                  .Case("InterlockedExchange", BufferAtomicKind::Exchange)
+                  .Case("InterlockedCompareExchange",
+                        BufferAtomicKind::CompareExchange)
+                  .Case("InterlockedMin", BufferAtomicKind::Min)
+                  .Case("InterlockedMax", BufferAtomicKind::Max)
+                  .Case("InterlockedAnd", BufferAtomicKind::And)
+                  .Case("InterlockedOr", BufferAtomicKind::Or)
+                  .Case("InterlockedXor", BufferAtomicKind::Xor)
+                  .Default(std::nullopt);
+  if (!kind)
+    return std::nullopt;
+
+  const clang::Expr *objectExpr = call->getImplicitObjectArgument();
+  if (!objectExpr)
+    return ctx.fail("atomic call requires an object expression"),
+           std::optional<mlir::Value>(mlir::Value());
+
+  mlir::Value resource = lowerExpr(objectExpr, ctx);
+  if (!resource)
+    return mlir::Value();
+
+  auto resourceType =
+      mlir::dyn_cast<simt::dialect::ResourceType>(resource.getType());
+  if (!resourceType)
+    return ctx.fail("atomic call requires a buffer resource"),
+           std::optional<mlir::Value>(mlir::Value());
+
+  mlir::Location loc = getLocation(call, ctx);
+
+  unsigned numArgs = call->getNumArgs();
+  unsigned valueOperandCount =
+      *kind == BufferAtomicKind::CompareExchange ? 2U : 1U;
+  unsigned baseArgCount = 1 + valueOperandCount;
+  if (numArgs != baseArgCount && numArgs != baseArgCount + 1)
+    return ctx.fail("unexpected argument count for atomic call"),
+           std::optional<mlir::Value>(mlir::Value());
+
+  unsigned argIndex = 0;
+  mlir::Value indexValue = lowerExpr(call->getArg(argIndex++), ctx);
+  if (!indexValue)
+    return mlir::Value();
+
+  BufferAccessInfo info{resource, indexValue, resourceType, nullptr};
+
+  mlir::Value compareValue;
+  mlir::Value valueValue;
+  if (*kind == BufferAtomicKind::CompareExchange) {
+    compareValue = lowerExpr(call->getArg(argIndex++), ctx);
+    if (!compareValue)
+      return mlir::Value();
+    valueValue = lowerExpr(call->getArg(argIndex++), ctx);
+    if (!valueValue)
+      return mlir::Value();
+  } else {
+    valueValue = lowerExpr(call->getArg(argIndex++), ctx);
+    if (!valueValue)
+      return mlir::Value();
+  }
+
+  const clang::Expr *outArg = nullptr;
+  if (numArgs == baseArgCount + 1)
+    outArg = call->getArg(argIndex++);
+
+  mlir::Value oldValue =
+      emitBufferAtomicOp(*kind, info, compareValue, valueValue, loc, ctx);
+
+  if (const auto *declRef =
+          llvm::dyn_cast<clang::DeclRefExpr>(objectExpr->IgnoreParenImpCasts()))
+    ctx.mutatedVars.insert(declRef->getDecl());
+
+  if (outArg) {
+    const clang::Expr *stripped = outArg->IgnoreParenImpCasts();
+    if (const auto *outExpr =
+            llvm::dyn_cast<clang::HLSLOutArgExpr>(stripped))
+      stripped = outExpr->getArgLValue()->IgnoreParenImpCasts();
+    const clang::ValueDecl *outDecl = nullptr;
+    if (const auto *declRef =
+            llvm::dyn_cast<clang::DeclRefExpr>(stripped))
+      outDecl = declRef->getDecl();
+    if (!outDecl)
+      return ctx.fail(
+                 "atomic original value argument must reference a variable"),
+             std::optional<mlir::Value>(mlir::Value());
+    ctx.valueMap[outDecl] = oldValue;
+    ctx.mutatedVars.insert(outDecl);
+  }
+
+  return mlir::Value();
 }
 
 static mlir::Value lowerAssignment(const clang::BinaryOperator *binOp,
@@ -2499,6 +2979,11 @@ translateComputeShader(mlir::MLIRContext &context, llvm::StringRef fileName,
   clangArgs.emplace_back("-Xclang");
   clangArgs.emplace_back("-finclude-default-header");
   clangArgs.emplace_back("-Wno-hlsl-dxc-compatability");
+
+  for (const std::string &include : options.forcedIncludeFiles) {
+    clangArgs.emplace_back("-include");
+    clangArgs.emplace_back(include);
+  }
 
   for (const std::string &dir : options.extraIncludeDirs) {
     clangArgs.emplace_back("-isystem");

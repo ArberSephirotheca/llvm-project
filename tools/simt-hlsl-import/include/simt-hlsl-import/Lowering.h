@@ -21,6 +21,7 @@ struct TranslationOptions {
   std::string shaderProfile = "cs_6_7";
   std::string resourceDir;
   std::vector<std::string> extraIncludeDirs;
+  std::vector<std::string> forcedIncludeFiles;
 };
 
 Result<mlir::OwningOpRef<mlir::ModuleOp>>

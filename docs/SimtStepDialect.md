@@ -39,6 +39,12 @@ Width must be non-zero. The type will be extended with mask-specific utilities a
 ### Memory (placeholders)
 - `simt_step.mem_load` – load from the supplied address operand, yielding a value of arbitrary type.
 - `simt_step.mem_store` – store the given value to the supplied address.
+- `simt_step.buffer.load` / `simt_step.buffer.store` – typed buffer resource access with explicit element indices.
+- `simt_step.buffer.atomic_add` – atomic add returning the previous element value.
+- `simt_step.buffer.atomic_exchange` – atomic exchange returning the previous element value.
+- `simt_step.buffer.atomic_compare_exchange` – compare-and-exchange on a buffer element, returning the previous value.
+- `simt_step.buffer.atomic_min` / `.max` – atomic min/max updates returning the previous element value.
+- `simt_step.buffer.atomic_and` / `.or` / `.xor` – atomic bitwise operations returning the previous element value.
 
 ### Extension hook
 - `simt_step.custom` – plugin-defined instruction. Requires an `instr` string attribute and optional `params` dictionary; operands/results are variadic and unconstrained.
