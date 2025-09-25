@@ -673,12 +673,41 @@ struct EmitInterpreter
     return ifOp.getResult(0);
   }
 
-  Value emitBufferLoad(Value, Value, simt_hlsl_import::SourceLoc) {
-    llvm_unreachable("emitBufferLoad not yet routed through algebra");
+  Value emitBufferLoad(Value resourceHandle, Value index,
+                       const clang::ValueDecl *resourceDecl,
+                       simt_hlsl_import::SourceLoc loc) {
+    mlir::Location mlirLoc = resolveLoc(loc, ctx);
+    auto resourceType =
+        resourceHandle.getType().dyn_cast<simt::dialect::ResourceType>();
+    if (!resourceType)
+      return ctx.fail("buffer load requires resource handle"), mlir::Value();
+
+    return ctx.builder
+        .create<simt::dialect::BufferLoadOp>(mlirLoc, resourceHandle, index)
+        .getResult();
   }
 
-  void emitBufferStore(Value, Value, Value, simt_hlsl_import::SourceLoc) {
-    llvm_unreachable("emitBufferStore not yet routed through algebra");
+  void emitBufferStore(Value resourceHandle, Value index, Value storedValue,
+                       const clang::ValueDecl *resourceDecl,
+                       simt_hlsl_import::SourceLoc loc) {
+    mlir::Location mlirLoc = resolveLoc(loc, ctx);
+    auto resourceType =
+        resourceHandle.getType().dyn_cast<simt::dialect::ResourceType>();
+    if (!resourceType) {
+      ctx.fail("buffer store requires resource handle");
+      return;
+    }
+    if (storedValue.getType() != resourceType.getElementType()) {
+      ctx.fail("buffer store value must match element type");
+      return;
+    }
+
+    ctx.builder.create<simt::dialect::BufferStoreOp>(mlirLoc, resourceHandle,
+                                                     index, storedValue);
+    if (resourceDecl) {
+      ctx.mutatedVars.insert(resourceDecl);
+      ctx.symValueMap[resourceDecl] = makeSymValue(resourceDecl);
+    }
   }
 
   Value emitAtomic(simt_hlsl_import::BufferAtomicOp, Value, Value, Value, Value,
@@ -757,11 +786,13 @@ struct AnalysisInterpreter
     return {};
   }
 
-  Value emitBufferLoad(Value, Value, simt_hlsl_import::SourceLoc) {
+  Value emitBufferLoad(Value, Value, const clang::ValueDecl *,
+                       simt_hlsl_import::SourceLoc) {
     return {};
   }
 
-  void emitBufferStore(Value, Value, Value, simt_hlsl_import::SourceLoc) {}
+  void emitBufferStore(Value, Value, Value, const clang::ValueDecl *,
+                       simt_hlsl_import::SourceLoc) {}
 
   Value emitAtomic(simt_hlsl_import::BufferAtomicOp, Value, Value, Value, Value,
                    simt_hlsl_import::SourceLoc) {
@@ -1572,6 +1603,11 @@ static mlir::Value lowerExpr(const clang::Expr *expr, LoweringContext &ctx) {
       if (!infoOpt)
         return {};
       const auto &info = *infoOpt;
+      if (isEmitContext(ctx)) {
+        EmitInterpreter interp(ctx);
+        return interp.emitBufferLoad(info.resource, info.index, info.decl,
+                                     {expr, loc});
+      }
       return ctx.builder
           .create<simt::dialect::BufferLoadOp>(loc, info.resource, info.index)
           .getResult();
@@ -1596,6 +1632,11 @@ static mlir::Value lowerExpr(const clang::Expr *expr, LoweringContext &ctx) {
     if (!infoOpt)
       return {};
     const auto &info = *infoOpt;
+    if (isEmitContext(ctx)) {
+      EmitInterpreter interp(ctx);
+      return interp.emitBufferLoad(info.resource, info.index, info.decl,
+                                   {expr, loc});
+    }
     return ctx.builder
         .create<simt::dialect::BufferLoadOp>(loc, info.resource, info.index)
         .getResult();
@@ -2611,10 +2652,16 @@ static mlir::Value lowerAssignment(const clang::BinaryOperator *binOp,
       if (rhs.getType() != info.resourceType.getElementType())
         return ctx.fail("assignment value must match buffer element type"),
                mlir::Value();
-      ctx.builder.create<simt::dialect::BufferStoreOp>(loc, info.resource,
-                                                       info.index, rhs);
-      if (info.decl)
-        ctx.mutatedVars.insert(info.decl);
+      if (emitMode) {
+        EmitInterpreter interp(ctx);
+        interp.emitBufferStore(info.resource, info.index, rhs, info.decl,
+                               {binOp, loc});
+      } else {
+        ctx.builder.create<simt::dialect::BufferStoreOp>(loc, info.resource,
+                                                         info.index, rhs);
+        if (info.decl)
+          ctx.mutatedVars.insert(info.decl);
+      }
       return rhs;
     }
   }
@@ -2628,10 +2675,16 @@ static mlir::Value lowerAssignment(const clang::BinaryOperator *binOp,
     if (rhs.getType() != info.resourceType.getElementType())
       return ctx.fail("assignment value must match buffer element type"),
              mlir::Value();
-    ctx.builder.create<simt::dialect::BufferStoreOp>(loc, info.resource,
-                                                     info.index, rhs);
-    if (info.decl)
-      ctx.mutatedVars.insert(info.decl);
+    if (emitMode) {
+      EmitInterpreter interp(ctx);
+      interp.emitBufferStore(info.resource, info.index, rhs, info.decl,
+                             {binOp, loc});
+    } else {
+      ctx.builder.create<simt::dialect::BufferStoreOp>(loc, info.resource,
+                                                       info.index, rhs);
+      if (info.decl)
+        ctx.mutatedVars.insert(info.decl);
+    }
     return rhs;
   }
 

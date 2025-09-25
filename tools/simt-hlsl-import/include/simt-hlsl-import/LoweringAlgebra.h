@@ -79,13 +79,15 @@ template <typename Self, typename ValueT> struct LoweringAlgebra {
                                    std::forward<RHSMake>(rhsBuilder), loc);
   }
 
-  Value emitBufferLoad(Value resourceHandle, Value index, SourceLoc loc) {
-    return self().emitBufferLoad(resourceHandle, index, loc);
+  Value emitBufferLoad(Value resourceHandle, Value index,
+                       const clang::ValueDecl *resourceDecl, SourceLoc loc) {
+    return self().emitBufferLoad(resourceHandle, index, resourceDecl, loc);
   }
 
   void emitBufferStore(Value resourceHandle, Value index, Value storedValue,
-                       SourceLoc loc) {
-    self().emitBufferStore(resourceHandle, index, storedValue, loc);
+                       const clang::ValueDecl *resourceDecl, SourceLoc loc) {
+    self().emitBufferStore(resourceHandle, index, storedValue, resourceDecl,
+                           loc);
   }
 
   Value emitAtomic(BufferAtomicOp op, Value resourceHandle, Value index,
