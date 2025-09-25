@@ -973,17 +973,141 @@ struct AnalysisInterpreter
                           simt_hlsl_import::SourceLoc) {
     return {};
   }
-  Value emitArithmetic(simt_hlsl_import::ArithOp, Value, Value,
-                       simt_hlsl_import::SourceLoc) {
+  Value emitArithmetic(simt_hlsl_import::ArithOp op, Value lhs, Value rhs,
+                       simt_hlsl_import::SourceLoc loc) {
+    mlir::Location mlirLoc = resolveLoc(loc, ctx);
+
+    if (auto intType = mlir::dyn_cast<mlir::IntegerType>(lhs.getType())) {
+      switch (op) {
+      case simt_hlsl_import::ArithOp::Add:
+        return ctx.builder.create<mlir::arith::AddIOp>(mlirLoc, lhs, rhs)
+            .getResult();
+      case simt_hlsl_import::ArithOp::Sub:
+        return ctx.builder.create<mlir::arith::SubIOp>(mlirLoc, lhs, rhs)
+            .getResult();
+      case simt_hlsl_import::ArithOp::Mul:
+        return ctx.builder.create<mlir::arith::MulIOp>(mlirLoc, lhs, rhs)
+            .getResult();
+      case simt_hlsl_import::ArithOp::Div:
+        return ctx.builder.create<mlir::arith::DivSIOp>(mlirLoc, lhs, rhs)
+            .getResult();
+      case simt_hlsl_import::ArithOp::Rem:
+        return ctx.builder.create<mlir::arith::RemSIOp>(mlirLoc, lhs, rhs)
+            .getResult();
+      case simt_hlsl_import::ArithOp::Neg: {
+        auto zero = ctx.builder.create<mlir::arith::ConstantIntOp>(
+            mlirLoc, 0, intType.getWidth());
+        return ctx.builder
+            .create<mlir::arith::SubIOp>(mlirLoc, zero.getResult(), lhs)
+            .getResult();
+      }
+      case simt_hlsl_import::ArithOp::BitAnd:
+        return ctx.builder.create<mlir::arith::AndIOp>(mlirLoc, lhs, rhs)
+            .getResult();
+      case simt_hlsl_import::ArithOp::BitOr:
+        return ctx.builder.create<mlir::arith::OrIOp>(mlirLoc, lhs, rhs)
+            .getResult();
+      case simt_hlsl_import::ArithOp::BitXor:
+        return ctx.builder.create<mlir::arith::XOrIOp>(mlirLoc, lhs, rhs)
+            .getResult();
+      }
+    }
+
+    if (mlir::isa<mlir::FloatType>(lhs.getType())) {
+      switch (op) {
+      case simt_hlsl_import::ArithOp::Add:
+        return ctx.builder.create<mlir::arith::AddFOp>(mlirLoc, lhs, rhs)
+            .getResult();
+      case simt_hlsl_import::ArithOp::Sub:
+        return ctx.builder.create<mlir::arith::SubFOp>(mlirLoc, lhs, rhs)
+            .getResult();
+      case simt_hlsl_import::ArithOp::Mul:
+        return ctx.builder.create<mlir::arith::MulFOp>(mlirLoc, lhs, rhs)
+            .getResult();
+      case simt_hlsl_import::ArithOp::Div:
+        return ctx.builder.create<mlir::arith::DivFOp>(mlirLoc, lhs, rhs)
+            .getResult();
+      case simt_hlsl_import::ArithOp::Rem:
+        return ctx.builder.create<mlir::arith::RemFOp>(mlirLoc, lhs, rhs)
+            .getResult();
+      case simt_hlsl_import::ArithOp::Neg:
+        return ctx.builder.create<mlir::arith::NegFOp>(mlirLoc, lhs)
+            .getResult();
+      case simt_hlsl_import::ArithOp::BitAnd:
+      case simt_hlsl_import::ArithOp::BitOr:
+      case simt_hlsl_import::ArithOp::BitXor:
+        break;
+      }
+    }
+
+    ctx.fail("unsupported arithmetic operation for type");
     return {};
   }
-  Value emitCompare(simt_hlsl_import::CmpOp, Value, Value,
-                    simt_hlsl_import::SourceLoc) {
+  Value emitCompare(simt_hlsl_import::CmpOp op, Value lhs, Value rhs,
+                    simt_hlsl_import::SourceLoc loc) {
+    mlir::Location mlirLoc = resolveLoc(loc, ctx);
+    mlir::Type type = lhs.getType();
+
+    if (mlir::isa<mlir::IntegerType>(type) || mlir::isa<mlir::IndexType>(type)) {
+      mlir::arith::CmpIPredicate pred;
+      switch (op) {
+      case simt_hlsl_import::CmpOp::EQ:
+        pred = mlir::arith::CmpIPredicate::eq;
+        break;
+      case simt_hlsl_import::CmpOp::NE:
+        pred = mlir::arith::CmpIPredicate::ne;
+        break;
+      case simt_hlsl_import::CmpOp::LT:
+        pred = mlir::arith::CmpIPredicate::slt;
+        break;
+      case simt_hlsl_import::CmpOp::LE:
+        pred = mlir::arith::CmpIPredicate::sle;
+        break;
+      case simt_hlsl_import::CmpOp::GT:
+        pred = mlir::arith::CmpIPredicate::sgt;
+        break;
+      case simt_hlsl_import::CmpOp::GE:
+        pred = mlir::arith::CmpIPredicate::sge;
+        break;
+      }
+      return ctx.builder.create<mlir::arith::CmpIOp>(mlirLoc, pred, lhs, rhs)
+          .getResult();
+    }
+
+    if (mlir::isa<mlir::FloatType>(type)) {
+      mlir::arith::CmpFPredicate pred;
+      switch (op) {
+      case simt_hlsl_import::CmpOp::EQ:
+        pred = mlir::arith::CmpFPredicate::OEQ;
+        break;
+      case simt_hlsl_import::CmpOp::NE:
+        pred = mlir::arith::CmpFPredicate::UNE;
+        break;
+      case simt_hlsl_import::CmpOp::LT:
+        pred = mlir::arith::CmpFPredicate::OLT;
+        break;
+      case simt_hlsl_import::CmpOp::LE:
+        pred = mlir::arith::CmpFPredicate::OLE;
+        break;
+      case simt_hlsl_import::CmpOp::GT:
+        pred = mlir::arith::CmpFPredicate::OGT;
+        break;
+      case simt_hlsl_import::CmpOp::GE:
+        pred = mlir::arith::CmpFPredicate::OGE;
+        break;
+      }
+      return ctx.builder.create<mlir::arith::CmpFOp>(mlirLoc, pred, lhs, rhs)
+          .getResult();
+    }
+
+    ctx.fail("unsupported compare operands");
     return {};
   }
-  Value emitSelect(Value, Value, Value,
-                   simt_hlsl_import::SourceLoc) {
-    return {};
+  Value emitSelect(Value cond, Value trueV, Value falseV,
+                   simt_hlsl_import::SourceLoc loc) {
+    return ctx.builder
+        .create<mlir::arith::SelectOp>(resolveLoc(loc, ctx), cond, trueV, falseV)
+        .getResult();
   }
 
   template <typename RHSMake>
@@ -993,9 +1117,13 @@ struct AnalysisInterpreter
     return {};
   }
 
-  Value emitBufferLoad(Value, Value, const clang::ValueDecl *,
-                       simt_hlsl_import::SourceLoc) {
-    return {};
+  Value emitBufferLoad(Value resourceHandle, Value index,
+                       const clang::ValueDecl *,
+                       simt_hlsl_import::SourceLoc loc) {
+    mlir::Location mlirLoc = resolveLoc(loc, ctx);
+    return ctx.builder
+        .create<simt::dialect::BufferLoadOp>(mlirLoc, resourceHandle, index)
+        .getResult();
   }
 
   void emitBufferStore(Value, Value, Value, const clang::ValueDecl *,
@@ -1833,9 +1961,9 @@ static mlir::Value lowerExpr(const clang::Expr *expr, LoweringContext &ctx) {
         return interp.emitBufferLoad(info.resource, info.index, info.decl,
                                      {expr, loc});
       }
-      return ctx.builder
-          .create<simt::dialect::BufferLoadOp>(loc, info.resource, info.index)
-          .getResult();
+      AnalysisInterpreter interp(ctx);
+      return interp.emitBufferLoad(info.resource, info.index, info.decl,
+                                   {expr, loc});
     }
   }
 
@@ -1862,9 +1990,9 @@ static mlir::Value lowerExpr(const clang::Expr *expr, LoweringContext &ctx) {
       return interp.emitBufferLoad(info.resource, info.index, info.decl,
                                    {expr, loc});
     }
-    return ctx.builder
-        .create<simt::dialect::BufferLoadOp>(loc, info.resource, info.index)
-        .getResult();
+    AnalysisInterpreter interp(ctx);
+    return interp.emitBufferLoad(info.resource, info.index, info.decl,
+                                 {expr, loc});
   }
 
   if (const auto *vecElem = llvm::dyn_cast<clang::ExtVectorElementExpr>(expr)) {
@@ -2276,6 +2404,7 @@ static mlir::Value lowerExpr(const clang::Expr *expr, LoweringContext &ctx) {
       mlir::Value rhs = getRHS();
       if (ctx.failed || !rhs)
         return {};
+      simt_hlsl_import::SourceLoc src{binOp, loc};
       if (isEmitContext(ctx)) {
         simt_hlsl_import::CmpOp cmpOp;
         switch (binOp->getOpcode()) {
@@ -2301,64 +2430,33 @@ static mlir::Value lowerExpr(const clang::Expr *expr, LoweringContext &ctx) {
           llvm_unreachable("unhandled cmp opcode");
         }
         EmitInterpreter interp(ctx);
-        return interp.emitCompare(cmpOp, lhs, rhs, {binOp, loc});
+        return interp.emitCompare(cmpOp, lhs, rhs, src);
       }
-      if (mlir::isa<mlir::IntegerType>(lhs.getType()) ||
-          mlir::isa<mlir::IndexType>(lhs.getType())) {
-        mlir::arith::CmpIPredicate predicate;
-        switch (binOp->getOpcode()) {
-        case clang::BinaryOperatorKind::BO_EQ:
-          predicate = mlir::arith::CmpIPredicate::eq;
-          break;
-        case clang::BinaryOperatorKind::BO_NE:
-          predicate = mlir::arith::CmpIPredicate::ne;
-          break;
-        case clang::BinaryOperatorKind::BO_LT:
-          predicate = mlir::arith::CmpIPredicate::slt;
-          break;
-        case clang::BinaryOperatorKind::BO_LE:
-          predicate = mlir::arith::CmpIPredicate::sle;
-          break;
-        case clang::BinaryOperatorKind::BO_GT:
-          predicate = mlir::arith::CmpIPredicate::sgt;
-          break;
-        case clang::BinaryOperatorKind::BO_GE:
-          predicate = mlir::arith::CmpIPredicate::sge;
-          break;
-        default:
-          llvm_unreachable("unsupported integer comparison");
-        }
-        return ctx.builder.create<mlir::arith::CmpIOp>(loc, predicate, lhs,
-                                                       rhs);
+      AnalysisInterpreter interp(ctx);
+      simt_hlsl_import::CmpOp cmpOp;
+      switch (binOp->getOpcode()) {
+      case clang::BinaryOperatorKind::BO_EQ:
+        cmpOp = simt_hlsl_import::CmpOp::EQ;
+        break;
+      case clang::BinaryOperatorKind::BO_NE:
+        cmpOp = simt_hlsl_import::CmpOp::NE;
+        break;
+      case clang::BinaryOperatorKind::BO_LT:
+        cmpOp = simt_hlsl_import::CmpOp::LT;
+        break;
+      case clang::BinaryOperatorKind::BO_LE:
+        cmpOp = simt_hlsl_import::CmpOp::LE;
+        break;
+      case clang::BinaryOperatorKind::BO_GT:
+        cmpOp = simt_hlsl_import::CmpOp::GT;
+        break;
+      case clang::BinaryOperatorKind::BO_GE:
+        cmpOp = simt_hlsl_import::CmpOp::GE;
+        break;
+      default:
+        llvm_unreachable("unhandled cmp opcode");
       }
-      if (mlir::isa<mlir::FloatType>(lhs.getType())) {
-        mlir::arith::CmpFPredicate predicate;
-        switch (binOp->getOpcode()) {
-        case clang::BinaryOperatorKind::BO_EQ:
-          predicate = mlir::arith::CmpFPredicate::OEQ;
-          break;
-        case clang::BinaryOperatorKind::BO_NE:
-          predicate = mlir::arith::CmpFPredicate::UNE;
-          break;
-        case clang::BinaryOperatorKind::BO_LT:
-          predicate = mlir::arith::CmpFPredicate::OLT;
-          break;
-        case clang::BinaryOperatorKind::BO_LE:
-          predicate = mlir::arith::CmpFPredicate::OLE;
-          break;
-        case clang::BinaryOperatorKind::BO_GT:
-          predicate = mlir::arith::CmpFPredicate::OGT;
-          break;
-        case clang::BinaryOperatorKind::BO_GE:
-          predicate = mlir::arith::CmpFPredicate::OGE;
-          break;
-        default:
-          llvm_unreachable("unsupported float comparison");
-        }
-        return ctx.builder.create<mlir::arith::CmpFOp>(loc, predicate, lhs,
-                                                       rhs);
-      }
-      return ctx.fail("unsupported comparison operands"), mlir::Value();
+      return interp.emitCompare(cmpOp, lhs, rhs, src);
     }
     case clang::BinaryOperatorKind::BO_LAnd: {
       if (lhs.getType() != ctx.builder.getI1Type())
@@ -2619,74 +2717,71 @@ static mlir::Value lowerExpr(const clang::Expr *expr, LoweringContext &ctx) {
       mlir::Value rhs = getRHS();
       if (ctx.failed || !rhs)
         return {};
+      simt_hlsl_import::SourceLoc src{binOp, loc};
       if (isEmitContext(ctx)) {
         EmitInterpreter interp(ctx);
         return interp.emitArithmetic(simt_hlsl_import::ArithOp::Add, lhs, rhs,
-                                     {binOp, loc});
+                                     src);
       }
-      if (mlir::isa<mlir::IntegerType>(lhs.getType()))
-        return ctx.builder.create<mlir::arith::AddIOp>(loc, lhs, rhs);
-      if (mlir::isa<mlir::FloatType>(lhs.getType()))
-        return ctx.builder.create<mlir::arith::AddFOp>(loc, lhs, rhs);
-      break;
+      AnalysisInterpreter interp(ctx);
+      return interp.emitArithmetic(simt_hlsl_import::ArithOp::Add, lhs, rhs,
+                                   src);
     }
     case clang::BinaryOperatorKind::BO_Sub: {
       mlir::Value rhs = getRHS();
       if (ctx.failed || !rhs)
         return {};
+      simt_hlsl_import::SourceLoc src{binOp, loc};
       if (isEmitContext(ctx)) {
         EmitInterpreter interp(ctx);
         return interp.emitArithmetic(simt_hlsl_import::ArithOp::Sub, lhs, rhs,
-                                     {binOp, loc});
+                                     src);
       }
-      if (mlir::isa<mlir::IntegerType>(lhs.getType()))
-        return ctx.builder.create<mlir::arith::SubIOp>(loc, lhs, rhs);
-      if (mlir::isa<mlir::FloatType>(lhs.getType()))
-        return ctx.builder.create<mlir::arith::SubFOp>(loc, lhs, rhs);
-      break;
+      AnalysisInterpreter interp(ctx);
+      return interp.emitArithmetic(simt_hlsl_import::ArithOp::Sub, lhs, rhs,
+                                   src);
     }
     case clang::BinaryOperatorKind::BO_Mul: {
       mlir::Value rhs = getRHS();
       if (ctx.failed || !rhs)
         return {};
+      simt_hlsl_import::SourceLoc src{binOp, loc};
       if (isEmitContext(ctx)) {
         EmitInterpreter interp(ctx);
         return interp.emitArithmetic(simt_hlsl_import::ArithOp::Mul, lhs, rhs,
-                                     {binOp, loc});
+                                     src);
       }
-      if (mlir::isa<mlir::IntegerType>(lhs.getType()))
-        return ctx.builder.create<mlir::arith::MulIOp>(loc, lhs, rhs);
-      if (mlir::isa<mlir::FloatType>(lhs.getType()))
-        return ctx.builder.create<mlir::arith::MulFOp>(loc, lhs, rhs);
-      break;
+      AnalysisInterpreter interp(ctx);
+      return interp.emitArithmetic(simt_hlsl_import::ArithOp::Mul, lhs, rhs,
+                                   src);
     }
     case clang::BinaryOperatorKind::BO_Div: {
       mlir::Value rhs = getRHS();
       if (ctx.failed || !rhs)
         return {};
+      simt_hlsl_import::SourceLoc src{binOp, loc};
       if (isEmitContext(ctx)) {
         EmitInterpreter interp(ctx);
         return interp.emitArithmetic(simt_hlsl_import::ArithOp::Div, lhs, rhs,
-                                     {binOp, loc});
+                                     src);
       }
-      if (mlir::isa<mlir::IntegerType>(lhs.getType()))
-        return ctx.builder.create<mlir::arith::DivSIOp>(loc, lhs, rhs);
-      if (mlir::isa<mlir::FloatType>(lhs.getType()))
-        return ctx.builder.create<mlir::arith::DivFOp>(loc, lhs, rhs);
-      break;
+      AnalysisInterpreter interp(ctx);
+      return interp.emitArithmetic(simt_hlsl_import::ArithOp::Div, lhs, rhs,
+                                   src);
     }
     case clang::BinaryOperatorKind::BO_Rem: {
       mlir::Value rhs = getRHS();
       if (ctx.failed || !rhs)
         return {};
+      simt_hlsl_import::SourceLoc src{binOp, loc};
       if (isEmitContext(ctx)) {
         EmitInterpreter interp(ctx);
         return interp.emitArithmetic(simt_hlsl_import::ArithOp::Rem, lhs, rhs,
-                                     {binOp, loc});
+                                     src);
       }
-      if (mlir::isa<mlir::IntegerType>(lhs.getType()))
-        return ctx.builder.create<mlir::arith::RemSIOp>(loc, lhs, rhs);
-      break;
+      AnalysisInterpreter interp(ctx);
+      return interp.emitArithmetic(simt_hlsl_import::ArithOp::Rem, lhs, rhs,
+                                   src);
     }
     default:
       break;

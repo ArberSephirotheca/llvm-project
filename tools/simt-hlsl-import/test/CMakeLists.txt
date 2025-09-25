@@ -9,9 +9,8 @@ find_program(MLIR_FILE_CHECK
              NAMES mlir-file-check FileCheck
              HINTS "${LLVM_BINARY_DIR}" "${LLVM_BINARY_DIR}/bin")
 
-if(NOT EXISTS "${SIMT_HLSL_IMPORT_TEST_EXECUTABLE}")
-  message(FATAL_ERROR "simt-hlsl-import binary not found: "
-                      "${SIMT_HLSL_IMPORT_TEST_EXECUTABLE}")
+if(NOT TARGET simt-hlsl-import)
+  message(FATAL_ERROR "simt-hlsl-import target is not defined")
 endif()
 
 if(NOT MLIR_FILE_CHECK)
@@ -26,5 +25,4 @@ add_lit_testsuite(check-simt-hlsl-import "Running simt-hlsl-import regression te
   ARGS -j1)
 
 set_target_properties(check-simt-hlsl-import PROPERTIES FOLDER "Tests")
-
 

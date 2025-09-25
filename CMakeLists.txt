@@ -1,5 +1,19 @@
 cmake_minimum_required(VERSION 3.22)
 
+if (NOT CMAKE_C_COMPILER)
+    find_program(_clang_exe NAMES clang)
+    if (_clang_exe)
+        set(CMAKE_C_COMPILER "${_clang_exe}" CACHE FILEPATH "" FORCE)
+    endif()
+endif()
+
+if (NOT CMAKE_CXX_COMPILER)
+    find_program(_clangxx_exe NAMES clang++)
+    if (_clangxx_exe)
+        set(CMAKE_CXX_COMPILER "${_clangxx_exe}" CACHE FILEPATH "" FORCE)
+    endif()
+endif()
+
 project(SIMTStep LANGUAGES C CXX)
 
 # Allow build to locate LLVM/MLIR from common install prefix if the user
