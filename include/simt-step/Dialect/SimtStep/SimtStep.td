@@ -27,6 +27,7 @@ def SimtStep_Dialect : Dialect {
     extension points for SIMT semantics experiments.
   }];
   let usePropertiesForAttributes = 0;
+  let useDefaultTypePrinterParser = 1;
 }
 
 // Trait markers -------------------------------------------------------------
@@ -80,6 +81,23 @@ def SimtStep_MaskType : TypeDef<SimtStep_Dialect, "Mask"> {
   let assemblyFormat = [{ (`<` $width^ `>`)? }];
   let genVerifyDecl = 1;
 
+}
+
+def SimtStep_ResourceType : TypeDef<SimtStep_Dialect, "Resource"> {
+  let mnemonic = "resource";
+  let summary = "SIMT buffer resource handle";
+  let description = [{
+    Represents a handle to a GPU buffer resource. The type records the memory
+    space (e.g., global, shared) and the element type stored in the buffer.
+  }];
+
+  let parameters = (ins EnumParameter<SimtStep_MemorySpace>:$memorySpace,
+                        TypeParameter<"mlir::Type", "element type">:$elementType);
+
+  let assemblyFormat = [{
+        `<` $memorySpace `,` $elementType `>`
+  }];
+  let genVerifyDecl = 1;
 }
 
 // Minimal op examples ------------------------------------------------------
@@ -157,6 +175,46 @@ def SimtStep_MaskMergeOp : Op<SimtStep_Dialect, "mask_merge"> {
   let results = (outs I64:$merged);
 
   let assemblyFormat = "$incoming attr-dict";
+}
+
+def SimtStep_BufferLoadOp : Op<SimtStep_Dialect, "buffer.load",
+    [MemoryEffects<[MemRead]>]> {
+  let summary = "Load an element from a buffer resource";
+  let description = [{
+    Reads the element at the given index from the buffer resource operand and
+    produces it as the result. The result type must match the resource element
+    type.
+  }];
+
+  let arguments = (ins SimtStep_ResourceType:$resource,
+                       AnyInteger:$index);
+  let results = (outs AnyType:$result);
+
+  let hasVerifier = 1;
+  let skipDefaultBuilders = 1;
+  let builders = [
+    OpBuilder<(ins "mlir::Value":$resource, "mlir::Value":$index)>
+  ];
+}
+
+def SimtStep_BufferStoreOp : Op<SimtStep_Dialect, "buffer.store",
+    [MemoryEffects<[MemWrite]>]> {
+  let summary = "Store an element into a buffer resource";
+  let description = [{
+    Writes the provided value into the buffer resource at the given index. The
+    value type must match the resource element type.
+  }];
+
+  let arguments = (ins SimtStep_ResourceType:$resource,
+                       AnyInteger:$index,
+                       AnyType:$value);
+
+  let hasVerifier = 1;
+  let skipDefaultBuilders = 1;
+  let builders = [
+    OpBuilder<(ins "mlir::Value":$resource, "mlir::Value":$index,
+                    "mlir::Value":$value)>
+  ];
 }
 
 // Control flow --------------------------------------------------------------

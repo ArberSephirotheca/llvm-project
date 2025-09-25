@@ -19,21 +19,21 @@ using namespace mlir;
 namespace simt::dialect {
 
 void registerSimtStepDialect(DialectRegistry &registry) {
-    registry.insert<::simt::dialect::SimtStepDialect>();
+  registry.insert<::simt::dialect::SimtStepDialect>();
 }
 
 void SimtStepDialect::initialize() {
-    addOperations<
+  addOperations<
 #define GET_OP_LIST
 #include "SimtStepOps.cpp.inc"
 #undef GET_OP_LIST
-    >();
+      >();
 
-    addTypes<
+  addTypes<
 #define GET_TYPEDEF_LIST
 #include "SimtStepTypes.cpp.inc"
 #undef GET_TYPEDEF_LIST
-    >();
+      >();
 }
 
 } // namespace simt::dialect
@@ -42,11 +42,27 @@ void SimtStepDialect::initialize() {
 
 namespace simt::dialect {
 
-mlir::LogicalResult MaskType::verify(::llvm::function_ref<::mlir::InFlightDiagnostic()> emitError,
-                                     uint64_t width) {
-    if (width == 0)
-        return emitError() << "mask width must be positive";
+mlir::LogicalResult
+MaskType::verify(::llvm::function_ref<::mlir::InFlightDiagnostic()> emitError,
+                 uint64_t width) {
+  if (width == 0)
+    return emitError() << "mask width must be positive";
+  return mlir::success();
+}
+
+mlir::LogicalResult ResourceType::verify(
+    ::llvm::function_ref<::mlir::InFlightDiagnostic()> emitError,
+    simt::dialect::MemorySpace memorySpace, mlir::Type elementType) {
+  if (!elementType)
+    return emitError() << "resource element type must be non-null";
+  switch (memorySpace) {
+  case simt::dialect::MemorySpace::Generic:
+  case simt::dialect::MemorySpace::Global:
+  case simt::dialect::MemorySpace::Shared:
+  case simt::dialect::MemorySpace::Private:
     return mlir::success();
+  }
+  return emitError() << "invalid memory space for resource";
 }
 
 } // namespace simt::dialect
