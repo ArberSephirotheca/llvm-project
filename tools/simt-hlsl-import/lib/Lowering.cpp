@@ -715,10 +715,98 @@ struct EmitInterpreter
     llvm_unreachable("emitAtomic not yet routed through algebra");
   }
 
-  Value emitWaveIntrinsic(simt_hlsl_import::WaveIntrinsic,
-                          llvm::ArrayRef<Value>,
-                          simt_hlsl_import::SourceLoc) {
-    llvm_unreachable("emitWaveIntrinsic not yet routed through algebra");
+  Value emitWaveIntrinsic(simt_hlsl_import::WaveIntrinsic intrinsic,
+                          llvm::ArrayRef<Value> operands,
+                          mlir::Type resultType,
+                          simt_hlsl_import::SourceLoc loc) {
+    mlir::Location mlirLoc = resolveLoc(loc, ctx);
+    auto fail = [&](llvm::StringRef message) {
+      ctx.fail(message);
+      return mlir::Value();
+    };
+
+    switch (intrinsic) {
+    case simt_hlsl_import::WaveIntrinsic::ActiveAllTrue: {
+      if (operands.size() != 1)
+        return fail("WaveActiveAllTrue expects one operand");
+      if (!resultType)
+        return fail("WaveActiveAllTrue requires result type");
+      return ctx.builder
+          .create<simt::dialect::WaveAllOp>(mlirLoc, resultType, operands[0])
+          .getResult();
+    }
+    case simt_hlsl_import::WaveIntrinsic::ActiveAnyTrue: {
+      if (operands.size() != 1)
+        return fail("WaveActiveAnyTrue expects one operand");
+      if (!resultType)
+        return fail("WaveActiveAnyTrue requires result type");
+      return ctx.builder
+          .create<simt::dialect::WaveAnyOp>(mlirLoc, resultType, operands[0])
+          .getResult();
+    }
+    case simt_hlsl_import::WaveIntrinsic::ActiveCountBits: {
+      if (operands.size() != 1)
+        return fail("WaveActiveCountBits expects one operand");
+      if (!resultType)
+        return fail("WaveActiveCountBits requires result type");
+
+      mlir::Value mask =
+          ctx.builder
+              .create<simt::dialect::WaveBallotOp>(mlirLoc,
+                                                   ctx.builder.getI64Type(),
+                                                   operands[0])
+              .getMask();
+      mlir::Value pop =
+          ctx.builder.create<mlir::math::CtPopOp>(mlirLoc, mask).getResult();
+
+      if (pop.getType() == resultType)
+        return pop;
+
+      if (auto intType = llvm::dyn_cast<mlir::IntegerType>(resultType)) {
+        auto popInt = llvm::cast<mlir::IntegerType>(pop.getType());
+        unsigned targetWidth = intType.getWidth();
+        unsigned sourceWidth = popInt.getWidth();
+        if (targetWidth == sourceWidth)
+          return pop;
+        if (targetWidth < sourceWidth)
+          return ctx.builder
+              .create<mlir::arith::TruncIOp>(mlirLoc, resultType, pop)
+              .getResult();
+        return ctx.builder
+            .create<mlir::arith::ExtUIOp>(mlirLoc, resultType, pop)
+            .getResult();
+      }
+
+      if (mlir::isa<mlir::IndexType>(resultType))
+        return ctx.builder
+            .create<mlir::arith::IndexCastOp>(mlirLoc, resultType, pop)
+            .getResult();
+
+      return fail("WaveActiveCountBits unsupported result type");
+    }
+    case simt_hlsl_import::WaveIntrinsic::GetLaneIndex: {
+      if (!operands.empty())
+        return fail("WaveGetLaneIndex expects no operands");
+      if (!resultType)
+        return fail("WaveGetLaneIndex requires result type");
+
+      mlir::Value lane =
+          ctx.builder
+              .create<simt::dialect::LaneIdOp>(mlirLoc,
+                                               ctx.builder.getIndexType())
+              .getLane();
+
+      if (mlir::isa<mlir::IndexType>(resultType))
+        return lane;
+      if (mlir::isa<mlir::IntegerType>(resultType))
+        return ctx.builder
+            .create<mlir::arith::IndexCastOp>(mlirLoc, resultType, lane)
+            .getResult();
+      return fail("WaveGetLaneIndex unsupported result type");
+    }
+    }
+
+    llvm_unreachable("unknown wave intrinsic kind");
   }
 
   Value lookupVariable(const clang::ValueDecl *decl) {
@@ -800,7 +888,7 @@ struct AnalysisInterpreter
   }
 
   Value emitWaveIntrinsic(simt_hlsl_import::WaveIntrinsic,
-                          llvm::ArrayRef<Value>,
+                          llvm::ArrayRef<Value>, mlir::Type,
                           simt_hlsl_import::SourceLoc) {
     return {};
   }
@@ -1332,6 +1420,58 @@ lowerWaveIntrinsicCall(const clang::CallExpr *call, LoweringContext &ctx) {
   llvm::StringRef name = callee->getName();
   mlir::Location loc = getLocation(call, ctx);
 
+  mlir::Type resultType = convertType(call->getType(), ctx.builder);
+  if (!resultType)
+    return ctx.fail("unsupported return type for wave intrinsic"),
+           std::optional<mlir::Value>(mlir::Value());
+
+  auto buildOperands = [&](llvm::SmallVectorImpl<mlir::Value> &operands,
+                           llvm::ArrayRef<unsigned> indices)
+      -> bool {
+    operands.reserve(indices.size());
+    for (unsigned idx : indices) {
+      if (idx >= call->getNumArgs()) {
+        ctx.fail("wave intrinsic argument index out of range");
+        return false;
+      }
+      mlir::Value operand = lowerExpr(call->getArg(idx), ctx);
+      if (!operand)
+        return false;
+      operands.push_back(operand);
+    }
+    return true;
+  };
+
+  if (isEmitContext(ctx)) {
+    EmitInterpreter interp(ctx);
+    llvm::SmallVector<mlir::Value, 2> operands;
+
+    auto dispatch = [&](simt_hlsl_import::WaveIntrinsic intrinsic,
+                        llvm::ArrayRef<unsigned> operandIndices)
+        -> std::optional<mlir::Value> {
+      operands.clear();
+      if (!buildOperands(operands, operandIndices))
+        return mlir::Value();
+      mlir::Value value =
+          interp.emitWaveIntrinsic(intrinsic, operands, resultType,
+                                   {call, loc});
+      if (!value && ctx.failed)
+        return mlir::Value();
+      return value;
+    };
+
+    if (name == "WaveActiveAllTrue")
+      return dispatch(simt_hlsl_import::WaveIntrinsic::ActiveAllTrue, {0});
+    if (name == "WaveActiveAnyTrue")
+      return dispatch(simt_hlsl_import::WaveIntrinsic::ActiveAnyTrue, {0});
+    if (name == "WaveActiveCountBits")
+      return dispatch(simt_hlsl_import::WaveIntrinsic::ActiveCountBits, {0});
+    if (name == "WaveGetLaneIndex")
+      return dispatch(simt_hlsl_import::WaveIntrinsic::GetLaneIndex, {});
+
+    return std::nullopt;
+  }
+
   if (name == "WaveActiveAllTrue" || name == "WaveActiveAnyTrue") {
     if (call->getNumArgs() != 1)
       return ctx.fail("wave intrinsic expects one argument"),
@@ -1339,10 +1479,7 @@ lowerWaveIntrinsicCall(const clang::CallExpr *call, LoweringContext &ctx) {
     mlir::Value operand = lowerExpr(call->getArg(0), ctx);
     if (!operand)
       return mlir::Value();
-    mlir::Type boolType = convertType(call->getType(), ctx.builder);
-    if (!boolType)
-      return ctx.fail("unsupported return type for wave intrinsic"),
-             std::optional<mlir::Value>(mlir::Value());
+    mlir::Type boolType = resultType;
     if (name == "WaveActiveAllTrue")
       return ctx.builder
           .create<simt::dialect::WaveAllOp>(loc, boolType, operand)
@@ -1360,11 +1497,6 @@ lowerWaveIntrinsicCall(const clang::CallExpr *call, LoweringContext &ctx) {
     mlir::Value operand = lowerExpr(call->getArg(0), ctx);
     if (!operand)
       return mlir::Value();
-
-    mlir::Type resultType = convertType(call->getType(), ctx.builder);
-    if (!resultType)
-      return ctx.fail("unsupported return type for WaveActiveCountBits"),
-             std::optional<mlir::Value>(mlir::Value());
 
     mlir::Value mask =
         ctx.builder
@@ -1405,19 +1537,15 @@ lowerWaveIntrinsicCall(const clang::CallExpr *call, LoweringContext &ctx) {
     if (call->getNumArgs() != 0)
       return ctx.fail("WaveGetLaneIndex expects no arguments"),
              std::optional<mlir::Value>(mlir::Value());
-    mlir::Type expectedType = convertType(call->getType(), ctx.builder);
-    if (!expectedType)
-      return ctx.fail("unsupported return type for WaveGetLaneIndex"),
-             std::optional<mlir::Value>(mlir::Value());
     mlir::Value laneIndex =
         ctx.builder
             .create<simt::dialect::LaneIdOp>(loc, ctx.builder.getIndexType())
             .getLane();
-    if (mlir::isa<mlir::IndexType>(expectedType))
+    if (mlir::isa<mlir::IndexType>(resultType))
       return laneIndex;
-    if (mlir::isa<mlir::IntegerType>(expectedType))
+    if (mlir::isa<mlir::IntegerType>(resultType))
       return ctx.builder
-          .create<mlir::arith::IndexCastOp>(loc, expectedType, laneIndex)
+          .create<mlir::arith::IndexCastOp>(loc, resultType, laneIndex)
           .getResult();
     return ctx.fail("unsupported result type for WaveGetLaneIndex"),
            std::optional<mlir::Value>(mlir::Value());

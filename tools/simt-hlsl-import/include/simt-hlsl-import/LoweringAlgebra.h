@@ -96,8 +96,8 @@ template <typename Self, typename ValueT> struct LoweringAlgebra {
   }
 
   Value emitWaveIntrinsic(WaveIntrinsic op, llvm::ArrayRef<Value> operands,
-                          SourceLoc loc) {
-    return self().emitWaveIntrinsic(op, operands, loc);
+                          mlir::Type resultType, SourceLoc loc) {
+    return self().emitWaveIntrinsic(op, operands, resultType, loc);
   }
 
   Value lookupVariable(const clang::ValueDecl *decl) {
