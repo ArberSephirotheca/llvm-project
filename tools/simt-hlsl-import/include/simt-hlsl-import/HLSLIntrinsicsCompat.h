@@ -50,7 +50,12 @@ unsigned int WaveGetLaneIndex();
 
 // Memory barriers -----------------------------------------------------------
 
+void GroupMemoryBarrier();
 void GroupMemoryBarrierWithGroupSync();
+void DeviceMemoryBarrier();
+void DeviceMemoryBarrierWithGroupSync();
+void AllMemoryBarrier();
+void AllMemoryBarrierWithGroupSync();
 
 #if SIMT_COMPAT_HAS_ALIAS == 0
 // Fallback declarations for additional barrier helpers that may be missing

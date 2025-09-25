@@ -43,6 +43,12 @@ plan and prioritize the work needed to bring the MLIR importer up to parity.
 - [ ] Decide whether to extend existing Simt dialect ops or introduce new ones
       for HLSL-specific features (wave ops, resource loads).
 - [ ] Update dialect documentation with new operations and types.
+- [ ] Explore refactoring lowering around a tagless-final style "lowering
+      algebra" so we can swap interpreters: analysis-only, IR emission, and
+      optional debug tracing.
+- [x] Guard barrier/fence emission so we only build ops when the builder is
+      attached to a concrete block—analysis walks no longer leave dangling
+      operations behind.
 
 Each bullet can be decomposed further, but this structure should help us stage
 work, assign owners, and track progress toward parity.

@@ -355,8 +355,8 @@ lowerAtomicCall(const clang::CallExpr *call, LoweringContext &ctx);
 static std::optional<mlir::Value>
 lowerWaveIntrinsicCall(const clang::CallExpr *call, LoweringContext &ctx);
 
-static std::optional<mlir::Value>
-lowerBarrierUtilityCall(const clang::CallExpr *call, LoweringContext &ctx);
+static bool lowerBarrierUtilityCall(const clang::CallExpr *call,
+                                    LoweringContext &ctx);
 
 static mlir::Value emitBufferAtomicOp(BufferAtomicKind kind,
                                       const BufferAccessInfo &info,
@@ -632,24 +632,85 @@ lowerWaveIntrinsicCall(const clang::CallExpr *call, LoweringContext &ctx) {
   return std::nullopt;
 }
 
-static std::optional<mlir::Value>
-lowerBarrierUtilityCall(const clang::CallExpr *call, LoweringContext &ctx) {
+static bool lowerBarrierUtilityCall(const clang::CallExpr *call,
+                                    LoweringContext &ctx) {
   if (!call)
-    return std::nullopt;
+    return false;
 
   const auto *callee = call->getDirectCallee();
   if (!callee)
-    return std::nullopt;
+    return false;
 
   llvm::StringRef name = callee->getName();
-  if (name != "GroupMemoryBarrierWithGroupSync")
-    return std::nullopt;
+  if (!(name == "GroupMemoryBarrier" ||
+        name == "GroupMemoryBarrierWithGroupSync" ||
+        name == "DeviceMemoryBarrier" ||
+        name == "DeviceMemoryBarrierWithGroupSync" ||
+        name == "AllMemoryBarrier" ||
+        name == "AllMemoryBarrierWithGroupSync"))
+    return false;
 
   if (call->getNumArgs() != 0)
-    return ctx.fail("memory barrier utilities do not take arguments"),
-           std::optional<mlir::Value>(mlir::Value());
+    return ctx.fail("memory barrier utilities do not take arguments"), false;
 
-  return mlir::Value();
+  auto *context = ctx.builder.getContext();
+  mlir::Location loc = getLocation(call, ctx);
+
+  auto scopeAttr = simt::dialect::ScopeAttr::get(context,
+                                                 simt::dialect::Scope::Workgroup);
+  auto memSemAttr = simt::dialect::MemorySemanticsAttr::get(
+      context, simt::dialect::MemorySemantics::AcqRel);
+
+  auto emitFence = [&](simt::dialect::MemorySpace space) {
+    mlir::Block *insertBlock = ctx.builder.getInsertionBlock();
+    if (!insertBlock || !insertBlock->getParentOp())
+      return;
+    ctx.builder.create<simt::dialect::FenceOp>(
+        loc, scopeAttr, memSemAttr,
+        simt::dialect::MemorySpaceAttr::get(context, space));
+  };
+
+  auto emitBarrier = [&]() {
+    mlir::Block *insertBlock = ctx.builder.getInsertionBlock();
+    if (!insertBlock || !insertBlock->getParentOp())
+      return;
+    ctx.builder.create<simt::dialect::BarrierOp>(loc, scopeAttr, memSemAttr);
+  };
+
+  if (name == "GroupMemoryBarrier") {
+    emitFence(simt::dialect::MemorySpace::Shared);
+    return true;
+  }
+
+  if (name == "GroupMemoryBarrierWithGroupSync") {
+    emitFence(simt::dialect::MemorySpace::Shared);
+    emitBarrier();
+    return true;
+  }
+
+  if (name == "DeviceMemoryBarrier") {
+    emitFence(simt::dialect::MemorySpace::Global);
+    return true;
+  }
+
+  if (name == "DeviceMemoryBarrierWithGroupSync") {
+    emitFence(simt::dialect::MemorySpace::Global);
+    emitBarrier();
+    return true;
+  }
+
+  if (name == "AllMemoryBarrier") {
+    emitFence(simt::dialect::MemorySpace::Generic);
+    return true;
+  }
+
+  if (name == "AllMemoryBarrierWithGroupSync") {
+    emitFence(simt::dialect::MemorySpace::Generic);
+    emitBarrier();
+    return true;
+  }
+
+  return false;
 }
 
 static std::optional<std::string>
@@ -778,8 +839,6 @@ static mlir::Value lowerExpr(const clang::Expr *expr, LoweringContext &ctx) {
     if (auto lowered = lowerAtomicCall(callExpr, ctx))
       return *lowered;
     if (auto lowered = lowerWaveIntrinsicCall(callExpr, ctx))
-      return *lowered;
-    if (auto lowered = lowerBarrierUtilityCall(callExpr, ctx))
       return *lowered;
   }
 
@@ -2143,6 +2202,15 @@ static bool lowerStatement(const clang::Stmt *stmt, LoweringContext &ctx) {
   }
 
   if (const auto *exprStmt = llvm::dyn_cast<clang::Expr>(stmt)) {
+    const clang::Expr *stripped = exprStmt->IgnoreParenImpCasts();
+    if (const auto *call = llvm::dyn_cast<clang::CallExpr>(stripped)) {
+      if (lowerBarrierUtilityCall(call, ctx)) {
+        if (!call->getType()->isVoidType())
+          return ctx.fail("barrier call must return void");
+        return true;
+      }
+    }
+
     (void)lowerExpr(exprStmt, ctx);
     return !ctx.failed;
   }

@@ -49,19 +49,6 @@ static mlir::LogicalResult verifyAtomicOpCommon(
   return mlir::success();
 }
 
-mlir::LogicalResult BarrierOp::verify() {
-  auto *op = getOperation();
-  if (auto attr = op->getAttr("scope")) {
-    if (!mlir::isa<mlir::IntegerAttr>(attr))
-      return emitOpError("expected 'scope' attribute to be an integer enum");
-  }
-  if (auto attr = op->getAttr("memsem")) {
-    if (!mlir::isa<mlir::IntegerAttr>(attr))
-      return emitOpError("expected 'memsem' attribute to be an integer enum");
-  }
-  return mlir::success();
-}
-
 mlir::LogicalResult CustomOp::verify() {
   auto *op = getOperation();
   auto instr = op->getAttrOfType<mlir::StringAttr>("instr");

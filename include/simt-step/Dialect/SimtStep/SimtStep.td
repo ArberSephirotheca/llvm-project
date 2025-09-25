@@ -469,20 +469,26 @@ def SimtStep_ContinueOp : Op<SimtStep_Dialect, "continue",
 def SimtStep_BarrierOp : Op<SimtStep_Dialect, "barrier"> {
   let summary = "Synchronize lanes at a given scope";
   let description = [{
-    Placeholder barrier op; real version will use attributes for scope and
-    memory semantics.
+    Synchronize active lanes according to the provided `scope` and `memsem`
+    attributes. The scope defaults to workgroup when omitted.
   }];
 
+  let arguments = (ins OptionalAttr<SimtStep_ScopeEnumAttr>:$scope,
+                       OptionalAttr<SimtStep_MemorySemanticsEnumAttr>:$memsem);
+
   let assemblyFormat = "attr-dict";
-  let hasVerifier = 1;
 }
 
 def SimtStep_FenceOp : Op<SimtStep_Dialect, "fence"> {
   let summary = "Memory fence at a given scope";
   let description = [{
-    Ensures ordering of memory operations according to the specified semantics.
-    Currently modeled as a placeholder with no explicit attributes.
+    Orders memory accesses at the given `scope`, applying the specified
+    semantics and optional `memspace` target.
   }];
+
+  let arguments = (ins OptionalAttr<SimtStep_ScopeEnumAttr>:$scope,
+                       OptionalAttr<SimtStep_MemorySemanticsEnumAttr>:$memsem,
+                       OptionalAttr<SimtStep_MemorySpaceEnumAttr>:$memspace);
 
   let assemblyFormat = "attr-dict";
 }

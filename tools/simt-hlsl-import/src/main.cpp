@@ -91,6 +91,30 @@ int main(int argc, char **argv) {
     return 1;
   }
 
+  if (failed(result.value()->verify())) {
+    llvm::errs() << "simt-hlsl-import: generated IR failed to verify\n";
+    result.value()->dump();
+    return 1;
+  }
+
+  if (failed(result.value()->verify())) {
+    llvm::errs() << "simt-hlsl-import: verification failed\n";
+    result.value()->dump();
+    return 1;
+  }
+
+  bool hasDanglingBlock = false;
+  result.value()->walk([&](mlir::Operation *op) {
+    if (mlir::Block *block = op->getBlock())
+      if (!block->getParentOp())
+        hasDanglingBlock = true;
+  });
+  if (hasDanglingBlock) {
+    llvm::errs() << "simt-hlsl-import: found operation in block without parent\n";
+    result.value()->dump();
+    return 1;
+  }
+
   result.value()->print(llvm::outs());
   llvm::outs() << '\n';
   return 0;
