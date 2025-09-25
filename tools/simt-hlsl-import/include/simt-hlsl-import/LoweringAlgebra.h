@@ -72,6 +72,13 @@ template <typename Self, typename ValueT> struct LoweringAlgebra {
     return self().emitSelect(cond, trueV, falseV, loc);
   }
 
+  template <typename ThenMake, typename ElseMake>
+  Value emitConditional(Value cond, ThenMake &&thenBuilder, ElseMake &&elseBuilder,
+                        SourceLoc loc) {
+    return self().emitConditional(cond, std::forward<ThenMake>(thenBuilder),
+                                  std::forward<ElseMake>(elseBuilder), loc);
+  }
+
   template <typename RHSMake>
   Value emitShortCircuit(LogicalOp op, Value lhs, RHSMake &&rhsBuilder,
                          SourceLoc loc) {
