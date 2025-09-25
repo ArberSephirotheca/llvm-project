@@ -14,6 +14,8 @@ class ValueDecl;
 
 namespace simt_hlsl_import {
 
+struct LoweringContext;
+
 struct SourceLoc {
   const clang::Stmt *clangNode = nullptr;
   mlir::Location mlirLoc;
@@ -73,7 +75,8 @@ template <typename Self, typename ValueT> struct LoweringAlgebra {
   template <typename RHSMake>
   Value emitShortCircuit(LogicalOp op, Value lhs, RHSMake &&rhsBuilder,
                          SourceLoc loc) {
-    return self().emitShortCircuit(op, lhs, rhsBuilder, loc);
+    return self().emitShortCircuit(op, lhs,
+                                   std::forward<RHSMake>(rhsBuilder), loc);
   }
 
   Value emitBufferLoad(Value resourceHandle, Value index, SourceLoc loc) {

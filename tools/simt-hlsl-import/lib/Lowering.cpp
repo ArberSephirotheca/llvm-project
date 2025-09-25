@@ -411,10 +411,266 @@ struct EmitInterpreter
   }
 
   template <typename RHSMake>
-  Value emitShortCircuit(simt_hlsl_import::LogicalOp, Value,
-                         RHSMake &&,
-                         simt_hlsl_import::SourceLoc) {
-    llvm_unreachable("emitShortCircuit not yet routed through algebra");
+  Value emitShortCircuit(simt_hlsl_import::LogicalOp op, Value lhs,
+                         RHSMake &&rhsBuilder,
+                         simt_hlsl_import::SourceLoc loc) {
+    auto *binOp = llvm::dyn_cast_or_null<clang::BinaryOperator>(loc.clangNode);
+    if (!binOp) {
+      ctx.fail("short-circuit requires clang::BinaryOperator source");
+      return {};
+    }
+
+    mlir::Location mlirLoc = resolveLoc(loc, ctx);
+    auto boolType = ctx.builder.getI1Type();
+    if (lhs.getType() != boolType)
+      return ctx.fail("logical operator requires boolean operands"),
+             mlir::Value();
+
+    auto propagateFailure = [&](LoweringContext &branchCtx) {
+      if (branchCtx.failed) {
+        ctx.failed = true;
+        return true;
+      }
+      return false;
+    };
+
+    if (op == simt_hlsl_import::LogicalOp::And) {
+      mlir::Region thenRegion;
+      thenRegion.emplaceBlock();
+      mlir::OpBuilder thenBuilder(ctx.builder.getContext());
+      thenBuilder.setInsertionPointToEnd(&thenRegion.front());
+      LoweringContext thenCtx(thenBuilder, mlirLoc, ctx.returnType,
+                              ctx.errorMessage, ctx.sourceManager);
+      thenCtx.valueMap = ctx.valueMap;
+      thenCtx.symValueMap = ctx.symValueMap;
+      thenCtx.loopStack = ctx.loopStack;
+      thenCtx.switchStack = ctx.switchStack;
+      thenCtx.controlStack = ctx.controlStack;
+
+      mlir::Value rhsVal = rhsBuilder(thenCtx);
+      if (!rhsVal)
+        return {};
+      if (propagateFailure(thenCtx))
+        return {};
+      if (rhsVal.getType() != boolType)
+        return ctx.fail("logical and requires boolean operands"),
+               mlir::Value();
+
+      llvm::SmallVector<const clang::ValueDecl *, 8> mutatedVars(
+          thenCtx.mutatedVars.begin(), thenCtx.mutatedVars.end());
+      llvm::sort(mutatedVars, [](const clang::ValueDecl *lhsDecl,
+                                 const clang::ValueDecl *rhsDecl) {
+        return lhsDecl < rhsDecl;
+      });
+
+      llvm::SmallVector<mlir::Type, 8> resultTypes;
+      resultTypes.push_back(boolType);
+      for (const clang::ValueDecl *vd : mutatedVars) {
+        auto it = thenCtx.valueMap.find(vd);
+        if (it == thenCtx.valueMap.end())
+          it = ctx.valueMap.find(vd);
+        if (it == ctx.valueMap.end())
+          return ctx.fail("logical and missing carried value"), mlir::Value();
+        resultTypes.push_back(it->second.getType());
+      }
+
+      auto ifOp = ctx.builder.create<simt::dialect::IfOp>(
+          mlirLoc, resultTypes, lhs, /*withElseRegion=*/true);
+
+      auto replaceRegionBody = [](mlir::Region &dest, mlir::Region &src) {
+        if (!dest.empty())
+          dest.front().erase();
+        dest.takeBody(src);
+        if (dest.empty())
+          dest.emplaceBlock();
+      };
+      replaceRegionBody(ifOp.getThenRegion(), thenRegion);
+
+      auto lookupValue = [&](LoweringContext &valueCtx,
+                             const clang::ValueDecl *vd) -> mlir::Value {
+        auto it = valueCtx.valueMap.find(vd);
+        if (it != valueCtx.valueMap.end())
+          return it->second;
+        return {};
+      };
+
+      auto ensureYield = [&](mlir::Region &region,
+                             llvm::ArrayRef<mlir::Value> operands) -> bool {
+        auto &block = region.front();
+        if (!block.empty() &&
+            block.back().hasTrait<mlir::OpTrait::IsTerminator>()) {
+          if (auto yield =
+                  llvm::dyn_cast<simt::dialect::YieldOp>(&block.back())) {
+            yield.getOperation()->setOperands(operands);
+            return true;
+          }
+          ctx.fail("unexpected terminator while lowering logical and");
+          return false;
+        }
+        mlir::OpBuilder::atBlockEnd(&block).create<simt::dialect::YieldOp>(
+            mlirLoc, operands);
+        return true;
+      };
+
+      llvm::SmallVector<mlir::Value, 8> thenOperands;
+      thenOperands.push_back(rhsVal);
+      for (const clang::ValueDecl *vd : mutatedVars) {
+        mlir::Value value = lookupValue(thenCtx, vd);
+        if (!value)
+          value = lookupValue(ctx, vd);
+        if (!value)
+          return ctx.fail("logical and missing carried value"), mlir::Value();
+        thenOperands.push_back(value);
+      }
+      if (!ensureYield(ifOp.getThenRegion(), thenOperands))
+        return {};
+
+      auto &elseRegion = ifOp.getElseRegion();
+      if (!elseRegion.empty())
+        elseRegion.front().erase();
+      elseRegion.emplaceBlock();
+      auto elseBuilder = mlir::OpBuilder::atBlockEnd(&elseRegion.front());
+      auto falseConst =
+          elseBuilder.create<mlir::arith::ConstantIntOp>(mlirLoc, 0, 1);
+      llvm::SmallVector<mlir::Value, 8> elseOperands;
+      elseOperands.push_back(falseConst);
+      for (const clang::ValueDecl *vd : mutatedVars) {
+        mlir::Value value = lookupValue(ctx, vd);
+        if (!value)
+          return ctx.fail("logical and missing carried value"), mlir::Value();
+        elseOperands.push_back(value);
+      }
+      if (!ensureYield(elseRegion, elseOperands))
+        return {};
+
+      unsigned resultIndex = 1;
+      for (const clang::ValueDecl *vd : mutatedVars) {
+        ctx.valueMap[vd] = ifOp.getResult(resultIndex++);
+        if (auto it = thenCtx.symValueMap.find(vd); it != thenCtx.symValueMap.end())
+          ctx.symValueMap[vd] = it->second;
+        ctx.mutatedVars.insert(vd);
+      }
+
+      return ifOp.getResult(0);
+    }
+
+    // Logical OR
+    mlir::Region elseRegion;
+    elseRegion.emplaceBlock();
+    mlir::OpBuilder elseBuilder(ctx.builder.getContext());
+    elseBuilder.setInsertionPointToEnd(&elseRegion.front());
+    LoweringContext elseCtx(elseBuilder, mlirLoc, ctx.returnType,
+                            ctx.errorMessage, ctx.sourceManager);
+    elseCtx.valueMap = ctx.valueMap;
+    elseCtx.symValueMap = ctx.symValueMap;
+    elseCtx.loopStack = ctx.loopStack;
+    elseCtx.switchStack = ctx.switchStack;
+    elseCtx.controlStack = ctx.controlStack;
+
+    mlir::Value rhsVal = rhsBuilder(elseCtx);
+    if (!rhsVal)
+      return {};
+    if (propagateFailure(elseCtx))
+      return {};
+    if (rhsVal.getType() != boolType)
+      return ctx.fail("logical or requires boolean operands"), mlir::Value();
+
+    llvm::SmallVector<const clang::ValueDecl *, 8> mutatedVars(
+        elseCtx.mutatedVars.begin(), elseCtx.mutatedVars.end());
+    llvm::sort(mutatedVars, [](const clang::ValueDecl *lhsDecl,
+                               const clang::ValueDecl *rhsDecl) {
+      return lhsDecl < rhsDecl;
+    });
+
+    llvm::SmallVector<mlir::Type, 8> resultTypes;
+    resultTypes.push_back(boolType);
+    for (const clang::ValueDecl *vd : mutatedVars) {
+      auto it = elseCtx.valueMap.find(vd);
+      if (it == elseCtx.valueMap.end())
+        it = ctx.valueMap.find(vd);
+      if (it == ctx.valueMap.end())
+        return ctx.fail("logical or missing carried value"), mlir::Value();
+      resultTypes.push_back(it->second.getType());
+    }
+
+    auto ifOp = ctx.builder.create<simt::dialect::IfOp>(
+        mlirLoc, resultTypes, lhs, /*withElseRegion=*/true);
+
+    auto replaceRegionBody = [](mlir::Region &dest, mlir::Region &src) {
+      if (!dest.empty())
+        dest.front().erase();
+      dest.takeBody(src);
+      if (dest.empty())
+        dest.emplaceBlock();
+    };
+
+    auto lookupValue = [&](LoweringContext &valueCtx,
+                           const clang::ValueDecl *vd) -> mlir::Value {
+      auto it = valueCtx.valueMap.find(vd);
+      if (it != valueCtx.valueMap.end())
+        return it->second;
+      return {};
+    };
+
+    auto ensureYield = [&](mlir::Region &region,
+                           llvm::ArrayRef<mlir::Value> operands) -> bool {
+      auto &block = region.front();
+      if (!block.empty() &&
+          block.back().hasTrait<mlir::OpTrait::IsTerminator>()) {
+        if (auto yield =
+                llvm::dyn_cast<simt::dialect::YieldOp>(&block.back())) {
+          yield.getOperation()->setOperands(operands);
+          return true;
+        }
+        ctx.fail("unexpected terminator while lowering logical or");
+        return false;
+      }
+      mlir::OpBuilder::atBlockEnd(&block).create<simt::dialect::YieldOp>(
+          mlirLoc, operands);
+      return true;
+    };
+
+    auto &thenRegion = ifOp.getThenRegion();
+    if (!thenRegion.empty())
+      thenRegion.front().erase();
+    thenRegion.emplaceBlock();
+    auto thenBuilder = mlir::OpBuilder::atBlockEnd(&thenRegion.front());
+    auto trueConst = thenBuilder.create<mlir::arith::ConstantIntOp>(mlirLoc, 1, 1);
+    llvm::SmallVector<mlir::Value, 8> thenOperands;
+    thenOperands.push_back(trueConst);
+    for (const clang::ValueDecl *vd : mutatedVars) {
+      mlir::Value value = lookupValue(ctx, vd);
+      if (!value)
+        return ctx.fail("logical or missing carried value"), mlir::Value();
+      thenOperands.push_back(value);
+    }
+    if (!ensureYield(thenRegion, thenOperands))
+      return {};
+
+    replaceRegionBody(ifOp.getElseRegion(), elseRegion);
+    auto &finalElseRegion = ifOp.getElseRegion();
+    llvm::SmallVector<mlir::Value, 8> elseOperands;
+    elseOperands.push_back(rhsVal);
+    for (const clang::ValueDecl *vd : mutatedVars) {
+      mlir::Value value = lookupValue(elseCtx, vd);
+      if (!value)
+        value = lookupValue(ctx, vd);
+      if (!value)
+        return ctx.fail("logical or missing carried value"), mlir::Value();
+      elseOperands.push_back(value);
+    }
+    if (!ensureYield(finalElseRegion, elseOperands))
+      return {};
+
+    unsigned resultIndex = 1;
+    for (const clang::ValueDecl *vd : mutatedVars) {
+      ctx.valueMap[vd] = ifOp.getResult(resultIndex++);
+      if (auto it = elseCtx.symValueMap.find(vd); it != elseCtx.symValueMap.end())
+        ctx.symValueMap[vd] = it->second;
+      ctx.mutatedVars.insert(vd);
+    }
+
+    return ifOp.getResult(0);
   }
 
   Value emitBufferLoad(Value, Value, simt_hlsl_import::SourceLoc) {
@@ -494,8 +750,9 @@ struct AnalysisInterpreter
     return {};
   }
 
+  template <typename RHSMake>
   Value emitShortCircuit(simt_hlsl_import::LogicalOp, Value,
-                         llvm::function_ref<Value()>,
+                         RHSMake &&,
                          simt_hlsl_import::SourceLoc) {
     return {};
   }
@@ -1841,6 +2098,16 @@ static mlir::Value lowerExpr(const clang::Expr *expr, LoweringContext &ctx) {
       if (lhs.getType() != ctx.builder.getI1Type())
         return ctx.fail("logical and requires boolean operands"), mlir::Value();
 
+      if (isEmitContext(ctx)) {
+        EmitInterpreter interp(ctx);
+        auto rhsBuilder = [&](LoweringContext &branchCtx) -> mlir::Value {
+          return lowerExpr(binOp->getRHS(), branchCtx);
+        };
+        return interp.emitShortCircuit(simt_hlsl_import::LogicalOp::And, lhs,
+                                       rhsBuilder,
+                                       {binOp, loc});
+      }
+
       mlir::Region thenRegion;
       thenRegion.emplaceBlock();
       mlir::OpBuilder thenBuilder(ctx.builder.getContext());
@@ -1957,6 +2224,16 @@ static mlir::Value lowerExpr(const clang::Expr *expr, LoweringContext &ctx) {
     case clang::BinaryOperatorKind::BO_LOr: {
       if (lhs.getType() != ctx.builder.getI1Type())
         return ctx.fail("logical or requires boolean operands"), mlir::Value();
+
+      if (isEmitContext(ctx)) {
+        EmitInterpreter interp(ctx);
+        auto rhsBuilder = [&](LoweringContext &branchCtx) -> mlir::Value {
+          return lowerExpr(binOp->getRHS(), branchCtx);
+        };
+        return interp.emitShortCircuit(simt_hlsl_import::LogicalOp::Or, lhs,
+                                       rhsBuilder,
+                                       {binOp, loc});
+      }
 
       mlir::Region elseRegion;
       elseRegion.emplaceBlock();
