@@ -373,6 +373,137 @@ static mlir::Value lowerExpr(const clang::Expr *expr, LoweringContext &ctx) {
     }
   }
 
+  if (const auto *condOp = llvm::dyn_cast<clang::ConditionalOperator>(expr)) {
+    mlir::Value condValue = lowerExpr(condOp->getCond(), ctx);
+    if (!condValue)
+      return {};
+    if (condValue.getType() != ctx.builder.getI1Type())
+      return ctx.fail("conditional operator requires boolean condition"),
+             mlir::Value();
+
+    mlir::Region trueRegion;
+    trueRegion.emplaceBlock();
+    mlir::OpBuilder trueBuilder(ctx.builder.getContext());
+    trueBuilder.setInsertionPointToEnd(&trueRegion.front());
+    LoweringContext trueCtx(trueBuilder, loc, ctx.returnType, ctx.errorMessage,
+                            ctx.sourceManager);
+    trueCtx.valueMap = ctx.valueMap;
+    trueCtx.loopStack = ctx.loopStack;
+    trueCtx.switchStack = ctx.switchStack;
+    trueCtx.controlStack = ctx.controlStack;
+
+    mlir::Value trueValue = lowerExpr(condOp->getTrueExpr(), trueCtx);
+    if (!trueValue)
+      return {};
+    if (trueValue.getType() != type)
+      return ctx.fail("conditional operator branch type mismatch"),
+             mlir::Value();
+
+    mlir::Region falseRegion;
+    falseRegion.emplaceBlock();
+    mlir::OpBuilder falseBuilder(ctx.builder.getContext());
+    falseBuilder.setInsertionPointToEnd(&falseRegion.front());
+    LoweringContext falseCtx(falseBuilder, loc, ctx.returnType, ctx.errorMessage,
+                             ctx.sourceManager);
+    falseCtx.valueMap = ctx.valueMap;
+    falseCtx.loopStack = ctx.loopStack;
+    falseCtx.switchStack = ctx.switchStack;
+    falseCtx.controlStack = ctx.controlStack;
+
+    mlir::Value falseValue = lowerExpr(condOp->getFalseExpr(), falseCtx);
+    if (!falseValue)
+      return {};
+    if (falseValue.getType() != type)
+      return ctx.fail("conditional operator branch type mismatch"),
+             mlir::Value();
+
+    llvm::SmallPtrSet<const clang::ValueDecl *, 8> mutatedSet;
+    mutatedSet.insert(trueCtx.mutatedVars.begin(), trueCtx.mutatedVars.end());
+    mutatedSet.insert(falseCtx.mutatedVars.begin(), falseCtx.mutatedVars.end());
+
+    llvm::SmallVector<const clang::ValueDecl *, 8> mutatedVars(mutatedSet.begin(),
+                                                              mutatedSet.end());
+    llvm::sort(mutatedVars,
+               [](const clang::ValueDecl *lhs, const clang::ValueDecl *rhs) {
+                 return lhs < rhs;
+               });
+
+    llvm::SmallVector<mlir::Type, 8> resultTypes;
+    resultTypes.push_back(type);
+    for (const clang::ValueDecl *vd : mutatedVars) {
+      auto lookupType = [&](LoweringContext &context)
+          -> std::optional<mlir::Type> {
+        auto it = context.valueMap.find(vd);
+        if (it != context.valueMap.end())
+          return it->second.getType();
+        return std::nullopt;
+      };
+      std::optional<mlir::Type> branchType = lookupType(trueCtx);
+      if (!branchType)
+        branchType = lookupType(ctx);
+      if (!branchType)
+        return ctx.fail("conditional operator missing carried value"),
+               mlir::Value();
+      resultTypes.push_back(*branchType);
+    }
+
+    auto ifOp = ctx.builder.create<simt::dialect::IfOp>(loc, resultTypes,
+                                                        condValue,
+                                                        /*withElseRegion=*/true);
+
+    auto appendOperands = [&](LoweringContext &branchCtx,
+                              llvm::SmallVectorImpl<mlir::Value> &operands)
+        -> bool {
+      for (const clang::ValueDecl *vd : mutatedVars) {
+        mlir::Value value;
+        if (auto it = branchCtx.valueMap.find(vd); it != branchCtx.valueMap.end())
+          value = it->second;
+        else if (auto it = ctx.valueMap.find(vd); it != ctx.valueMap.end())
+          value = it->second;
+        else
+          return false;
+        operands.push_back(value);
+      }
+      return true;
+    };
+
+    auto buildYield = [&](mlir::Region &region, LoweringContext &branchCtx,
+                          mlir::Value branchValue) -> bool {
+      llvm::SmallVector<mlir::Value, 8> operands;
+      operands.push_back(branchValue);
+      if (!appendOperands(branchCtx, operands))
+        return false;
+      mlir::OpBuilder yieldBuilder(ctx.builder.getContext());
+      yieldBuilder.setInsertionPointToEnd(&region.front());
+      yieldBuilder.create<simt::dialect::YieldOp>(loc, operands);
+      return true;
+    };
+
+    if (!buildYield(trueRegion, trueCtx, trueValue) ||
+        !buildYield(falseRegion, falseCtx, falseValue))
+      return ctx.fail("conditional operator missing carried value"),
+             mlir::Value();
+
+    auto replaceRegionBody = [](mlir::Region &dest, mlir::Region &src) {
+      if (!dest.empty())
+        dest.front().erase();
+      dest.takeBody(src);
+      if (dest.empty())
+        dest.emplaceBlock();
+    };
+
+    replaceRegionBody(ifOp.getThenRegion(), trueRegion);
+    replaceRegionBody(ifOp.getElseRegion(), falseRegion);
+
+    unsigned resultIndex = 1;
+    for (const clang::ValueDecl *vd : mutatedVars) {
+      ctx.valueMap[vd] = ifOp.getResult(resultIndex++);
+      ctx.mutatedVars.insert(vd);
+    }
+
+    return ifOp.getResult(0);
+  }
+
   if (const auto *binOp = llvm::dyn_cast<clang::BinaryOperator>(expr)) {
     mlir::Value lhs = lowerExpr(binOp->getLHS(), ctx);
     if (ctx.failed || !lhs)
