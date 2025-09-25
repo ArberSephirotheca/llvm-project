@@ -678,7 +678,7 @@ struct EmitInterpreter
                        simt_hlsl_import::SourceLoc loc) {
     mlir::Location mlirLoc = resolveLoc(loc, ctx);
     auto resourceType =
-        resourceHandle.getType().dyn_cast<simt::dialect::ResourceType>();
+        mlir::dyn_cast<simt::dialect::ResourceType>(resourceHandle.getType());
     if (!resourceType)
       return ctx.fail("buffer load requires resource handle"), mlir::Value();
 
@@ -692,7 +692,7 @@ struct EmitInterpreter
                        simt_hlsl_import::SourceLoc loc) {
     mlir::Location mlirLoc = resolveLoc(loc, ctx);
     auto resourceType =
-        resourceHandle.getType().dyn_cast<simt::dialect::ResourceType>();
+        mlir::dyn_cast<simt::dialect::ResourceType>(resourceHandle.getType());
     if (!resourceType) {
       ctx.fail("buffer store requires resource handle");
       return;
@@ -710,9 +710,128 @@ struct EmitInterpreter
     }
   }
 
-  Value emitAtomic(simt_hlsl_import::BufferAtomicOp, Value, Value, Value, Value,
-                   simt_hlsl_import::SourceLoc) {
-    llvm_unreachable("emitAtomic not yet routed through algebra");
+  Value emitAtomic(simt_hlsl_import::BufferAtomicOp op, Value resourceHandle,
+                   Value index, Value value, Value compare,
+                   const clang::ValueDecl *resourceDecl,
+                   simt_hlsl_import::SourceLoc loc) {
+    auto resourceType =
+        mlir::dyn_cast<simt::dialect::ResourceType>(resourceHandle.getType());
+    if (!resourceType)
+      return ctx.fail("buffer atomic requires resource handle"), mlir::Value();
+
+    auto elementType = resourceType.getElementType();
+    auto checkElementType = [&](mlir::Value operand,
+                               llvm::StringRef message) -> bool {
+      if (!operand)
+        return true;
+      if (operand.getType() == elementType)
+        return true;
+      ctx.fail(message);
+      return false;
+    };
+
+    auto requireValue = [&](mlir::Value operand, llvm::StringRef message)
+        -> bool {
+      if (operand)
+        return true;
+      ctx.fail(message);
+      return false;
+    };
+
+    mlir::Location mlirLoc = resolveLoc(loc, ctx);
+    mlir::Value oldValue;
+    switch (op) {
+    case simt_hlsl_import::BufferAtomicOp::Add:
+      if (!requireValue(value, "InterlockedAdd requires a value operand") ||
+          !checkElementType(value,
+                            "InterlockedAdd value must match element type"))
+        return {};
+      oldValue = ctx.builder
+                      .create<simt::dialect::BufferAtomicAddOp>(
+                          mlirLoc, resourceHandle, index, value)
+                      .getOldValue();
+      break;
+    case simt_hlsl_import::BufferAtomicOp::Exchange:
+      if (!requireValue(value, "InterlockedExchange requires a value operand") ||
+          !checkElementType(value,
+                            "InterlockedExchange value must match element type"))
+        return {};
+      oldValue = ctx.builder
+                      .create<simt::dialect::BufferAtomicExchangeOp>(
+                          mlirLoc, resourceHandle, index, value)
+                      .getOldValue();
+      break;
+    case simt_hlsl_import::BufferAtomicOp::CompareExchange:
+      if (!requireValue(compare,
+                        "InterlockedCompareExchange requires a compare operand") ||
+          !checkElementType(compare, "InterlockedCompareExchange compare must "
+                                         "match element type") ||
+          !requireValue(value, "InterlockedCompareExchange requires a value "
+                                "operand") ||
+          !checkElementType(value, "InterlockedCompareExchange value must match "
+                                  "element type"))
+        return {};
+      oldValue = ctx.builder
+                      .create<simt::dialect::BufferAtomicCompareExchangeOp>(
+                          mlirLoc, resourceHandle, index, compare, value)
+                      .getOldValue();
+      break;
+    case simt_hlsl_import::BufferAtomicOp::Min:
+      if (!requireValue(value, "InterlockedMin requires a value operand") ||
+          !checkElementType(value,
+                            "InterlockedMin value must match element type"))
+        return {};
+      oldValue = ctx.builder
+                      .create<simt::dialect::BufferAtomicMinOp>(
+                          mlirLoc, resourceHandle, index, value)
+                      .getOldValue();
+      break;
+    case simt_hlsl_import::BufferAtomicOp::Max:
+      if (!requireValue(value, "InterlockedMax requires a value operand") ||
+          !checkElementType(value,
+                            "InterlockedMax value must match element type"))
+        return {};
+      oldValue = ctx.builder
+                      .create<simt::dialect::BufferAtomicMaxOp>(
+                          mlirLoc, resourceHandle, index, value)
+                      .getOldValue();
+      break;
+    case simt_hlsl_import::BufferAtomicOp::And:
+      if (!requireValue(value, "InterlockedAnd requires a value operand") ||
+          !checkElementType(value,
+                            "InterlockedAnd value must match element type"))
+        return {};
+      oldValue = ctx.builder
+                      .create<simt::dialect::BufferAtomicAndOp>(
+                          mlirLoc, resourceHandle, index, value)
+                      .getOldValue();
+      break;
+    case simt_hlsl_import::BufferAtomicOp::Or:
+      if (!requireValue(value, "InterlockedOr requires a value operand") ||
+          !checkElementType(value,
+                            "InterlockedOr value must match element type"))
+        return {};
+      oldValue = ctx.builder
+                      .create<simt::dialect::BufferAtomicOrOp>(
+                          mlirLoc, resourceHandle, index, value)
+                      .getOldValue();
+      break;
+    case simt_hlsl_import::BufferAtomicOp::Xor:
+      if (!requireValue(value, "InterlockedXor requires a value operand") ||
+          !checkElementType(value,
+                            "InterlockedXor value must match element type"))
+        return {};
+      oldValue = ctx.builder
+                      .create<simt::dialect::BufferAtomicXorOp>(
+                          mlirLoc, resourceHandle, index, value)
+                      .getOldValue();
+      break;
+    }
+
+    if (resourceDecl)
+      ctx.symValueMap[resourceDecl] = makeSymValue(resourceDecl);
+
+    return oldValue;
   }
 
   Value emitWaveIntrinsic(simt_hlsl_import::WaveIntrinsic intrinsic,
@@ -883,7 +1002,12 @@ struct AnalysisInterpreter
                        simt_hlsl_import::SourceLoc) {}
 
   Value emitAtomic(simt_hlsl_import::BufferAtomicOp, Value, Value, Value, Value,
+                   const clang::ValueDecl *resourceDecl,
                    simt_hlsl_import::SourceLoc) {
+    if (resourceDecl) {
+      ctx.mutatedVars.insert(resourceDecl);
+      ctx.symValueMap[resourceDecl] = makeSymValue(resourceDecl);
+    }
     return {};
   }
 
@@ -1204,17 +1328,6 @@ struct BufferAccessInfo {
   const clang::ValueDecl *decl = nullptr;
 };
 
-enum class BufferAtomicKind {
-  Add,
-  Exchange,
-  CompareExchange,
-  Min,
-  Max,
-  And,
-  Or,
-  Xor,
-};
-
 static std::optional<BufferAccessInfo>
 getBufferAccessInfo(const clang::Expr *baseExpr, const clang::Expr *indexExpr,
                     LoweringContext &ctx);
@@ -1239,58 +1352,6 @@ lowerAtomicCall(const clang::CallExpr *call, LoweringContext &ctx);
 
 static std::optional<mlir::Value>
 lowerWaveIntrinsicCall(const clang::CallExpr *call, LoweringContext &ctx);
-
-static mlir::Value emitBufferAtomicOp(BufferAtomicKind kind,
-                                      const BufferAccessInfo &info,
-                                      mlir::Value compareValue,
-                                      mlir::Value valueValue,
-                                      mlir::Location loc,
-                                      LoweringContext &ctx) {
-  switch (kind) {
-  case BufferAtomicKind::Add:
-    return ctx.builder
-        .create<simt::dialect::BufferAtomicAddOp>(loc, info.resource,
-                                                  info.index, valueValue)
-        .getOldValue();
-  case BufferAtomicKind::Exchange:
-    return ctx.builder
-        .create<simt::dialect::BufferAtomicExchangeOp>(loc, info.resource,
-                                                        info.index, valueValue)
-        .getOldValue();
-  case BufferAtomicKind::CompareExchange:
-    return ctx.builder
-        .create<simt::dialect::BufferAtomicCompareExchangeOp>(
-            loc, info.resource, info.index, compareValue, valueValue)
-        .getOldValue();
-  case BufferAtomicKind::Min:
-    return ctx.builder
-        .create<simt::dialect::BufferAtomicMinOp>(loc, info.resource,
-                                                  info.index, valueValue)
-        .getOldValue();
-  case BufferAtomicKind::Max:
-    return ctx.builder
-        .create<simt::dialect::BufferAtomicMaxOp>(loc, info.resource,
-                                                  info.index, valueValue)
-        .getOldValue();
-  case BufferAtomicKind::And:
-    return ctx.builder
-        .create<simt::dialect::BufferAtomicAndOp>(loc, info.resource,
-                                                  info.index, valueValue)
-        .getOldValue();
-  case BufferAtomicKind::Or:
-    return ctx.builder
-        .create<simt::dialect::BufferAtomicOrOp>(loc, info.resource,
-                                                 info.index, valueValue)
-        .getOldValue();
-  case BufferAtomicKind::Xor:
-    return ctx.builder
-        .create<simt::dialect::BufferAtomicXorOp>(loc, info.resource,
-                                                  info.index, valueValue)
-        .getOldValue();
-  }
-
-  llvm_unreachable("unknown buffer atomic kind");
-}
 
 static std::optional<BufferAccessInfo>
 getBufferAccessInfoFromLValue(const clang::Expr *expr,
@@ -1321,23 +1382,26 @@ lowerAtomicCall(const clang::CallExpr *call, LoweringContext &ctx) {
   if (!callee)
     return std::nullopt;
 
-  auto kind = llvm::StringSwitch<std::optional<BufferAtomicKind>>(callee->getName())
-                  .Case("InterlockedAdd", BufferAtomicKind::Add)
-                  .Case("InterlockedExchange", BufferAtomicKind::Exchange)
-                  .Case("InterlockedCompareExchange",
-                        BufferAtomicKind::CompareExchange)
-                  .Case("InterlockedMin", BufferAtomicKind::Min)
-                  .Case("InterlockedMax", BufferAtomicKind::Max)
-                  .Case("InterlockedAnd", BufferAtomicKind::And)
-                  .Case("InterlockedOr", BufferAtomicKind::Or)
-                  .Case("InterlockedXor", BufferAtomicKind::Xor)
-                  .Default(std::nullopt);
+  auto kind =
+      llvm::StringSwitch<std::optional<simt_hlsl_import::BufferAtomicOp>>(
+          callee->getName())
+          .Case("InterlockedAdd", simt_hlsl_import::BufferAtomicOp::Add)
+          .Case("InterlockedExchange",
+                 simt_hlsl_import::BufferAtomicOp::Exchange)
+          .Case("InterlockedCompareExchange",
+                 simt_hlsl_import::BufferAtomicOp::CompareExchange)
+          .Case("InterlockedMin", simt_hlsl_import::BufferAtomicOp::Min)
+          .Case("InterlockedMax", simt_hlsl_import::BufferAtomicOp::Max)
+          .Case("InterlockedAnd", simt_hlsl_import::BufferAtomicOp::And)
+          .Case("InterlockedOr", simt_hlsl_import::BufferAtomicOp::Or)
+          .Case("InterlockedXor", simt_hlsl_import::BufferAtomicOp::Xor)
+          .Default(std::nullopt);
   if (!kind)
     return std::nullopt;
 
   unsigned numArgs = call->getNumArgs();
   unsigned valueOperandCount =
-      *kind == BufferAtomicKind::CompareExchange ? 2U : 1U;
+      *kind == simt_hlsl_import::BufferAtomicOp::CompareExchange ? 2U : 1U;
   unsigned baseArgCount = 1 + valueOperandCount;
   if (numArgs != baseArgCount && numArgs != baseArgCount + 1)
     return ctx.fail("unexpected argument count for atomic call"),
@@ -1365,7 +1429,7 @@ lowerAtomicCall(const clang::CallExpr *call, LoweringContext &ctx) {
 
   mlir::Value compareValue;
   mlir::Value valueValue;
-  if (*kind == BufferAtomicKind::CompareExchange) {
+  if (*kind == simt_hlsl_import::BufferAtomicOp::CompareExchange) {
     compareValue = lowerExpr(call->getArg(argIndex++), ctx);
     if (!compareValue)
       return mlir::Value();
@@ -1382,8 +1446,41 @@ lowerAtomicCall(const clang::CallExpr *call, LoweringContext &ctx) {
   if (numArgs == baseArgCount + 1)
     outArg = call->getArg(argIndex++);
 
-  mlir::Value oldValue =
-      emitBufferAtomicOp(*kind, info, compareValue, valueValue, loc, ctx);
+  if (isEmitContext(ctx)) {
+    EmitInterpreter interp(ctx);
+    mlir::Value oldValue = interp.emitAtomic(
+        *kind, info.resource, info.index, valueValue, compareValue, info.decl,
+        {call, loc});
+    if (!oldValue && ctx.failed)
+      return mlir::Value();
+
+    if (info.decl)
+      ctx.mutatedVars.insert(info.decl);
+
+    if (outArg) {
+      const clang::Expr *stripped = outArg->IgnoreParenImpCasts();
+      if (const auto *outExpr =
+              llvm::dyn_cast<clang::HLSLOutArgExpr>(stripped))
+        stripped = outExpr->getArgLValue()->IgnoreParenImpCasts();
+      const clang::ValueDecl *outDecl = nullptr;
+      if (const auto *declRef =
+              llvm::dyn_cast<clang::DeclRefExpr>(stripped))
+        outDecl = declRef->getDecl();
+      if (!outDecl)
+        return ctx.fail("atomic original value argument must reference a "
+                        "variable"),
+               std::optional<mlir::Value>(mlir::Value());
+      ctx.valueMap[outDecl] = oldValue;
+      ctx.symValueMap[outDecl] = makeSymValue(outDecl);
+      ctx.mutatedVars.insert(outDecl);
+    }
+
+    return mlir::Value();
+  }
+
+  AnalysisInterpreter interp(ctx);
+  interp.emitAtomic(*kind, info.resource, info.index, valueValue, compareValue,
+                    info.decl, {call, loc});
 
   if (info.decl)
     ctx.mutatedVars.insert(info.decl);
@@ -1398,10 +1495,10 @@ lowerAtomicCall(const clang::CallExpr *call, LoweringContext &ctx) {
             llvm::dyn_cast<clang::DeclRefExpr>(stripped))
       outDecl = declRef->getDecl();
     if (!outDecl)
-      return ctx.fail(
-                 "atomic original value argument must reference a variable"),
+      return ctx.fail("atomic original value argument must reference a "
+                      "variable"),
              std::optional<mlir::Value>(mlir::Value());
-    ctx.valueMap[outDecl] = oldValue;
+    ctx.symValueMap[outDecl] = makeSymValue(outDecl);
     ctx.mutatedVars.insert(outDecl);
   }
 
@@ -2650,18 +2747,20 @@ lowerAtomicMemberCall(const clang::CXXMemberCallExpr *call,
   if (!methodDecl)
     return std::nullopt;
 
-  auto kind = llvm::StringSwitch<std::optional<BufferAtomicKind>>(
-                  methodDecl->getName())
-                  .Case("InterlockedAdd", BufferAtomicKind::Add)
-                  .Case("InterlockedExchange", BufferAtomicKind::Exchange)
-                  .Case("InterlockedCompareExchange",
-                        BufferAtomicKind::CompareExchange)
-                  .Case("InterlockedMin", BufferAtomicKind::Min)
-                  .Case("InterlockedMax", BufferAtomicKind::Max)
-                  .Case("InterlockedAnd", BufferAtomicKind::And)
-                  .Case("InterlockedOr", BufferAtomicKind::Or)
-                  .Case("InterlockedXor", BufferAtomicKind::Xor)
-                  .Default(std::nullopt);
+  auto kind =
+      llvm::StringSwitch<std::optional<simt_hlsl_import::BufferAtomicOp>>(
+          methodDecl->getName())
+          .Case("InterlockedAdd", simt_hlsl_import::BufferAtomicOp::Add)
+          .Case("InterlockedExchange",
+                 simt_hlsl_import::BufferAtomicOp::Exchange)
+          .Case("InterlockedCompareExchange",
+                 simt_hlsl_import::BufferAtomicOp::CompareExchange)
+          .Case("InterlockedMin", simt_hlsl_import::BufferAtomicOp::Min)
+          .Case("InterlockedMax", simt_hlsl_import::BufferAtomicOp::Max)
+          .Case("InterlockedAnd", simt_hlsl_import::BufferAtomicOp::And)
+          .Case("InterlockedOr", simt_hlsl_import::BufferAtomicOp::Or)
+          .Case("InterlockedXor", simt_hlsl_import::BufferAtomicOp::Xor)
+          .Default(std::nullopt);
   if (!kind)
     return std::nullopt;
 
@@ -2684,7 +2783,7 @@ lowerAtomicMemberCall(const clang::CXXMemberCallExpr *call,
 
   unsigned numArgs = call->getNumArgs();
   unsigned valueOperandCount =
-      *kind == BufferAtomicKind::CompareExchange ? 2U : 1U;
+      *kind == simt_hlsl_import::BufferAtomicOp::CompareExchange ? 2U : 1U;
   unsigned baseArgCount = 1 + valueOperandCount;
   if (numArgs != baseArgCount && numArgs != baseArgCount + 1)
     return ctx.fail("unexpected argument count for atomic call"),
@@ -2699,7 +2798,7 @@ lowerAtomicMemberCall(const clang::CXXMemberCallExpr *call,
 
   mlir::Value compareValue;
   mlir::Value valueValue;
-  if (*kind == BufferAtomicKind::CompareExchange) {
+  if (*kind == simt_hlsl_import::BufferAtomicOp::CompareExchange) {
     compareValue = lowerExpr(call->getArg(argIndex++), ctx);
     if (!compareValue)
       return mlir::Value();
@@ -2716,12 +2815,53 @@ lowerAtomicMemberCall(const clang::CXXMemberCallExpr *call,
   if (numArgs == baseArgCount + 1)
     outArg = call->getArg(argIndex++);
 
-  mlir::Value oldValue =
-      emitBufferAtomicOp(*kind, info, compareValue, valueValue, loc, ctx);
+  const clang::ValueDecl *objectDecl = nullptr;
+  if (const auto *declRef = llvm::dyn_cast<clang::DeclRefExpr>(
+          objectExpr->IgnoreParenImpCasts()))
+    objectDecl = declRef->getDecl();
 
-  if (const auto *declRef =
-          llvm::dyn_cast<clang::DeclRefExpr>(objectExpr->IgnoreParenImpCasts()))
-    ctx.mutatedVars.insert(declRef->getDecl());
+  if (isEmitContext(ctx)) {
+    EmitInterpreter interp(ctx);
+    mlir::Value oldValue = interp.emitAtomic(
+        *kind, info.resource, info.index, valueValue, compareValue,
+        /*resourceDecl=*/nullptr, {call, loc});
+    if (!oldValue && ctx.failed)
+      return mlir::Value();
+
+    if (objectDecl) {
+      ctx.mutatedVars.insert(objectDecl);
+      ctx.symValueMap[objectDecl] = makeSymValue(objectDecl);
+    }
+
+    if (outArg) {
+      const clang::Expr *stripped = outArg->IgnoreParenImpCasts();
+      if (const auto *outExpr =
+              llvm::dyn_cast<clang::HLSLOutArgExpr>(stripped))
+        stripped = outExpr->getArgLValue()->IgnoreParenImpCasts();
+      const clang::ValueDecl *outDecl = nullptr;
+      if (const auto *declRef =
+              llvm::dyn_cast<clang::DeclRefExpr>(stripped))
+        outDecl = declRef->getDecl();
+      if (!outDecl)
+        return ctx.fail("atomic original value argument must reference a "
+                        "variable"),
+               std::optional<mlir::Value>(mlir::Value());
+      ctx.valueMap[outDecl] = oldValue;
+      ctx.symValueMap[outDecl] = makeSymValue(outDecl);
+      ctx.mutatedVars.insert(outDecl);
+    }
+
+    return mlir::Value();
+  }
+
+  AnalysisInterpreter interp(ctx);
+  interp.emitAtomic(*kind, info.resource, info.index, valueValue, compareValue,
+                    /*resourceDecl=*/nullptr, {call, loc});
+
+  if (objectDecl) {
+    ctx.mutatedVars.insert(objectDecl);
+    ctx.symValueMap[objectDecl] = makeSymValue(objectDecl);
+  }
 
   if (outArg) {
     const clang::Expr *stripped = outArg->IgnoreParenImpCasts();
@@ -2733,10 +2873,10 @@ lowerAtomicMemberCall(const clang::CXXMemberCallExpr *call,
             llvm::dyn_cast<clang::DeclRefExpr>(stripped))
       outDecl = declRef->getDecl();
     if (!outDecl)
-      return ctx.fail(
-                 "atomic original value argument must reference a variable"),
+      return ctx.fail("atomic original value argument must reference a "
+                      "variable"),
              std::optional<mlir::Value>(mlir::Value());
-    ctx.valueMap[outDecl] = oldValue;
+    ctx.symValueMap[outDecl] = makeSymValue(outDecl);
     ctx.mutatedVars.insert(outDecl);
   }
 

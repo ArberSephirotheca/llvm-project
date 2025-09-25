@@ -176,8 +176,10 @@ struct TraceInterpreter : LoweringAlgebra<TraceInterpreter<Inner>> {
    nested regions.
 2. **Refactor barrier + buffer intrinsics first** – replace direct builder
    calls with algebra calls. Run both interpreters: analysis should produce no
-   MLIR; emit should pass existing tests. **Status:** Barrier/fence calls use
-   the new interpreters; buffer ops still rely on the legacy helpers.
+   MLIR; emit should pass existing tests. **Status:** Barrier/fence calls and
+   buffer loads/stores were migrated earlier; buffer atomics (`Interlocked*`)
+   now route through `EmitInterpreter::emitAtomic`, while the analysis
+   interpreter records mutations without building IR.
 3. **Gradually migrate remaining helpers** (expressions, control flow, returns,
    etc.). After each stage run `mlir::verify` + unit tests. **Status:** In
    progress. Statement lowering now routes `DeclStmt` variable binding,
@@ -197,9 +199,10 @@ struct TraceInterpreter : LoweringAlgebra<TraceInterpreter<Inner>> {
 - `Lowering.cpp` still owns the full `LoweringContext` stacks. `lowerStatement`
   instantiates `EmitInterpreter`/`AnalysisInterpreter` (with `fork` for loops
   and switch cases) so barrier utilities, local declarations, returns, scalar
-  arithmetic/comparisons, buffer loads/stores, and basic wave intrinsics now flow through the
-  algebra. Analysis paths track symbolic `SymValue` metadata for bound
-  variables.
+  arithmetic/comparisons, buffer loads/stores, buffer atomics, and basic wave
+  intrinsics now flow through the algebra. Analysis paths track symbolic
+  `SymValue` metadata for bound variables; atomics mark resources as mutated
+  without materialising IR.
 - Analysis mode continues to run with a detached `OpBuilder`. The algebraized
   paths suppress barrier/fence emission, and emit-mode literals / basic
   arithmetic/comparisons now go through the algebra. Expression helpers still

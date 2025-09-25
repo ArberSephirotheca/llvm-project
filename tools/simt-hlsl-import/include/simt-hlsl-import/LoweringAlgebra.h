@@ -91,8 +91,10 @@ template <typename Self, typename ValueT> struct LoweringAlgebra {
   }
 
   Value emitAtomic(BufferAtomicOp op, Value resourceHandle, Value index,
-                   Value value, Value compare, SourceLoc loc) {
-    return self().emitAtomic(op, resourceHandle, index, value, compare, loc);
+                   Value value, Value compare,
+                   const clang::ValueDecl *resourceDecl, SourceLoc loc) {
+    return self().emitAtomic(op, resourceHandle, index, value, compare,
+                             resourceDecl, loc);
   }
 
   Value emitWaveIntrinsic(WaveIntrinsic op, llvm::ArrayRef<Value> operands,
