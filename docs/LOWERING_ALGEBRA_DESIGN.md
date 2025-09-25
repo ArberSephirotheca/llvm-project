@@ -196,8 +196,9 @@ struct TraceInterpreter : LoweringAlgebra<TraceInterpreter<Inner>> {
   (constants, arithmetic, variable binding, barriers/fences, diagnostics).
 - `Lowering.cpp` still owns the full `LoweringContext` stacks. `lowerStatement`
   instantiates `EmitInterpreter`/`AnalysisInterpreter` (with `fork` for loops
-  and switch cases) so barrier utilities, local declarations, and returns now
-  flow through the algebra.
+  and switch cases) so barrier utilities, local declarations, returns, and
+  scalar arithmetic/comparisons now flow through the algebra. Analysis paths
+  track symbolic `SymValue` metadata for bound variables.
 - Analysis mode continues to run with a detached `OpBuilder`. The algebraized
   paths suppress barrier/fence emission, and emit-mode literals / basic
   arithmetic/comparisons now go through the algebra. Expression helpers still

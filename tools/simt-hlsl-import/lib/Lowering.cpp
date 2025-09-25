@@ -84,11 +84,21 @@ struct ControlEntry {
   size_t index;
 };
 
+enum class SymKind { Unknown, ScalarInt, ScalarFloat, Vector, Pointer };
+
+struct SymValue {
+  SymKind kind = SymKind::Unknown;
+  unsigned bitWidth = 0;
+  unsigned elementCount = 1;
+  bool isConst = false;
+};
+
 struct LoweringContext {
   mlir::OpBuilder &builder;
   mlir::Location defaultLoc;
   mlir::Type returnType;
   llvm::DenseMap<const clang::ValueDecl *, mlir::Value> valueMap;
+  llvm::DenseMap<const clang::ValueDecl *, SymValue> symValueMap;
   llvm::SmallPtrSet<const clang::ValueDecl *, 8> mutatedVars;
   bool emittedTerminator = false;
   std::string &errorMessage;
@@ -120,6 +130,40 @@ static bool isEmitContext(const LoweringContext &ctx) {
 namespace {
 
 struct UnitValue {};
+
+static SymValue makeSymValue(const clang::ValueDecl *decl) {
+  SymValue sym;
+  if (!decl)
+    return sym;
+  clang::QualType qt = decl->getType();
+  if (qt.isNull())
+    return sym;
+  sym.isConst = qt.isConstQualified();
+  const clang::Type *type = qt.getTypePtrOrNull();
+  if (!type)
+    return sym;
+  clang::ASTContext &astCtx = decl->getASTContext();
+  if (type->isBooleanType() || type->isIntegerType()) {
+    sym.kind = SymKind::ScalarInt;
+    clang::TypeInfo info = astCtx.getTypeInfo(qt);
+    sym.bitWidth = static_cast<unsigned>(info.Width);
+  } else if (type->isFloatingType()) {
+    sym.kind = SymKind::ScalarFloat;
+    clang::TypeInfo info = astCtx.getTypeInfo(qt);
+    sym.bitWidth = static_cast<unsigned>(info.Width);
+  } else if (type->isVectorType()) {
+    sym.kind = SymKind::Vector;
+    if (const auto *vecTy = type->getAs<clang::VectorType>()) {
+      sym.elementCount = vecTy->getNumElements();
+      clang::TypeInfo info = astCtx.getTypeInfo(vecTy->getElementType());
+      sym.bitWidth = static_cast<unsigned>(info.Width);
+    }
+  } else if (type->isPointerType()) {
+    sym.kind = SymKind::Pointer;
+    sym.bitWidth = static_cast<unsigned>(astCtx.getTypeSize(qt));
+  }
+  return sym;
+}
 
 static mlir::Location resolveLoc(const simt_hlsl_import::SourceLoc &src,
                                  LoweringContext &ctx) {
@@ -373,6 +417,7 @@ struct EmitInterpreter
 
   void bindVariable(const clang::ValueDecl *decl, Value value) {
     ctx.valueMap[decl] = value;
+    ctx.symValueMap[decl] = makeSymValue(decl);
   }
 
   void noteMutation(const clang::ValueDecl *decl) {
@@ -430,6 +475,7 @@ struct AnalysisInterpreter
 
   void bindVariable(const clang::ValueDecl *decl, Value value) {
     ctx.valueMap[decl] = value;
+    ctx.symValueMap[decl] = makeSymValue(decl);
   }
 
   void noteMutation(const clang::ValueDecl *decl) {
@@ -1511,6 +1557,7 @@ static mlir::Value lowerExpr(const clang::Expr *expr, LoweringContext &ctx) {
     LoweringContext trueCtx(trueBuilder, loc, ctx.returnType, ctx.errorMessage,
                             ctx.sourceManager);
     trueCtx.valueMap = ctx.valueMap;
+    trueCtx.symValueMap = ctx.symValueMap;
     trueCtx.loopStack = ctx.loopStack;
     trueCtx.switchStack = ctx.switchStack;
     trueCtx.controlStack = ctx.controlStack;
@@ -1529,6 +1576,7 @@ static mlir::Value lowerExpr(const clang::Expr *expr, LoweringContext &ctx) {
     LoweringContext falseCtx(falseBuilder, loc, ctx.returnType,
                              ctx.errorMessage, ctx.sourceManager);
     falseCtx.valueMap = ctx.valueMap;
+    falseCtx.symValueMap = ctx.symValueMap;
     falseCtx.loopStack = ctx.loopStack;
     falseCtx.switchStack = ctx.switchStack;
     falseCtx.controlStack = ctx.controlStack;
@@ -1751,6 +1799,7 @@ static mlir::Value lowerExpr(const clang::Expr *expr, LoweringContext &ctx) {
       LoweringContext thenCtx(thenBuilder, loc, ctx.returnType,
                               ctx.errorMessage, ctx.sourceManager);
       thenCtx.valueMap = ctx.valueMap;
+      thenCtx.symValueMap = ctx.symValueMap;
       thenCtx.loopStack = ctx.loopStack;
       thenCtx.switchStack = ctx.switchStack;
       thenCtx.controlStack = ctx.controlStack;
@@ -1867,6 +1916,7 @@ static mlir::Value lowerExpr(const clang::Expr *expr, LoweringContext &ctx) {
       LoweringContext elseCtx(elseBuilder, loc, ctx.returnType,
                               ctx.errorMessage, ctx.sourceManager);
       elseCtx.valueMap = ctx.valueMap;
+      elseCtx.symValueMap = ctx.symValueMap;
       elseCtx.loopStack = ctx.loopStack;
       elseCtx.switchStack = ctx.switchStack;
       elseCtx.controlStack = ctx.controlStack;
@@ -2219,6 +2269,7 @@ static mlir::Value lowerAssignment(const clang::BinaryOperator *binOp,
       }
       it->second = rhs;
       ctx.mutatedVars.insert(vd);
+      ctx.symValueMap[vd] = makeSymValue(vd);
       return rhs;
     }
     return ctx.fail("reference to unknown value"), mlir::Value();
@@ -2363,6 +2414,7 @@ static bool collectLoopMutations(
   LoweringContext analysisCtx(analysisBuilder, ctx.defaultLoc, ctx.returnType,
                               ctx.errorMessage, ctx.sourceManager);
   analysisCtx.valueMap = ctx.valueMap;
+  analysisCtx.symValueMap = ctx.symValueMap;
   analysisCtx.loopStack = ctx.loopStack;
   analysisCtx.switchStack = ctx.switchStack;
   analysisCtx.controlStack = ctx.controlStack;
@@ -2610,6 +2662,7 @@ static bool lowerStatement(const clang::Stmt *stmt, LoweringContext &ctx,
                          ctx.sourceManager);
       outCtx = &*ctxStorage;
       outCtx->valueMap = ctx.valueMap;
+      outCtx->symValueMap = ctx.symValueMap;
       outCtx->mutatedVars.clear();
       outCtx->loopStack = ctx.loopStack;
       outCtx->switchStack = ctx.switchStack;
@@ -2752,6 +2805,10 @@ static bool lowerStatement(const clang::Stmt *stmt, LoweringContext &ctx,
       }
       if (initValue)
         interp.bindVariable(var, initValue);
+      if (isEmitContext(ctx))
+        ctx.symValueMap[var] = makeSymValue(var);
+      else
+        ctx.symValueMap[var] = makeSymValue(var);
     }
     return true;
   }
@@ -2832,6 +2889,7 @@ static bool lowerForStmt(const clang::ForStmt *forStmt, LoweringContext &ctx,
     LoweringContext prepCtx(prepBuilder, loc, ctx.returnType, ctx.errorMessage,
                             ctx.sourceManager);
     prepCtx.valueMap = ctx.valueMap;
+    prepCtx.symValueMap = ctx.symValueMap;
     prepCtx.loopStack = ctx.loopStack;
     prepCtx.switchStack = ctx.switchStack;
     prepCtx.controlStack = ctx.controlStack;
@@ -2866,6 +2924,7 @@ static bool lowerForStmt(const clang::ForStmt *forStmt, LoweringContext &ctx,
     LoweringContext bodyCtx(bodyBuilder, loc, ctx.returnType, ctx.errorMessage,
                             ctx.sourceManager);
     bodyCtx.valueMap = ctx.valueMap;
+    bodyCtx.symValueMap = ctx.symValueMap;
     bodyCtx.loopStack = ctx.loopStack;
     bodyCtx.switchStack = ctx.switchStack;
     bodyCtx.controlStack = ctx.controlStack;
@@ -2949,6 +3008,7 @@ static bool lowerWhileStmt(const clang::WhileStmt *whileStmt,
     LoweringContext prepCtx(prepBuilder, loc, ctx.returnType, ctx.errorMessage,
                             ctx.sourceManager);
     prepCtx.valueMap = ctx.valueMap;
+    prepCtx.symValueMap = ctx.symValueMap;
     prepCtx.loopStack = ctx.loopStack;
     for (auto [index, vd] : llvm::enumerate(mutatedVars))
       prepCtx.valueMap[vd] = prepareBlock->getArgument(index);
@@ -2977,6 +3037,7 @@ static bool lowerWhileStmt(const clang::WhileStmt *whileStmt,
     LoweringContext bodyCtx(bodyBuilder, loc, ctx.returnType, ctx.errorMessage,
                             ctx.sourceManager);
     bodyCtx.valueMap = ctx.valueMap;
+    bodyCtx.symValueMap = ctx.symValueMap;
     bodyCtx.loopStack = ctx.loopStack;
     for (auto [index, vd] : llvm::enumerate(mutatedVars))
       bodyCtx.valueMap[vd] = bodyBlock->getArgument(index);
@@ -3049,6 +3110,7 @@ static bool lowerDoStmt(const clang::DoStmt *doStmt, LoweringContext &ctx,
     LoweringContext prepCtx(prepBuilder, loc, ctx.returnType, ctx.errorMessage,
                             ctx.sourceManager);
     prepCtx.valueMap = ctx.valueMap;
+    prepCtx.symValueMap = ctx.symValueMap;
     prepCtx.loopStack = ctx.loopStack;
     for (auto [index, vd] : llvm::enumerate(mutatedVars))
       prepCtx.valueMap[vd] = prepareBlock->getArgument(index);
@@ -3090,6 +3152,7 @@ static bool lowerDoStmt(const clang::DoStmt *doStmt, LoweringContext &ctx,
         LoweringContext condCtx(elseBuilder, loc, ctx.returnType,
                                 ctx.errorMessage, ctx.sourceManager);
         condCtx.valueMap = prepCtx.valueMap;
+        condCtx.symValueMap = prepCtx.symValueMap;
         condCtx.loopStack = prepCtx.loopStack;
         condCtx.switchStack = prepCtx.switchStack;
         condCtx.controlStack = prepCtx.controlStack;
@@ -3149,6 +3212,7 @@ static bool lowerDoStmt(const clang::DoStmt *doStmt, LoweringContext &ctx,
     LoweringContext bodyCtx(bodyBuilder, loc, ctx.returnType, ctx.errorMessage,
                             ctx.sourceManager);
     bodyCtx.valueMap = ctx.valueMap;
+    bodyCtx.symValueMap = ctx.symValueMap;
     bodyCtx.loopStack = ctx.loopStack;
     bodyCtx.switchStack = ctx.switchStack;
     bodyCtx.controlStack = ctx.controlStack;
@@ -3273,6 +3337,7 @@ static bool lowerSwitchStmt(const clang::SwitchStmt *switchStmt,
     LoweringContext analysisCtx(analysisBuilder, loc, ctx.returnType,
                                 ctx.errorMessage, ctx.sourceManager);
     analysisCtx.valueMap = ctx.valueMap;
+    analysisCtx.symValueMap = ctx.symValueMap;
     analysisCtx.loopStack = ctx.loopStack;
     analysisCtx.switchStack = ctx.switchStack;
     analysisCtx.controlStack = ctx.controlStack;
@@ -3366,6 +3431,7 @@ static bool lowerSwitchStmt(const clang::SwitchStmt *switchStmt,
     LoweringContext caseCtx(thenBuilder, loc, ctx.returnType, ctx.errorMessage,
                             ctx.sourceManager);
     caseCtx.valueMap = ctx.valueMap;
+    caseCtx.symValueMap = ctx.symValueMap;
     caseCtx.loopStack = ctx.loopStack;
     caseCtx.switchStack = ctx.switchStack;
     caseCtx.controlStack = ctx.controlStack;
