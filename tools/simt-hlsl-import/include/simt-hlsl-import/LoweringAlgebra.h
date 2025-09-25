@@ -5,6 +5,8 @@
 #include <vector>
 
 #include "mlir/IR/Location.h"
+#include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/function_ref.h"
 
 namespace clang {
 class Stmt;
@@ -24,7 +26,27 @@ enum class ArithOp { Add, Sub, Mul, Div, Rem, Neg, BitAnd, BitOr, BitXor };
 
 enum class CmpOp { EQ, NE, LT, LE, GT, GE };
 
+enum class LogicalOp { And, Or };
+
 enum class BarrierKind { Workgroup, Device, All };
+
+enum class BufferAtomicOp {
+  Add,
+  Exchange,
+  CompareExchange,
+  Min,
+  Max,
+  And,
+  Or,
+  Xor,
+};
+
+enum class WaveIntrinsic {
+  ActiveAllTrue,
+  ActiveAnyTrue,
+  ActiveCountBits,
+  GetLaneIndex,
+};
 
 template <typename Self, typename ValueT> struct LoweringAlgebra {
   using Value = ValueT;
@@ -47,6 +69,31 @@ template <typename Self, typename ValueT> struct LoweringAlgebra {
 
   Value emitSelect(Value cond, Value trueV, Value falseV, SourceLoc loc) {
     return self().emitSelect(cond, trueV, falseV, loc);
+  }
+
+  Value emitShortCircuit(LogicalOp op, Value lhs,
+                         llvm::function_ref<Value()> rhsBuilder,
+                         SourceLoc loc) {
+    return self().emitShortCircuit(op, lhs, rhsBuilder, loc);
+  }
+
+  Value emitBufferLoad(Value resourceHandle, Value index, SourceLoc loc) {
+    return self().emitBufferLoad(resourceHandle, index, loc);
+  }
+
+  void emitBufferStore(Value resourceHandle, Value index, Value storedValue,
+                       SourceLoc loc) {
+    self().emitBufferStore(resourceHandle, index, storedValue, loc);
+  }
+
+  Value emitAtomic(BufferAtomicOp op, Value resourceHandle, Value index,
+                   Value value, Value compare, SourceLoc loc) {
+    return self().emitAtomic(op, resourceHandle, index, value, compare, loc);
+  }
+
+  Value emitWaveIntrinsic(WaveIntrinsic op, llvm::ArrayRef<Value> operands,
+                          SourceLoc loc) {
+    return self().emitWaveIntrinsic(op, operands, loc);
   }
 
   Value lookupVariable(const clang::ValueDecl *decl) {

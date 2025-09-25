@@ -272,8 +272,9 @@ helper migrates, but the list above keeps the scope explicit for code review.
 - `LoweringContext` becomes a lightweight owner of common state
   (diagnostics, return type, loop/switch stacks). Each interpreter holds a
   reference to the context and exposes typed accessors.
-- The algebra may need additional hooks (e.g., for branch masks) as we refactor
-  more helpers. Add them incrementally with clear semantics.
+- The algebra now reserves hooks for short-circuit logic, buffer accesses,
+  wave intrinsics, and atomics; keep expanding the surface with clear semantics
+  as more helpers migrate.
 - Replace push/pop stacks with RAII guard objects (`LoopScope`, `IfScope`).
   Emit uses them to manage MLIR regions; analysis tracks scope nesting for
   correctness checks.

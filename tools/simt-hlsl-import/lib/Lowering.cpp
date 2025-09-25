@@ -410,6 +410,31 @@ struct EmitInterpreter
         .getResult();
   }
 
+  Value emitShortCircuit(simt_hlsl_import::LogicalOp, Value,
+                         llvm::function_ref<Value()>,
+                         simt_hlsl_import::SourceLoc) {
+    llvm_unreachable("emitShortCircuit not yet routed through algebra");
+  }
+
+  Value emitBufferLoad(Value, Value, simt_hlsl_import::SourceLoc) {
+    llvm_unreachable("emitBufferLoad not yet routed through algebra");
+  }
+
+  void emitBufferStore(Value, Value, Value, simt_hlsl_import::SourceLoc) {
+    llvm_unreachable("emitBufferStore not yet routed through algebra");
+  }
+
+  Value emitAtomic(simt_hlsl_import::BufferAtomicOp, Value, Value, Value, Value,
+                   simt_hlsl_import::SourceLoc) {
+    llvm_unreachable("emitAtomic not yet routed through algebra");
+  }
+
+  Value emitWaveIntrinsic(simt_hlsl_import::WaveIntrinsic,
+                          llvm::ArrayRef<Value>,
+                          simt_hlsl_import::SourceLoc) {
+    llvm_unreachable("emitWaveIntrinsic not yet routed through algebra");
+  }
+
   Value lookupVariable(const clang::ValueDecl *decl) {
     auto it = ctx.valueMap.find(decl);
     return it != ctx.valueMap.end() ? it->second : mlir::Value();
@@ -465,6 +490,29 @@ struct AnalysisInterpreter
   }
   Value emitSelect(Value, Value, Value,
                    simt_hlsl_import::SourceLoc) {
+    return {};
+  }
+
+  Value emitShortCircuit(simt_hlsl_import::LogicalOp, Value,
+                         llvm::function_ref<Value()>,
+                         simt_hlsl_import::SourceLoc) {
+    return {};
+  }
+
+  Value emitBufferLoad(Value, Value, simt_hlsl_import::SourceLoc) {
+    return {};
+  }
+
+  void emitBufferStore(Value, Value, Value, simt_hlsl_import::SourceLoc) {}
+
+  Value emitAtomic(simt_hlsl_import::BufferAtomicOp, Value, Value, Value, Value,
+                   simt_hlsl_import::SourceLoc) {
+    return {};
+  }
+
+  Value emitWaveIntrinsic(simt_hlsl_import::WaveIntrinsic,
+                          llvm::ArrayRef<Value>,
+                          simt_hlsl_import::SourceLoc) {
     return {};
   }
 
