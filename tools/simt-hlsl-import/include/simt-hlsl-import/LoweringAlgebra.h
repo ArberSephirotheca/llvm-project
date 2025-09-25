@@ -6,7 +6,6 @@
 
 #include "mlir/IR/Location.h"
 #include "llvm/ADT/ArrayRef.h"
-#include "llvm/ADT/function_ref.h"
 
 namespace clang {
 class Stmt;
@@ -71,8 +70,8 @@ template <typename Self, typename ValueT> struct LoweringAlgebra {
     return self().emitSelect(cond, trueV, falseV, loc);
   }
 
-  Value emitShortCircuit(LogicalOp op, Value lhs,
-                         llvm::function_ref<Value()> rhsBuilder,
+  template <typename RHSMake>
+  Value emitShortCircuit(LogicalOp op, Value lhs, RHSMake &&rhsBuilder,
                          SourceLoc loc) {
     return self().emitShortCircuit(op, lhs, rhsBuilder, loc);
   }

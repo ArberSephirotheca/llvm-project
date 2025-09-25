@@ -410,8 +410,9 @@ struct EmitInterpreter
         .getResult();
   }
 
+  template <typename RHSMake>
   Value emitShortCircuit(simt_hlsl_import::LogicalOp, Value,
-                         llvm::function_ref<Value()>,
+                         RHSMake &&,
                          simt_hlsl_import::SourceLoc) {
     llvm_unreachable("emitShortCircuit not yet routed through algebra");
   }
