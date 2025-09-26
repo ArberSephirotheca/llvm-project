@@ -2150,30 +2150,6 @@ lowerBufferAccessInterp(const clang::Expr *baseExpr,
   return std::make_optional(std::make_tuple(resource, index, resourceType, decl));
 }
 
-static mlir::Value lowerExprLegacy(const clang::Expr *expr, LoweringContext &ctx);
-
-static std::optional<BufferAccessInfo>
-getBufferAccessInfo(const clang::Expr *baseExpr, const clang::Expr *indexExpr,
-                    LoweringContext &ctx) {
-  auto info = lowerBufferAccessInterp<mlir::Value>(
-      baseExpr, indexExpr, ctx,
-      [&](const clang::Expr *expr) -> mlir::Value {
-        return lowerExprLegacy(expr, ctx);
-      });
-  if (!info)
-    return std::nullopt;
-  auto [resource, index, resourceType, decl] = *info;
-  return BufferAccessInfo{resource, index, resourceType, decl};
-}
-
-static std::optional<BufferAccessInfo>
-lowerBufferAccessOperands(const clang::CXXOperatorCallExpr *opCall,
-                          LoweringContext &ctx) {
-  if (!opCall || opCall->getNumArgs() < 2)
-    return std::nullopt;
-  return getBufferAccessInfo(opCall->getArg(0), opCall->getArg(1), ctx);
-}
-
 static mlir::Location getLocation(const clang::Stmt *stmt,
                                   LoweringContext &ctx);
 
@@ -2451,12 +2427,10 @@ lowerAtomicMemberCallInterp(const clang::CXXMemberCallExpr *call,
   return std::optional<ValueT>(oldValue);
 }
 
-static mlir::Value lowerAssignment(const clang::BinaryOperator *binOp,
-                                   LoweringContext &ctx);
-
-static std::optional<mlir::Value>
-lowerAtomicMemberCall(const clang::CXXMemberCallExpr *call,
-                      LoweringContext &ctx);
+template <typename Interp>
+static typename Interp::Value
+lowerAssignmentInterp(const clang::BinaryOperator *binOp, LoweringContext &ctx,
+                      Interp &interp);
 
 template <typename Interp>
 static typename Interp::Value lowerExprInterp(const clang::Expr *expr,
@@ -2562,6 +2536,74 @@ static typename Interp::Value lowerExprInterp(const clang::Expr *expr,
     }
   }
 
+  if (const auto *vecElem = llvm::dyn_cast<clang::ExtVectorElementExpr>(expr)) {
+    if (vecElem->isArrow()) {
+      ctx.fail("pointer-based vector swizzles are unsupported");
+      return ValueT();
+    }
+
+    auto base = lowerExprInterp(vecElem->getBase(), ctx, interp);
+    if (!base)
+      return ValueT();
+
+    auto baseVecType = mlir::dyn_cast<mlir::VectorType>(getValueType(base));
+    if (!baseVecType || baseVecType.getRank() != 1) {
+      ctx.fail("vector element access requires 1-D vector operand");
+      return ValueT();
+    }
+
+    llvm::SmallVector<uint32_t, 4> elementIndices32;
+    vecElem->getEncodedElementAccess(elementIndices32);
+    llvm::SmallVector<int64_t, 4> elements;
+    elements.reserve(elementIndices32.size());
+    for (uint32_t idx : elementIndices32) {
+      if (idx >= baseVecType.getShape()[0]) {
+        ctx.fail("vector element index out of range");
+        return ValueT();
+      }
+      elements.push_back(static_cast<int64_t>(idx));
+    }
+    if (elements.empty()) {
+      ctx.fail("vector element access with no components");
+      return ValueT();
+    }
+
+    mlir::Value baseValue = unwrapValue(base);
+    if (!baseValue) {
+      ctx.fail("vector element access requires materialized value");
+      return ValueT();
+    }
+
+    mlir::Location vecLoc = getLocation(expr, ctx);
+    if (elements.size() == 1) {
+      llvm::SmallVector<int64_t, 1> position = {elements.front()};
+      mlir::Value result =
+          ctx.builder.create<mlir::vector::ExtractOp>(vecLoc, baseValue, position)
+              .getResult();
+      return wrapMlirValue(interp, result);
+    }
+
+    mlir::Type elementType = baseVecType.getElementType();
+    auto resultType = mlir::VectorType::get(
+        {static_cast<int64_t>(elements.size())}, elementType);
+    mlir::Value result = buildZeroValue(ctx, resultType);
+    if (!result)
+      return ValueT();
+
+    for (auto [outIdx, elementIndex] : llvm::enumerate(elements)) {
+      llvm::SmallVector<int64_t, 1> extractPos = {elementIndex};
+      mlir::Value component =
+          ctx.builder.create<mlir::vector::ExtractOp>(vecLoc, baseValue, extractPos)
+              .getResult();
+      llvm::SmallVector<int64_t, 1> insertPos = {static_cast<int64_t>(outIdx)};
+      result = ctx.builder
+                   .create<mlir::vector::InsertOp>(vecLoc, component, result, insertPos)
+                   .getResult();
+    }
+
+    return wrapMlirValue(interp, result);
+  }
+
   if (const auto *unOp = llvm::dyn_cast<clang::UnaryOperator>(expr)) {
     auto operand = lowerExprInterp(unOp->getSubExpr(), ctx, interp);
     if (!operand)
@@ -2587,12 +2629,96 @@ static typename Interp::Value lowerExprInterp(const clang::Expr *expr,
       }
       break;
     }
+    case clang::UnaryOperatorKind::UO_LNot: {
+      mlir::Type operandType = getValueType(operand);
+      if (auto intType = mlir::dyn_cast<mlir::IntegerType>(operandType)) {
+        std::string tag = buildIntegerTag(intType);
+        auto zero = interp.emitConstantInt(0, tag.c_str(), src);
+        return interp.emitCompare(simt_hlsl_import::CmpOp::EQ, operand, zero,
+                                  src);
+      }
+      if (auto floatType = mlir::dyn_cast<mlir::FloatType>(operandType)) {
+        std::string tag = buildFloatTag(floatType);
+        auto zero = interp.emitConstantFloat(0.0, tag.c_str(), src);
+        return interp.emitCompare(simt_hlsl_import::CmpOp::EQ, operand, zero,
+                                  src);
+      }
+      ctx.fail("logical not requires scalar operand");
+      return typename Interp::Value();
+    }
+    case clang::UnaryOperatorKind::UO_Not: {
+      auto intType = mlir::dyn_cast<mlir::IntegerType>(getValueType(operand));
+      if (!intType) {
+        ctx.fail("bitwise not requires integer operand");
+        return typename Interp::Value();
+      }
+      std::string tag = buildIntegerTag(intType);
+      auto allOnes = interp.emitConstantInt(-1, tag.c_str(), src);
+      return interp.emitArithmetic(simt_hlsl_import::ArithOp::BitXor, operand,
+                                   allOnes, src);
+    }
+    case clang::UnaryOperatorKind::UO_PreInc:
+    case clang::UnaryOperatorKind::UO_PreDec:
+    case clang::UnaryOperatorKind::UO_PostInc:
+    case clang::UnaryOperatorKind::UO_PostDec: {
+      auto getMutableDeclRef =
+          [&](const clang::Expr *expr) -> const clang::ValueDecl * {
+        const clang::Expr *stripped = expr->IgnoreParenImpCasts();
+        if (const auto *ref = llvm::dyn_cast<clang::DeclRefExpr>(stripped))
+          return ref->getDecl();
+        return nullptr;
+      };
+
+      const clang::ValueDecl *target = getMutableDeclRef(unOp->getSubExpr());
+      if (!target) {
+        ctx.fail("increment/decrement requires simple variable");
+        return typename Interp::Value();
+      }
+
+      mlir::Type operandType = getValueType(operand);
+      bool isIncrement =
+          unOp->getOpcode() == clang::UnaryOperatorKind::UO_PreInc ||
+          unOp->getOpcode() == clang::UnaryOperatorKind::UO_PostInc;
+      simt_hlsl_import::ArithOp arithOp =
+          isIncrement ? simt_hlsl_import::ArithOp::Add
+                      : simt_hlsl_import::ArithOp::Sub;
+
+      typename Interp::Value one;
+      if (auto intType = mlir::dyn_cast<mlir::IntegerType>(operandType)) {
+        std::string tag = buildIntegerTag(intType);
+        one = interp.emitConstantInt(1, tag.c_str(), src);
+      } else if (auto floatType = mlir::dyn_cast<mlir::FloatType>(operandType)) {
+        std::string tag = buildFloatTag(floatType);
+        one = interp.emitConstantFloat(1.0, tag.c_str(), src);
+      } else {
+        ctx.fail("increment/decrement requires numeric operand");
+        return typename Interp::Value();
+      }
+
+      auto updated = interp.emitArithmetic(arithOp, operand, one, src);
+      interp.bindVariable(target, updated);
+      interp.noteMutation(target);
+
+      bool isPost = unOp->getOpcode() == clang::UnaryOperatorKind::UO_PostInc ||
+                    unOp->getOpcode() == clang::UnaryOperatorKind::UO_PostDec;
+      return isPost ? operand : updated;
+    }
     default:
       break;
     }
   }
 
+  if (const auto *callExpr = llvm::dyn_cast<clang::CallExpr>(expr)) {
+    if (auto lowered = lowerAtomicCallInterp(callExpr, ctx, interp))
+      return *lowered;
+    if (auto lowered = lowerWaveIntrinsicCallInterp(callExpr, ctx, interp))
+      return *lowered;
+  }
+
   if (const auto *binOp = llvm::dyn_cast<clang::BinaryOperator>(expr)) {
+    if (binOp->getOpcode() == clang::BinaryOperatorKind::BO_Assign)
+      return lowerAssignmentInterp(binOp, ctx, interp);
+
     auto getOperand = [&](const clang::Expr *subExpr) -> typename Interp::Value {
       return lowerExprInterp(subExpr, ctx, interp);
     };
@@ -2702,6 +2828,36 @@ static typename Interp::Value lowerExprInterp(const clang::Expr *expr,
                            : simt_hlsl_import::LogicalOp::Or;
       return interp.emitShortCircuit(logicalOp, lhs, rhsBuilder, src);
     }
+    case clang::BinaryOperatorKind::BO_And:
+    case clang::BinaryOperatorKind::BO_Or:
+    case clang::BinaryOperatorKind::BO_Xor: {
+      auto lhs = getOperand(binOp->getLHS());
+      typename Interp::Value rhs;
+      if (!requireOperands(lhs, rhs))
+        return typename Interp::Value();
+
+      if (!mlir::isa<mlir::IntegerType>(getValueType(lhs))) {
+        ctx.fail("bitwise operator requires integer operands");
+        return typename Interp::Value();
+      }
+
+      simt_hlsl_import::ArithOp arithOp;
+      switch (binOp->getOpcode()) {
+      case clang::BinaryOperatorKind::BO_And:
+        arithOp = simt_hlsl_import::ArithOp::BitAnd;
+        break;
+      case clang::BinaryOperatorKind::BO_Or:
+        arithOp = simt_hlsl_import::ArithOp::BitOr;
+        break;
+      case clang::BinaryOperatorKind::BO_Xor:
+        arithOp = simt_hlsl_import::ArithOp::BitXor;
+        break;
+      default:
+        llvm_unreachable("unexpected bitwise opcode");
+      }
+
+      return interp.emitArithmetic(arithOp, lhs, rhs, src);
+    }
     default:
       break;
     }
@@ -2753,25 +2909,19 @@ static typename Interp::Value lowerExprInterp(const clang::Expr *expr,
     return interp.emitConditional(condValue, thenBuilder, elseBuilder, src);
   }
 
-  mlir::Value value = lowerExprLegacy(expr, ctx);
-  if (!value)
-    return typename Interp::Value();
-  return wrapMlirValue(interp, value);
+  ctx.fail("unsupported expression lowering");
+  return typename Interp::Value();
 }
 
 static mlir::Value lowerExpr(const clang::Expr *expr, LoweringContext &ctx) {
-  if (isEmitContext(ctx))
-    return lowerExprLegacy(expr, ctx);
+  if (isEmitContext(ctx)) {
+    EmitInterpreter interp(ctx);
+    return lowerExprInterp(expr, ctx, interp);
+  }
   AnalysisInterpreter interp(ctx);
   auto result = lowerExprInterp(expr, ctx, interp);
   return result.getValueOrNull();
 }
-
-static std::optional<mlir::Value>
-lowerAtomicCall(const clang::CallExpr *call, LoweringContext &ctx);
-
-static std::optional<mlir::Value>
-lowerWaveIntrinsicCall(const clang::CallExpr *call, LoweringContext &ctx);
 
 template <typename Interp>
 static std::optional<typename Interp::Value>
@@ -2854,43 +3004,6 @@ lowerWaveIntrinsicCallInterp(const clang::CallExpr *call, LoweringContext &ctx,
   }
 
   return std::nullopt;
-}
-
-static std::optional<mlir::Value>
-lowerAtomicCall(const clang::CallExpr *call, LoweringContext &ctx) {
-  if (!call)
-    return std::nullopt;
-
-  if (isEmitContext(ctx)) {
-    EmitInterpreter interp(ctx);
-    return lowerAtomicCallInterp(call, ctx, interp);
-  }
-
-  AnalysisInterpreter interp(ctx);
-  auto result = lowerAtomicCallInterp(call, ctx, interp);
-  if (!result)
-    return std::nullopt;
-  return std::optional<mlir::Value>(result->getValueOrNull());
-}
-
-static std::optional<mlir::Value>
-lowerWaveIntrinsicCall(const clang::CallExpr *call, LoweringContext &ctx) {
-  if (!call)
-    return std::nullopt;
-
-  if (isEmitContext(ctx)) {
-    EmitInterpreter interp(ctx);
-    auto result = lowerWaveIntrinsicCallInterp(call, ctx, interp);
-    if (!result)
-      return std::nullopt;
-    return *result;
-  }
-
-  AnalysisInterpreter interp(ctx);
-  auto result = lowerWaveIntrinsicCallInterp(call, ctx, interp);
-  if (!result)
-    return std::nullopt;
-  return result->getValueOrNull();
 }
 
 template <typename Interpreter>
@@ -3004,613 +3117,6 @@ static mlir::Location getLocation(const clang::Stmt *stmt,
                                    presumed.getColumn());
 }
 
-static mlir::Value lowerExprLegacy(const clang::Expr *expr,
-                                   LoweringContext &ctx) {
-
-  if (!expr)
-    return {};
-
-  mlir::Type type = convertType(expr->getType(), ctx.builder);
-  if (!type)
-    return ctx.fail("unsupported expression type"), mlir::Value();
-
-  mlir::Location loc = getLocation(expr, ctx);
-
-  if (const auto *intLit = llvm::dyn_cast<clang::IntegerLiteral>(expr)) {
-    if (!mlir::isa<mlir::IntegerType>(type))
-      return ctx.fail("integer literal expects integer type"), mlir::Value();
-    if (isEmitContext(ctx)) {
-      EmitInterpreter interp(ctx);
-      auto intType = mlir::cast<mlir::IntegerType>(type);
-      std::string tag = buildIntegerTag(intType);
-      simt_hlsl_import::SourceLoc src{expr, loc};
-      return interp.emitConstantInt(intLit->getValue().getSExtValue(),
-                                    tag.c_str(), src);
-    }
-    auto attr = ctx.builder.getIntegerAttr(mlir::cast<mlir::IntegerType>(type),
-                                           intLit->getValue());
-    return ctx.builder.create<mlir::arith::ConstantOp>(loc, attr);
-  }
-
-  if (const auto *paren = llvm::dyn_cast<clang::ParenExpr>(expr))
-    return lowerExprLegacy(paren->getSubExpr(), ctx);
-
-  if (const auto *implicitCast = llvm::dyn_cast<clang::ImplicitCastExpr>(expr))
-    return lowerExprLegacy(implicitCast->getSubExpr(), ctx);
-
-  if (const auto *constExpr = llvm::dyn_cast<clang::ConstantExpr>(expr))
-    return lowerExprLegacy(constExpr->getSubExpr(), ctx);
-
-  if (const auto *floatLit = llvm::dyn_cast<clang::FloatingLiteral>(expr)) {
-    if (!mlir::isa<mlir::FloatType>(type))
-      return ctx.fail("floating literal expects floating type"), mlir::Value();
-    if (isEmitContext(ctx)) {
-      EmitInterpreter interp(ctx);
-      auto floatType = mlir::cast<mlir::FloatType>(type);
-      std::string tag = buildFloatTag(floatType);
-      simt_hlsl_import::SourceLoc src{expr, loc};
-      llvm::APFloat apValue = floatLit->getValue();
-      double value = apValue.convertToDouble();
-      return interp.emitConstantFloat(value, tag.c_str(), src);
-    }
-    auto attr = ctx.builder.getFloatAttr(mlir::cast<mlir::FloatType>(type),
-                                         floatLit->getValue());
-    return ctx.builder.create<mlir::arith::ConstantOp>(loc, attr);
-  }
-
-  if (const auto *declRef = llvm::dyn_cast<clang::DeclRefExpr>(expr)) {
-    const clang::ValueDecl *vd = declRef->getDecl();
-    auto it = ctx.valueMap.find(vd);
-    if (it != ctx.valueMap.end())
-      return it->second;
-    return ctx.fail("reference to unknown value"), mlir::Value();
-  }
-
-  if (const auto *opCall = llvm::dyn_cast<clang::CXXOperatorCallExpr>(expr)) {
-    if (opCall->getOperator() == clang::OO_Subscript) {
-      auto infoOpt = lowerBufferAccessOperands(opCall, ctx);
-      if (!infoOpt)
-        return {};
-      const auto &info = *infoOpt;
-      if (isEmitContext(ctx)) {
-        EmitInterpreter interp(ctx);
-        return interp.emitBufferLoad(info.resource, info.index, info.decl,
-                                     {expr, loc});
-      }
-      AnalysisInterpreter interp(ctx);
-      return interp.emitBufferLoad(info.resource, info.index, info.decl,
-                                   {expr, loc});
-    }
-  }
-
-  if (const auto *memberCall = llvm::dyn_cast<clang::CXXMemberCallExpr>(expr)) {
-    if (auto lowered = lowerAtomicMemberCall(memberCall, ctx))
-      return *lowered;
-  }
-
-  if (const auto *callExpr = llvm::dyn_cast<clang::CallExpr>(expr)) {
-    if (auto lowered = lowerAtomicCall(callExpr, ctx))
-      return *lowered;
-    if (auto lowered = lowerWaveIntrinsicCall(callExpr, ctx))
-      return *lowered;
-  }
-
-  if (const auto *arraySub = llvm::dyn_cast<clang::ArraySubscriptExpr>(expr)) {
-    auto infoOpt = getBufferAccessInfo(arraySub->getBase(), arraySub->getIdx(),
-                                       ctx);
-    if (!infoOpt)
-      return {};
-    const auto &info = *infoOpt;
-    if (isEmitContext(ctx)) {
-      EmitInterpreter interp(ctx);
-      return interp.emitBufferLoad(info.resource, info.index, info.decl,
-                                   {expr, loc});
-    }
-    AnalysisInterpreter interp(ctx);
-    return interp.emitBufferLoad(info.resource, info.index, info.decl,
-                                 {expr, loc});
-  }
-
-  if (const auto *condOp = llvm::dyn_cast<clang::ConditionalOperator>(expr)) {
-    mlir::Value condValue = lowerExprLegacy(condOp->getCond(), ctx);
-    if (!condValue)
-      return {};
-    if (condValue.getType() != ctx.builder.getI1Type())
-      return ctx.fail("conditional operator requires boolean condition"),
-             mlir::Value();
-
-    auto thenBuilder = [&](LoweringContext &branchCtx) -> mlir::Value {
-      mlir::Value value = lowerExprLegacy(condOp->getTrueExpr(), branchCtx);
-      if (!value)
-        return mlir::Value();
-      if (value.getType() != type) {
-        branchCtx.fail("conditional operator branch type mismatch");
-        return mlir::Value();
-      }
-      return value;
-    };
-
-    auto elseBuilder = [&](LoweringContext &branchCtx) -> mlir::Value {
-      mlir::Value value = lowerExprLegacy(condOp->getFalseExpr(), branchCtx);
-      if (!value)
-        return mlir::Value();
-      if (value.getType() != type) {
-        branchCtx.fail("conditional operator branch type mismatch");
-        return mlir::Value();
-      }
-      return value;
-    };
-
-    simt_hlsl_import::SourceLoc src{condOp, loc};
-    if (isEmitContext(ctx)) {
-      EmitInterpreter interp(ctx);
-      return interp.emitConditional(condValue, thenBuilder, elseBuilder, src);
-    }
-    AnalysisInterpreter interp(ctx);
-    return interp.emitConditional(condValue, thenBuilder, elseBuilder, src);
-  }
-
-  if (const auto *vecElem = llvm::dyn_cast<clang::ExtVectorElementExpr>(expr)) {
-    if (vecElem->isArrow())
-      return ctx.fail("pointer-based vector swizzles are unsupported"),
-             mlir::Value();
-
-    mlir::Value base = lowerExprLegacy(vecElem->getBase(), ctx);
-    if (!base)
-      return {};
-
-    auto baseVecType = mlir::dyn_cast<mlir::VectorType>(base.getType());
-    if (!baseVecType || baseVecType.getRank() != 1)
-      return ctx.fail("vector element access requires 1-D vector operand"),
-             mlir::Value();
-
-    llvm::SmallVector<uint32_t, 4> elementIndices32;
-    vecElem->getEncodedElementAccess(elementIndices32);
-    llvm::SmallVector<int64_t, 4> elements;
-    elements.reserve(elementIndices32.size());
-    for (uint32_t idx : elementIndices32) {
-      if (idx >= baseVecType.getShape()[0])
-        return ctx.fail("vector element index out of range"), mlir::Value();
-      elements.push_back(static_cast<int64_t>(idx));
-    }
-    if (elements.empty())
-      return ctx.fail("vector element access with no components"),
-             mlir::Value();
-
-    if (elements.size() == 1) {
-      llvm::SmallVector<int64_t, 1> position = {elements[0]};
-      return ctx.builder.create<mlir::vector::ExtractOp>(loc, base, position)
-          .getResult();
-    }
-
-    mlir::Type elementType = baseVecType.getElementType();
-    auto resultType = mlir::VectorType::get(
-        {static_cast<int64_t>(elements.size())}, elementType);
-    mlir::Value result = buildZeroValue(ctx, resultType);
-    if (!result)
-      return {};
-
-    for (auto [outIdx, elementIndex] : llvm::enumerate(elements)) {
-      llvm::SmallVector<int64_t, 1> extractPos = {elementIndex};
-      mlir::Value component =
-          ctx.builder.create<mlir::vector::ExtractOp>(loc, base, extractPos)
-              .getResult();
-      llvm::SmallVector<int64_t, 1> insertPos = {static_cast<int64_t>(outIdx)};
-      result =
-          ctx.builder
-              .create<mlir::vector::InsertOp>(loc, component, result, insertPos)
-              .getResult();
-    }
-
-    return result;
-  }
-
-  if (const auto *unOp = llvm::dyn_cast<clang::UnaryOperator>(expr)) {
-    mlir::Value operand = lowerExprLegacy(unOp->getSubExpr(), ctx);
-    if (!operand)
-      return {};
-
-    auto makeIntegerConstant = [&](int64_t value,
-                                   mlir::IntegerType type) -> mlir::Value {
-      return ctx.builder
-          .create<mlir::arith::ConstantIntOp>(loc, value, type.getWidth())
-          .getResult();
-    };
-    auto makeFloatConstant = [&](double value,
-                                 mlir::FloatType type) -> mlir::Value {
-      auto attr = ctx.builder.getFloatAttr(type, value);
-      return ctx.builder.create<mlir::arith::ConstantOp>(loc, attr).getResult();
-    };
-
-    auto getMutableDeclRef =
-        [&](const clang::Expr *expr) -> const clang::ValueDecl * {
-      const clang::Expr *stripped = expr->IgnoreParenImpCasts();
-      if (const auto *ref = llvm::dyn_cast<clang::DeclRefExpr>(stripped))
-        return ref->getDecl();
-      return nullptr;
-    };
-
-    switch (unOp->getOpcode()) {
-    case clang::UnaryOperatorKind::UO_Plus:
-      return operand;
-    case clang::UnaryOperatorKind::UO_Minus: {
-      if (isEmitContext(ctx)) {
-        EmitInterpreter interp(ctx);
-        simt_hlsl_import::SourceLoc src{unOp, loc};
-        if (auto floatType = mlir::dyn_cast<mlir::FloatType>(operand.getType())) {
-          std::string tag = buildFloatTag(floatType);
-          mlir::Value zero = interp.emitConstantFloat(0.0, tag.c_str(), src);
-          return interp.emitArithmetic(simt_hlsl_import::ArithOp::Sub, zero,
-                                       operand, src);
-        }
-        if (auto intType = mlir::dyn_cast<mlir::IntegerType>(operand.getType())) {
-          std::string tag = buildIntegerTag(intType);
-          mlir::Value zero =
-              interp.emitConstantInt(0, tag.c_str(), src);
-          return interp.emitArithmetic(simt_hlsl_import::ArithOp::Sub, zero,
-                                       operand, src);
-        }
-      }
-      if (auto floatType = mlir::dyn_cast<mlir::FloatType>(operand.getType()))
-        return ctx.builder.create<mlir::arith::NegFOp>(loc, operand)
-            .getResult();
-      if (auto intType = mlir::dyn_cast<mlir::IntegerType>(operand.getType())) {
-        mlir::Value zero = makeIntegerConstant(0, intType);
-        return ctx.builder.create<mlir::arith::SubIOp>(loc, zero, operand)
-            .getResult();
-      }
-      return ctx.fail("unary minus requires numeric operand"), mlir::Value();
-    }
-    case clang::UnaryOperatorKind::UO_LNot: {
-      if (isEmitContext(ctx)) {
-        EmitInterpreter interp(ctx);
-        simt_hlsl_import::SourceLoc src{unOp, loc};
-        if (auto intType = mlir::dyn_cast<mlir::IntegerType>(operand.getType())) {
-          std::string tag = buildIntegerTag(intType);
-          mlir::Value zero = interp.emitConstantInt(0, tag.c_str(), src);
-          return interp.emitCompare(simt_hlsl_import::CmpOp::EQ, operand, zero,
-                                    src);
-        }
-        if (auto floatType = mlir::dyn_cast<mlir::FloatType>(operand.getType())) {
-          std::string tag = buildFloatTag(floatType);
-          mlir::Value zero =
-              interp.emitConstantFloat(0.0, tag.c_str(), src);
-          return interp.emitCompare(simt_hlsl_import::CmpOp::EQ, operand, zero,
-                                    src);
-        }
-      }
-      if (auto intType = mlir::dyn_cast<mlir::IntegerType>(operand.getType())) {
-        mlir::Value zero = makeIntegerConstant(0, intType);
-        return ctx.builder
-            .create<mlir::arith::CmpIOp>(loc, mlir::arith::CmpIPredicate::eq,
-                                         operand, zero)
-            .getResult();
-      }
-      if (auto floatType = mlir::dyn_cast<mlir::FloatType>(operand.getType())) {
-        mlir::Value zero = makeFloatConstant(0.0, floatType);
-        return ctx.builder
-            .create<mlir::arith::CmpFOp>(loc, mlir::arith::CmpFPredicate::OEQ,
-                                         operand, zero)
-            .getResult();
-      }
-      return ctx.fail("logical not requires scalar operand"), mlir::Value();
-    }
-    case clang::UnaryOperatorKind::UO_Not: {
-      if (isEmitContext(ctx)) {
-        EmitInterpreter interp(ctx);
-        if (auto intType = mlir::dyn_cast<mlir::IntegerType>(operand.getType())) {
-          simt_hlsl_import::SourceLoc src{unOp, loc};
-          std::string tag = buildIntegerTag(intType);
-          mlir::Value allOnes =
-              interp.emitConstantInt(-1, tag.c_str(), src);
-          return interp.emitArithmetic(simt_hlsl_import::ArithOp::BitXor,
-                                       operand, allOnes, src);
-        }
-      }
-      if (auto intType = mlir::dyn_cast<mlir::IntegerType>(operand.getType())) {
-        mlir::Value allOnes = makeIntegerConstant(-1, intType);
-        return ctx.builder.create<mlir::arith::XOrIOp>(loc, operand, allOnes)
-            .getResult();
-      }
-      return ctx.fail("bitwise not requires integer operand"), mlir::Value();
-    }
-    case clang::UnaryOperatorKind::UO_PreInc:
-    case clang::UnaryOperatorKind::UO_PreDec:
-    case clang::UnaryOperatorKind::UO_PostInc:
-    case clang::UnaryOperatorKind::UO_PostDec: {
-      const clang::ValueDecl *target = getMutableDeclRef(unOp->getSubExpr());
-      if (!target)
-        return ctx.fail("increment/decrement requires simple variable"),
-               mlir::Value();
-
-      auto it = ctx.valueMap.find(target);
-      if (it == ctx.valueMap.end())
-        return ctx.fail("reference to unknown value"), mlir::Value();
-
-      mlir::Value original = operand;
-      mlir::Value updated;
-      bool isIncrement =
-          unOp->getOpcode() == clang::UnaryOperatorKind::UO_PreInc ||
-          unOp->getOpcode() == clang::UnaryOperatorKind::UO_PostInc;
-
-      if (isEmitContext(ctx)) {
-        EmitInterpreter interp(ctx);
-        simt_hlsl_import::SourceLoc src{unOp, loc};
-        if (auto intType = mlir::dyn_cast<mlir::IntegerType>(operand.getType())) {
-          std::string tag = buildIntegerTag(intType);
-          mlir::Value one = interp.emitConstantInt(1, tag.c_str(), src);
-          updated = interp.emitArithmetic(isIncrement
-                                              ? simt_hlsl_import::ArithOp::Add
-                                              : simt_hlsl_import::ArithOp::Sub,
-                                          operand, one, src);
-        } else if (auto floatType =
-                       mlir::dyn_cast<mlir::FloatType>(operand.getType())) {
-          std::string tag = buildFloatTag(floatType);
-          mlir::Value one = interp.emitConstantFloat(1.0, tag.c_str(), src);
-          updated = interp.emitArithmetic(isIncrement
-                                              ? simt_hlsl_import::ArithOp::Add
-                                              : simt_hlsl_import::ArithOp::Sub,
-                                          operand, one, src);
-        } else {
-          return ctx.fail("increment/decrement requires numeric operand"),
-                 mlir::Value();
-        }
-        ctx.valueMap[target] = updated;
-        ctx.mutatedVars.insert(target);
-        interp.noteMutation(target);
-        bool isPost = unOp->getOpcode() == clang::UnaryOperatorKind::UO_PostInc ||
-                      unOp->getOpcode() == clang::UnaryOperatorKind::UO_PostDec;
-        return isPost ? original : updated;
-      }
-
-      if (auto intType = mlir::dyn_cast<mlir::IntegerType>(operand.getType())) {
-        mlir::Value one = makeIntegerConstant(1, intType);
-        updated =
-            isIncrement
-                ? ctx.builder.create<mlir::arith::AddIOp>(loc, operand, one)
-                      .getResult()
-                : ctx.builder.create<mlir::arith::SubIOp>(loc, operand, one)
-                      .getResult();
-      } else if (auto floatType =
-                     mlir::dyn_cast<mlir::FloatType>(operand.getType())) {
-        mlir::Value one = makeFloatConstant(1.0, floatType);
-        updated =
-            isIncrement
-                ? ctx.builder.create<mlir::arith::AddFOp>(loc, operand, one)
-                      .getResult()
-                : ctx.builder.create<mlir::arith::SubFOp>(loc, operand, one)
-                      .getResult();
-      } else {
-        return ctx.fail("increment/decrement requires numeric operand"),
-               mlir::Value();
-      }
-
-      ctx.valueMap[target] = updated;
-      ctx.mutatedVars.insert(target);
-
-      bool isPost = unOp->getOpcode() == clang::UnaryOperatorKind::UO_PostInc ||
-                    unOp->getOpcode() == clang::UnaryOperatorKind::UO_PostDec;
-      return isPost ? original : updated;
-    }
-    default:
-      return ctx.fail("unsupported unary operator"), mlir::Value();
-    }
-  }
-
-
-  if (const auto *binOp = llvm::dyn_cast<clang::BinaryOperator>(expr)) {
-    if (binOp->getOpcode() == clang::BinaryOperatorKind::BO_Assign)
-      return lowerAssignment(binOp, ctx);
-
-    mlir::Value lhs = lowerExprLegacy(binOp->getLHS(), ctx);
-    if (ctx.failed || !lhs)
-      return {};
-
-    mlir::Value rhsStorage;
-    bool rhsEvaluated = false;
-    auto getRHS = [&]() -> mlir::Value {
-      if (!rhsEvaluated) {
-        rhsStorage = lowerExprLegacy(binOp->getRHS(), ctx);
-        rhsEvaluated = true;
-      }
-      return rhsStorage;
-    };
-
-    switch (binOp->getOpcode()) {
-    case clang::BinaryOperatorKind::BO_EQ:
-    case clang::BinaryOperatorKind::BO_NE:
-    case clang::BinaryOperatorKind::BO_LT:
-    case clang::BinaryOperatorKind::BO_LE:
-    case clang::BinaryOperatorKind::BO_GT:
-    case clang::BinaryOperatorKind::BO_GE: {
-      mlir::Value rhs = getRHS();
-      if (ctx.failed || !rhs)
-        return {};
-      simt_hlsl_import::SourceLoc src{binOp, loc};
-      if (isEmitContext(ctx)) {
-        simt_hlsl_import::CmpOp cmpOp;
-        switch (binOp->getOpcode()) {
-        case clang::BinaryOperatorKind::BO_EQ:
-          cmpOp = simt_hlsl_import::CmpOp::EQ;
-          break;
-        case clang::BinaryOperatorKind::BO_NE:
-          cmpOp = simt_hlsl_import::CmpOp::NE;
-          break;
-        case clang::BinaryOperatorKind::BO_LT:
-          cmpOp = simt_hlsl_import::CmpOp::LT;
-          break;
-        case clang::BinaryOperatorKind::BO_LE:
-          cmpOp = simt_hlsl_import::CmpOp::LE;
-          break;
-        case clang::BinaryOperatorKind::BO_GT:
-          cmpOp = simt_hlsl_import::CmpOp::GT;
-          break;
-        case clang::BinaryOperatorKind::BO_GE:
-          cmpOp = simt_hlsl_import::CmpOp::GE;
-          break;
-        default:
-          llvm_unreachable("unhandled cmp opcode");
-        }
-        EmitInterpreter interp(ctx);
-        return interp.emitCompare(cmpOp, lhs, rhs, src);
-      }
-      AnalysisInterpreter interp(ctx);
-      simt_hlsl_import::CmpOp cmpOp;
-      switch (binOp->getOpcode()) {
-      case clang::BinaryOperatorKind::BO_EQ:
-        cmpOp = simt_hlsl_import::CmpOp::EQ;
-        break;
-      case clang::BinaryOperatorKind::BO_NE:
-        cmpOp = simt_hlsl_import::CmpOp::NE;
-        break;
-      case clang::BinaryOperatorKind::BO_LT:
-        cmpOp = simt_hlsl_import::CmpOp::LT;
-        break;
-      case clang::BinaryOperatorKind::BO_LE:
-        cmpOp = simt_hlsl_import::CmpOp::LE;
-        break;
-      case clang::BinaryOperatorKind::BO_GT:
-        cmpOp = simt_hlsl_import::CmpOp::GT;
-        break;
-      case clang::BinaryOperatorKind::BO_GE:
-        cmpOp = simt_hlsl_import::CmpOp::GE;
-        break;
-      default:
-        llvm_unreachable("unhandled cmp opcode");
-      }
-      return interp.emitCompare(cmpOp, lhs, rhs, src);
-    }
-    case clang::BinaryOperatorKind::BO_LAnd: {
-      if (lhs.getType() != ctx.builder.getI1Type())
-        return ctx.fail("logical and requires boolean operands"), mlir::Value();
-
-      auto rhsBuilder = [&](LoweringContext &branchCtx) -> mlir::Value {
-        return lowerExprLegacy(binOp->getRHS(), branchCtx);
-      };
-      simt_hlsl_import::SourceLoc src{binOp, loc};
-      if (isEmitContext(ctx)) {
-        EmitInterpreter interp(ctx);
-        return interp.emitShortCircuit(simt_hlsl_import::LogicalOp::And, lhs,
-                                       rhsBuilder, src);
-      }
-      AnalysisInterpreter interp(ctx);
-      return interp.emitShortCircuit(simt_hlsl_import::LogicalOp::And, lhs,
-                                     rhsBuilder, src);
-    }
-    case clang::BinaryOperatorKind::BO_LOr: {
-      if (lhs.getType() != ctx.builder.getI1Type())
-        return ctx.fail("logical or requires boolean operands"), mlir::Value();
-
-      auto rhsBuilder = [&](LoweringContext &branchCtx) -> mlir::Value {
-        return lowerExprLegacy(binOp->getRHS(), branchCtx);
-      };
-      simt_hlsl_import::SourceLoc src{binOp, loc};
-      if (isEmitContext(ctx)) {
-        EmitInterpreter interp(ctx);
-        return interp.emitShortCircuit(simt_hlsl_import::LogicalOp::Or, lhs,
-                                       rhsBuilder, src);
-      }
-      AnalysisInterpreter interp(ctx);
-      return interp.emitShortCircuit(simt_hlsl_import::LogicalOp::Or, lhs,
-                                     rhsBuilder, src);
-    }
-    case clang::BinaryOperatorKind::BO_Add: {
-      mlir::Value rhs = getRHS();
-      if (ctx.failed || !rhs)
-        return {};
-      simt_hlsl_import::SourceLoc src{binOp, loc};
-      if (isEmitContext(ctx)) {
-        EmitInterpreter interp(ctx);
-        return interp.emitArithmetic(simt_hlsl_import::ArithOp::Add, lhs, rhs,
-                                     src);
-      }
-      AnalysisInterpreter interp(ctx);
-      return interp.emitArithmetic(simt_hlsl_import::ArithOp::Add, lhs, rhs,
-                                   src);
-    }
-    case clang::BinaryOperatorKind::BO_Sub: {
-      mlir::Value rhs = getRHS();
-      if (ctx.failed || !rhs)
-        return {};
-      simt_hlsl_import::SourceLoc src{binOp, loc};
-      if (isEmitContext(ctx)) {
-        EmitInterpreter interp(ctx);
-        return interp.emitArithmetic(simt_hlsl_import::ArithOp::Sub, lhs, rhs,
-                                     src);
-      }
-      AnalysisInterpreter interp(ctx);
-      return interp.emitArithmetic(simt_hlsl_import::ArithOp::Sub, lhs, rhs,
-                                   src);
-    }
-    case clang::BinaryOperatorKind::BO_Mul: {
-      mlir::Value rhs = getRHS();
-      if (ctx.failed || !rhs)
-        return {};
-      simt_hlsl_import::SourceLoc src{binOp, loc};
-      if (isEmitContext(ctx)) {
-        EmitInterpreter interp(ctx);
-        return interp.emitArithmetic(simt_hlsl_import::ArithOp::Mul, lhs, rhs,
-                                     src);
-      }
-      AnalysisInterpreter interp(ctx);
-      return interp.emitArithmetic(simt_hlsl_import::ArithOp::Mul, lhs, rhs,
-                                   src);
-    }
-    case clang::BinaryOperatorKind::BO_Div: {
-      mlir::Value rhs = getRHS();
-      if (ctx.failed || !rhs)
-        return {};
-      simt_hlsl_import::SourceLoc src{binOp, loc};
-      if (isEmitContext(ctx)) {
-        EmitInterpreter interp(ctx);
-        return interp.emitArithmetic(simt_hlsl_import::ArithOp::Div, lhs, rhs,
-                                     src);
-      }
-      AnalysisInterpreter interp(ctx);
-      return interp.emitArithmetic(simt_hlsl_import::ArithOp::Div, lhs, rhs,
-                                   src);
-    }
-    case clang::BinaryOperatorKind::BO_Rem: {
-      mlir::Value rhs = getRHS();
-      if (ctx.failed || !rhs)
-        return {};
-      simt_hlsl_import::SourceLoc src{binOp, loc};
-      if (isEmitContext(ctx)) {
-        EmitInterpreter interp(ctx);
-        return interp.emitArithmetic(simt_hlsl_import::ArithOp::Rem, lhs, rhs,
-                                     src);
-      }
-      AnalysisInterpreter interp(ctx);
-      return interp.emitArithmetic(simt_hlsl_import::ArithOp::Rem, lhs, rhs,
-                                   src);
-    }
-    default:
-      break;
-    }
-
-    return ctx.fail("unsupported binary operator"), mlir::Value();
-  }
-
-  return ctx.fail("unsupported expression lowering"), mlir::Value();
-}
-
-static std::optional<mlir::Value>
-lowerAtomicMemberCall(const clang::CXXMemberCallExpr *call,
-                      LoweringContext &ctx) {
-  if (!call)
-    return std::nullopt;
-  if (isEmitContext(ctx)) {
-    EmitInterpreter interp(ctx);
-    return lowerAtomicMemberCallInterp(call, ctx, interp);
-  }
-
-  AnalysisInterpreter interp(ctx);
-  auto result = lowerAtomicMemberCallInterp(call, ctx, interp);
-  if (!result)
-    return std::nullopt;
-  return std::optional<mlir::Value>(result->getValueOrNull());
-}
-
 template <typename Interp>
 static typename Interp::Value
 lowerAssignmentInterp(const clang::BinaryOperator *binOp, LoweringContext &ctx,
@@ -3690,17 +3196,6 @@ lowerAssignmentInterp(const clang::BinaryOperator *binOp, LoweringContext &ctx,
   return typename Interp::Value();
 }
 
-static mlir::Value lowerAssignment(const clang::BinaryOperator *binOp,
-                                   LoweringContext &ctx) {
-  if (isEmitContext(ctx)) {
-    EmitInterpreter interp(ctx);
-    return lowerAssignmentInterp(binOp, ctx, interp);
-  }
-  AnalysisInterpreter interp(ctx);
-  auto result = lowerAssignmentInterp(binOp, ctx, interp);
-  return result.getValueOrNull();
-}
-
 static mlir::Value buildZeroValue(LoweringContext &ctx, mlir::Type type) {
   mlir::Location loc = ctx.defaultLoc;
   if (mlir::isa<mlir::IntegerType>(type)) {
@@ -3735,8 +3230,6 @@ template <typename Interp>
 static bool lowerStatement(const clang::Stmt *stmt, LoweringContext &ctx,
                            Interp &interp);
 static bool lowerStatement(const clang::Stmt *stmt, LoweringContext &ctx);
-static mlir::Value lowerExprLegacy(const clang::Expr *expr,
-                                   LoweringContext &ctx);
 
 template <typename Interp>
 static bool lowerForStmt(const clang::ForStmt *stmt, LoweringContext &ctx,
