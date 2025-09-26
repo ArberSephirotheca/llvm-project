@@ -2330,6 +2330,36 @@ static typename Interp::Value lowerExprInterp(const clang::Expr *expr,
     return result;
   }
 
+  if (const auto *unOp = llvm::dyn_cast<clang::UnaryOperator>(expr)) {
+    auto operand = lowerExprInterp(unOp->getSubExpr(), ctx, interp);
+    if (!operand)
+      return typename Interp::Value();
+
+    simt_hlsl_import::SourceLoc src{unOp, loc};
+
+    switch (unOp->getOpcode()) {
+    case clang::UnaryOperatorKind::UO_Plus:
+      return operand;
+    case clang::UnaryOperatorKind::UO_Minus: {
+      if (auto floatType = mlir::dyn_cast<mlir::FloatType>(type)) {
+        std::string tag = buildFloatTag(floatType);
+        auto zero = interp.emitConstantFloat(0.0, tag.c_str(), src);
+        return interp.emitArithmetic(simt_hlsl_import::ArithOp::Sub, zero,
+                                     operand, src);
+      }
+      if (auto intType = mlir::dyn_cast<mlir::IntegerType>(type)) {
+        std::string tag = buildIntegerTag(intType);
+        auto zero = interp.emitConstantInt(0, tag.c_str(), src);
+        return interp.emitArithmetic(simt_hlsl_import::ArithOp::Sub, zero,
+                                     operand, src);
+      }
+      break;
+    }
+    default:
+      break;
+    }
+  }
+
   mlir::Value value = lowerExprLegacy(expr, ctx);
   if (!value)
     return typename Interp::Value();
