@@ -1240,6 +1240,14 @@ struct EmitInterpreter
 
   void noteMutation(const clang::ValueDecl *decl) {
     ctx.mutatedVars.insert(decl);
+    for (LoopFrame &frame : llvm::reverse(ctx.loopStack)) {
+      if (!frame.metadata)
+        continue;
+      auto it = frame.metadata->mutationInfo.find(decl);
+      if (it == frame.metadata->mutationInfo.end())
+        continue;
+      it->second.mutatedInBody = true;
+    }
   }
 
   void emitReturn(std::optional<Value> value, simt_hlsl_import::SourceLoc loc);
@@ -3360,6 +3368,21 @@ static bool lowerStatement(const clang::Stmt *stmt, LoweringContext &ctx,
       return true;
 
     if (target.kind == ControlEntryKind::Loop && target.loop) {
+      if (target.loop->metadata && target.loop->analysisOnly) {
+        target.loop->metadata->bodyHasBreak = true;
+        bool anyMutated = false;
+        for (const clang::ValueDecl *vd : target.loop->metadata->carriedVars) {
+          if (ctx.mutatedVars.contains(vd)) {
+            target.loop->metadata->mutationInfo[vd].mutatedOnBreak = true;
+            anyMutated = true;
+          }
+        }
+        if (!anyMutated) {
+          for (const clang::ValueDecl *vd : target.loop->metadata->carriedVars)
+            target.loop->metadata->mutationInfo[vd].mutatedOnBreak = true;
+        }
+      }
+
       if (target.loop->analysisOnly) {
         ctx.mutatedVars.insert(target.loop->carriedVars.begin(),
                                target.loop->carriedVars.end());
@@ -3381,14 +3404,23 @@ static bool lowerStatement(const clang::Stmt *stmt, LoweringContext &ctx,
 
     if (target.kind == ControlEntryKind::Switch && target.switchFrame) {
       auto *switchFrame = target.switchFrame;
+      if (switchFrame->metadata && switchFrame->analysisOnly) {
+        if (switchFrame->activeCase)
+          switchFrame->activeCase->hasBreak = true;
+      }
+
       if (switchFrame->analysisOnly) {
         ctx.emittedTerminator = true;
         return true;
       }
 
       llvm::SmallVector<mlir::Value, 8> yieldOperands;
-      yieldOperands.reserve(switchFrame->carriedVars.size() + 3);
-      for (auto [index, vd] : llvm::enumerate(switchFrame->carriedVars)) {
+      const auto &carriedVars =
+          switchFrame->metadata && !switchFrame->metadata->carriedVars.empty()
+              ? switchFrame->metadata->carriedVars
+              : switchFrame->carriedVars;
+      yieldOperands.reserve(carriedVars.size() + 3);
+      for (auto [index, vd] : llvm::enumerate(carriedVars)) {
         mlir::Value value = ctx.valueMap.lookup(vd);
         if (!value && index < switchFrame->initialValues.size())
           value = switchFrame->initialValues[index];
@@ -3420,6 +3452,21 @@ static bool lowerStatement(const clang::Stmt *stmt, LoweringContext &ctx,
 
   if (llvm::isa<clang::ContinueStmt>(stmt)) {
     if (LoopFrame *loopFrame = getInnermostLoop(ctx)) {
+      if (loopFrame->metadata && loopFrame->analysisOnly) {
+        loopFrame->metadata->bodyHasContinue = true;
+        bool anyMutated = false;
+        for (const clang::ValueDecl *vd : loopFrame->metadata->carriedVars) {
+          if (ctx.mutatedVars.contains(vd)) {
+            loopFrame->metadata->mutationInfo[vd].mutatedOnContinue = true;
+            anyMutated = true;
+          }
+        }
+        if (!anyMutated) {
+          for (const clang::ValueDecl *vd : loopFrame->metadata->carriedVars)
+            loopFrame->metadata->mutationInfo[vd].mutatedOnContinue = true;
+        }
+      }
+
       if (loopFrame->analysisOnly) {
         ctx.mutatedVars.insert(loopFrame->carriedVars.begin(),
                                loopFrame->carriedVars.end());
@@ -3490,6 +3537,11 @@ static bool lowerStatement(const clang::Stmt *stmt, LoweringContext &ctx,
       if (!value)
         return false;
       retValue = value;
+    }
+    if (!ctx.switchStack.empty()) {
+      SwitchFrame &frame = ctx.switchStack.back();
+      if (frame.analysisOnly && frame.metadata && frame.activeCase)
+        frame.activeCase->hasReturn = true;
     }
     simt_hlsl_import::SourceLoc src{ret, getLocation(ret, ctx)};
     interp.emitReturn(retValue, src);
@@ -3970,8 +4022,9 @@ static bool lowerSwitchStmt(const clang::SwitchStmt *switchStmt,
   switchMeta.cases.reserve(cases.size());
 
   llvm::SmallPtrSet<const clang::ValueDecl *, 8> mutatedSet;
-  for (const CaseInfo &info : cases) {
-    SwitchCaseMetadata caseMeta;
+  for (auto [caseIndex, info] : llvm::enumerate(cases)) {
+    switchMeta.cases.emplace_back();
+    SwitchCaseMetadata &caseMeta = switchMeta.cases.back();
     caseMeta.label = info.label;
 
     mlir::Region analysisRegion;
@@ -3991,6 +4044,8 @@ static bool lowerSwitchStmt(const clang::SwitchStmt *switchStmt,
     SwitchScopeGuard analysisGuard(analysisCtx, SwitchFrame{});
     analysisGuard.frame().analysisOnly = true;
     analysisGuard.frame().metadata = &switchMeta;
+    analysisGuard.frame().activeCase = &caseMeta;
+    analysisGuard.frame().caseIndex = caseIndex;
 
     for (const clang::Stmt *caseStmt : info.statements) {
       if (!lowerStatement(caseStmt, analysisCtx) || analysisCtx.failed)
@@ -4009,7 +4064,6 @@ static bool lowerSwitchStmt(const clang::SwitchStmt *switchStmt,
                });
 
     mutatedSet.insert(caseMutated.begin(), caseMutated.end());
-    switchMeta.cases.push_back(std::move(caseMeta));
   }
 
   switchMeta.carriedVars.assign(mutatedSet.begin(), mutatedSet.end());
@@ -4051,7 +4105,7 @@ static bool lowerSwitchStmt(const clang::SwitchStmt *switchStmt,
   mlir::Value currentExecuting = boolZero;
   mlir::Value currentCompleted = boolZero;
 
-  for (const CaseInfo &info : cases) {
+  for (auto [caseIndex, info] : llvm::enumerate(cases)) {
     mlir::Value notCompleted = ctx.builder.create<mlir::arith::CmpIOp>(
         loc, mlir::arith::CmpIPredicate::eq, currentCompleted, boolZero);
     mlir::Value hasNotMatched = ctx.builder.create<mlir::arith::CmpIOp>(
@@ -4105,6 +4159,11 @@ static bool lowerSwitchStmt(const clang::SwitchStmt *switchStmt,
 
     SwitchScopeGuard caseGuard(
         caseCtx, makeSwitchFrame(caseCtx, mutatedVars, currentValues, loc));
+    if (SwitchMetadata *meta = caseGuard.frame().metadata) {
+      caseGuard.frame().caseIndex = caseIndex;
+      if (caseIndex < meta->cases.size())
+        caseGuard.frame().activeCase = &meta->cases[caseIndex];
+    }
 
     for (const clang::Stmt *caseStmt : info.statements) {
       if (!lowerStatement(caseStmt, caseCtx, caseInterp) || caseCtx.failed)

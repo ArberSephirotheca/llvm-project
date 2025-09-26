@@ -84,6 +84,39 @@ void collectLoopOperandsRaw(LoweringContext &ctx, LoopFrame &frame,
   }
 }
 
+void collectLoopExitOperandsConcrete(LoweringContext &ctx, LoopFrame &frame,
+                                     bool isContinue,
+                                     llvm::SmallVectorImpl<mlir::Value> &ops) {
+  llvm::SmallVector<mlir::Value, 8> allOperands;
+  collectLoopOperandsRaw(ctx, frame, allOperands, isContinue);
+
+  unsigned carriedCount = frame.carriedVars.size();
+  LoopMetadata *metadata = frame.metadata;
+
+  bool anySelected = false;
+  if (metadata) {
+    for (unsigned index = 0; index < carriedCount; ++index) {
+      const clang::ValueDecl *vd = frame.carriedVars[index];
+      bool forward = false;
+      if (auto it = metadata->mutationInfo.find(vd); it != metadata->mutationInfo.end())
+        forward = isContinue ? it->second.mutatedOnContinue
+                             : it->second.mutatedOnBreak;
+      if (forward) {
+        ops.push_back(allOperands[index]);
+        anySelected = true;
+      }
+    }
+  }
+
+  if (!metadata || !anySelected) {
+    for (unsigned index = 0; index < carriedCount; ++index)
+      ops.push_back(allOperands[index]);
+  }
+
+  if (frame.hasFirstIterFlag && allOperands.size() > carriedCount)
+    ops.push_back(allOperands.back());
+}
+
 } // namespace
 
 void collectLoopBreakOperands(LoweringContext &ctx, LoopFrame &frame,
@@ -94,7 +127,7 @@ void collectLoopBreakOperands(LoweringContext &ctx, LoopFrame &frame,
   }
   if (frame.activeScope)
     return frame.activeScope->collectBreakOperands(ctx, ops);
-  collectLoopOperandsRaw(ctx, frame, ops, /*isContinue=*/false);
+  collectLoopExitOperandsConcrete(ctx, frame, /*isContinue=*/false, ops);
 }
 
 void collectLoopContinueOperands(LoweringContext &ctx, LoopFrame &frame,
@@ -105,7 +138,7 @@ void collectLoopContinueOperands(LoweringContext &ctx, LoopFrame &frame,
   }
   if (frame.activeScope)
     return frame.activeScope->collectContinueOperands(ctx, ops);
-  collectLoopOperandsRaw(ctx, frame, ops, /*isContinue=*/true);
+  collectLoopExitOperandsConcrete(ctx, frame, /*isContinue=*/true, ops);
 }
 
 LoopFrame *getInnermostLoop(LoweringContext &ctx) {
@@ -380,7 +413,9 @@ void LoopScopeState::collectBreakOperands(
     ops.clear();
     return;
   }
-  collectLoopOperandsRaw(ctx, *skeleton.frame, ops, /*isContinue=*/false);
+  if (skeleton.frame)
+    collectLoopExitOperandsConcrete(ctx, *skeleton.frame,
+                                    /*isContinue=*/false, ops);
 }
 
 void LoopScopeState::collectContinueOperands(
@@ -389,7 +424,9 @@ void LoopScopeState::collectContinueOperands(
     ops.clear();
     return;
   }
-  collectLoopOperandsRaw(ctx, *skeleton.frame, ops, /*isContinue=*/true);
+  if (skeleton.frame)
+    collectLoopExitOperandsConcrete(ctx, *skeleton.frame,
+                                    /*isContinue=*/true, ops);
 }
 
 void LoopScopeState::setupPrepareContext() {

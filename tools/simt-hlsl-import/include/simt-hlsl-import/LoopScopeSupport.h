@@ -107,6 +107,8 @@ struct SwitchFrame {
   mlir::Value breakCompletedValue;
   bool analysisOnly = false;
   SwitchMetadata *metadata = nullptr;
+  SwitchCaseMetadata *activeCase = nullptr;
+  size_t caseIndex = 0;
 };
 
 struct ControlEntry {
