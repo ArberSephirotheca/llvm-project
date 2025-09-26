@@ -434,6 +434,23 @@ struct EmitInterpreter
     bool elseClosed = false;
   };
 
+  IfScope beginIf(mlir::Value cond,
+                  llvm::ArrayRef<const clang::ValueDecl *> carriedVars,
+                  bool hasElseBranch, bool needsElseRegion, mlir::Location loc) {
+    llvm::SmallVector<mlir::Type, 8> resultTypes;
+    resultTypes.reserve(carriedVars.size());
+    for (const clang::ValueDecl *vd : carriedVars) {
+      mlir::Value incoming = ctx.valueMap.lookup(vd);
+      assert(incoming &&
+             "conditional carried variable must already have a bound value");
+      resultTypes.push_back(incoming.getType());
+    }
+
+    auto ifOp = ctx.builder.create<simt::dialect::IfOp>(
+        loc, resultTypes, cond, needsElseRegion);
+    return IfScope(ctx, ifOp, carriedVars, hasElseBranch, needsElseRegion, loc);
+  }
+
   Value emitConstantInt(int64_t value, const char *tag,
                         simt_hlsl_import::SourceLoc loc) {
     llvm::StringRef tagRef(tag ? tag : "");
@@ -1299,6 +1316,22 @@ struct AnalysisInterpreter
 
   AnalysisInterpreter fork(LoweringContext &childCtx) {
     return AnalysisInterpreter(childCtx);
+  }
+
+  struct IfScope {
+    LoweringContext &parent;
+    bool hasElseBranch = false;
+    bool needsElseRegion = false;
+
+    LoweringContext &thenContext() { return parent; }
+    bool userHasElse() const { return hasElseBranch; }
+    LoweringContext &elseContext() { return parent; }
+    bool done() { return !parent.failed; }
+  };
+
+  IfScope beginIf(mlir::Value, llvm::ArrayRef<const clang::ValueDecl *>,
+                  bool hasElseBranch, bool needsElseRegion, mlir::Location) {
+    return IfScope{ctx, hasElseBranch, needsElseRegion};
   }
 
   Value emitConstantInt(int64_t, const char *,
@@ -3454,6 +3487,55 @@ static bool collectLoopMutations(
   return true;
 }
 
+static bool collectIfMutations(
+    LoweringContext &ctx, const clang::Stmt *thenStmt,
+    const clang::Stmt *elseStmt,
+    llvm::SmallVector<const clang::ValueDecl *, 8> &mutatedVars) {
+  mutatedVars.clear();
+
+  llvm::SmallPtrSet<const clang::ValueDecl *, 8> mutatedSet;
+
+  auto analyzeBranch = [&](const clang::Stmt *branchStmt) -> bool {
+    if (!branchStmt)
+      return true;
+
+    mlir::Region analysisRegion;
+    analysisRegion.emplaceBlock();
+    mlir::OpBuilder analysisBuilder(ctx.builder.getContext());
+    analysisBuilder.setInsertionPointToStart(&analysisRegion.front());
+
+    LoweringContext analysisCtx(analysisBuilder, ctx.defaultLoc, ctx.returnType,
+                                ctx.errorMessage, ctx.sourceManager);
+    analysisCtx.valueMap = ctx.valueMap;
+    analysisCtx.symValueMap = ctx.symValueMap;
+    analysisCtx.loopStack = ctx.loopStack;
+    analysisCtx.switchStack = ctx.switchStack;
+    analysisCtx.controlStack = ctx.controlStack;
+
+    AnalysisInterpreter analysisInterp(analysisCtx);
+    if (!lowerStatement(branchStmt, analysisCtx, analysisInterp) ||
+        analysisCtx.failed)
+      return false;
+
+    mutatedSet.insert(analysisCtx.mutatedVars.begin(),
+                      analysisCtx.mutatedVars.end());
+    return true;
+  };
+
+  if (!analyzeBranch(thenStmt))
+    return false;
+  if (!analyzeBranch(elseStmt))
+    return false;
+
+  mutatedVars.assign(mutatedSet.begin(), mutatedSet.end());
+  llvm::sort(mutatedVars,
+             [](const clang::ValueDecl *lhs, const clang::ValueDecl *rhs) {
+               return lhs < rhs;
+             });
+
+  return true;
+}
+
 static bool buildLoopSkeleton(
     LoweringContext &ctx, llvm::ArrayRef<const clang::ValueDecl *> mutatedVars,
     bool hasFirstIterFlag, mlir::Value firstIterInit, LoopSkeleton &out) {
@@ -3482,7 +3564,8 @@ static bool buildLoopSkeleton(
   auto loop =
       ctx.builder.create<simt::dialect::LoopOp>(loc, resultTypes, initValues);
 
-  LoopFrame frame{loop, {}};
+  LoopFrame frame{loop, {}, /*hasFirstIterFlag=*/false,
+                  /*firstIterIndex=*/0, /*currentFirstIterValue=*/mlir::Value()};
   frame.carriedVars.append(mutatedVars.begin(), mutatedVars.end());
   frame.hasFirstIterFlag = hasFirstIterFlag;
   if (hasFirstIterFlag) {
@@ -3662,6 +3745,43 @@ static bool lowerStatement(const clang::Stmt *stmt, LoweringContext &ctx,
 
     mlir::Location loc = ctx.defaultLoc;
     bool hasElse = ifStmt->getElse() != nullptr;
+
+    if (isEmitContext(ctx)) {
+      EmitInterpreter interp(ctx);
+
+      llvm::SmallVector<const clang::ValueDecl *, 8> mutatedVars;
+      if (!collectIfMutations(ctx, ifStmt->getThen(), ifStmt->getElse(),
+                              mutatedVars))
+        return false;
+
+      llvm::SmallVector<const clang::ValueDecl *, 8> carriedVars;
+      carriedVars.reserve(mutatedVars.size());
+      for (const clang::ValueDecl *vd : mutatedVars)
+        if (ctx.valueMap.count(vd))
+          carriedVars.push_back(vd);
+
+      bool needsElseRegion = hasElse || !carriedVars.empty();
+      auto scope =
+          interp.beginIf(cond, carriedVars, hasElse, needsElseRegion, loc);
+
+      LoweringContext &thenCtx = scope.thenContext();
+      if (const clang::Stmt *thenBody = ifStmt->getThen())
+        if (!lowerStatement(thenBody, thenCtx))
+          return false;
+
+      LoweringContext *elseCtx = nullptr;
+      if (scope.userHasElse()) {
+        elseCtx = &scope.elseContext();
+        if (const clang::Stmt *elseBody = ifStmt->getElse())
+          if (!lowerStatement(elseBody, *elseCtx))
+            return false;
+      }
+
+      if (!scope.done())
+        return false;
+
+      return true;
+    }
 
     auto lowerIntoRegion = [&](const clang::Stmt *body, mlir::Region &region,
                                std::optional<mlir::OpBuilder> &builderStorage,
