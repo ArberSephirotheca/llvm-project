@@ -2330,6 +2330,42 @@ static typename Interp::Value lowerExprInterp(const clang::Expr *expr,
     return result;
   }
 
+  if (const auto *opCall = llvm::dyn_cast<clang::CXXOperatorCallExpr>(expr)) {
+    if (opCall->getOperator() == clang::OO_Subscript &&
+        opCall->getNumArgs() >= 2) {
+      auto resource = lowerExprInterp(opCall->getArg(0)->IgnoreParenImpCasts(),
+                                      ctx, interp);
+      if (!resource)
+        return typename Interp::Value();
+
+      auto index = lowerExprInterp(opCall->getArg(1)->IgnoreParenImpCasts(), ctx,
+                                   interp);
+      if (!index)
+        return typename Interp::Value();
+
+      mlir::Type indexType = getValueType(index);
+      if (!mlir::isa<mlir::IntegerType>(indexType)) {
+        ctx.fail("buffer subscript index must be integer");
+        return typename Interp::Value();
+      }
+
+      auto resourceType =
+          mlir::dyn_cast<simt::dialect::ResourceType>(getValueType(resource));
+      if (!resourceType) {
+        ctx.fail("subscript base must be a buffer resource");
+        return typename Interp::Value();
+      }
+
+      const clang::ValueDecl *decl = nullptr;
+      if (const auto *declRef =
+              llvm::dyn_cast<clang::DeclRefExpr>(
+                  opCall->getArg(0)->IgnoreParenImpCasts()))
+        decl = declRef->getDecl();
+
+      return interp.emitBufferLoad(resource, index, decl, {expr, loc});
+    }
+  }
+
   if (const auto *unOp = llvm::dyn_cast<clang::UnaryOperator>(expr)) {
     auto operand = lowerExprInterp(unOp->getSubExpr(), ctx, interp);
     if (!operand)
