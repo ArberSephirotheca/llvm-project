@@ -2,6 +2,7 @@ find_package(Clang REQUIRED CONFIG)
 
 add_executable(simt-hlsl-import
     src/main.cpp
+    lib/LoopScopeSupport.cpp
     lib/Lowering.cpp
 )
 
