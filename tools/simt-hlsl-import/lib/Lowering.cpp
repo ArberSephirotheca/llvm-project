@@ -4216,11 +4216,8 @@ static bool lowerSwitchStmt(const clang::SwitchStmt *switchStmt,
     analysisCtx.loopStack = ctx.loopStack;
     analysisCtx.switchStack = ctx.switchStack;
     analysisCtx.controlStack = ctx.controlStack;
-    SwitchFrame analysisFrame;
-    analysisFrame.analysisOnly = true;
-    analysisCtx.switchStack.push_back(analysisFrame);
-    analysisCtx.controlStack.push_back(
-        {ControlEntryKind::Switch, analysisCtx.switchStack.size() - 1});
+    SwitchScopeGuard analysisGuard(analysisCtx, SwitchFrame{});
+    analysisGuard.frame().analysisOnly = true;
 
     for (const clang::Stmt *caseStmt : info.statements) {
       if (!lowerStatement(caseStmt, analysisCtx) || analysisCtx.failed)
@@ -4228,11 +4225,6 @@ static bool lowerSwitchStmt(const clang::SwitchStmt *switchStmt,
       if (analysisCtx.emittedTerminator)
         break;
     }
-
-    analysisCtx.switchStack.pop_back();
-    if (!analysisCtx.controlStack.empty() &&
-        analysisCtx.controlStack.back().kind == ControlEntryKind::Switch)
-      analysisCtx.controlStack.pop_back();
     mutatedSet.insert(analysisCtx.mutatedVars.begin(),
                       analysisCtx.mutatedVars.end());
   }
@@ -4327,9 +4319,7 @@ static bool lowerSwitchStmt(const clang::SwitchStmt *switchStmt,
         thenBuilder.create<mlir::arith::ConstantIntOp>(loc, 0, 1);
     frame.breakCompletedValue =
         thenBuilder.create<mlir::arith::ConstantIntOp>(loc, 1, 1);
-    caseCtx.switchStack.push_back(frame);
-    caseCtx.controlStack.push_back(
-        {ControlEntryKind::Switch, caseCtx.switchStack.size() - 1});
+    SwitchScopeGuard caseGuard(caseCtx, std::move(frame));
 
     for (const clang::Stmt *caseStmt : info.statements) {
       if (!lowerStatement(caseStmt, caseCtx, caseInterp) || caseCtx.failed)
@@ -4361,11 +4351,6 @@ static bool lowerSwitchStmt(const clang::SwitchStmt *switchStmt,
       yieldValues.push_back(currentCompleted);
       thenBuilder.create<simt::dialect::YieldOp>(loc, yieldValues);
     }
-
-    caseCtx.switchStack.pop_back();
-    if (!caseCtx.controlStack.empty() &&
-        caseCtx.controlStack.back().kind == ControlEntryKind::Switch)
-      caseCtx.controlStack.pop_back();
     ctx.mutatedVars.insert(caseCtx.mutatedVars.begin(),
                            caseCtx.mutatedVars.end());
 

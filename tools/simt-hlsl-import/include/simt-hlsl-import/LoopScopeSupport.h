@@ -135,6 +135,19 @@ struct BreakTarget {
 
 BreakTarget getInnermostBreakTarget(LoweringContext &ctx);
 
+class SwitchScopeGuard {
+public:
+  SwitchScopeGuard(LoweringContext &ctx, SwitchFrame frame);
+  ~SwitchScopeGuard();
+
+  SwitchFrame &frame();
+  bool isValid() const { return valid; }
+
+private:
+  LoweringContext *ctx = nullptr;
+  bool valid = false;
+};
+
 class LoopScopeState : public LoopScopeProvider {
 public:
   LoopScopeState(LoweringContext &parentCtx,

@@ -3,6 +3,8 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "llvm/ADT/STLExtras.h"
 
+#include <cassert>
+
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/Decl.h"
 #include "clang/AST/Type.h"
@@ -123,6 +125,29 @@ BreakTarget getInnermostBreakTarget(LoweringContext &ctx) {
     }
   }
   return BreakTarget{};
+}
+
+SwitchScopeGuard::SwitchScopeGuard(LoweringContext &ctx, SwitchFrame frame)
+    : ctx(&ctx), valid(true) {
+  ctx.switchStack.push_back(std::move(frame));
+  ctx.controlStack.push_back(
+      {ControlEntryKind::Switch, ctx.switchStack.size() - 1});
+}
+
+SwitchScopeGuard::~SwitchScopeGuard() {
+  if (!valid || !ctx)
+    return;
+  assert(!ctx->switchStack.empty() &&
+         "SwitchScopeGuard outlived switch stack entry");
+  ctx->switchStack.pop_back();
+  if (!ctx->controlStack.empty() &&
+      ctx->controlStack.back().kind == ControlEntryKind::Switch)
+    ctx->controlStack.pop_back();
+}
+
+SwitchFrame &SwitchScopeGuard::frame() {
+  assert(ctx && !ctx->switchStack.empty());
+  return ctx->switchStack.back();
 }
 
 bool buildLoopSkeleton(LoweringContext &ctx,
