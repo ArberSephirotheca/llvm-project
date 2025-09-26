@@ -38,6 +38,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <type_traits>
 #include <string>
 
 #include "llvm/ADT/DenseMap.h"
@@ -175,6 +176,36 @@ static SymValue makeSymValueForType(mlir::Type type) {
   }
 
   return sym;
+}
+
+template <typename Interp>
+static typename Interp::Value wrapMlirValue(Interp &, mlir::Value value) {
+  if constexpr (std::is_same_v<typename Interp::Value, mlir::Value>) {
+    return value;
+  } else {
+    AnalysisValue result = AnalysisValue::fromValue(value);
+    result.setTypeHint(value.getType());
+    result.setSym(makeSymValueForType(value.getType()));
+    return result;
+  }
+}
+
+template <typename ValueT>
+static mlir::Value unwrapValue(const ValueT &value) {
+  if constexpr (std::is_same_v<ValueT, mlir::Value>) {
+    return value;
+  } else {
+    return value.getValueOrNull();
+  }
+}
+
+template <typename ValueT>
+static mlir::Type getValueType(const ValueT &value) {
+  if constexpr (std::is_same_v<ValueT, mlir::Value>) {
+    return value ? value.getType() : mlir::Type();
+  } else {
+    return value.getType();
+  }
 }
 
 
