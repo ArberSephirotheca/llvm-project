@@ -2287,13 +2287,15 @@ template <typename Interp>
 static typename Interp::Value lowerExprInterp(const clang::Expr *expr,
                                               LoweringContext &ctx,
                                               Interp &interp) {
+  using ValueT = typename Interp::Value;
+
   if (!expr)
-    return typename Interp::Value();
+    return ValueT();
 
   mlir::Type type = convertType(expr->getType(), ctx.builder);
   if (!type) {
     ctx.fail("unsupported expression type");
-    return typename Interp::Value();
+    return ValueT();
   }
 
   mlir::Location loc = getLocation(expr, ctx);
@@ -2301,7 +2303,7 @@ static typename Interp::Value lowerExprInterp(const clang::Expr *expr,
   if (const auto *intLit = llvm::dyn_cast<clang::IntegerLiteral>(expr)) {
     if (!mlir::isa<mlir::IntegerType>(type)) {
       ctx.fail("integer literal expects integer type");
-      return typename Interp::Value();
+      return ValueT();
     }
     auto intType = mlir::cast<mlir::IntegerType>(type);
     std::string tag = buildIntegerTag(intType);
@@ -2322,7 +2324,7 @@ static typename Interp::Value lowerExprInterp(const clang::Expr *expr,
   if (const auto *floatLit = llvm::dyn_cast<clang::FloatingLiteral>(expr)) {
     if (!mlir::isa<mlir::FloatType>(type)) {
       ctx.fail("floating literal expects floating type");
-      return typename Interp::Value();
+      return ValueT();
     }
     auto floatType = mlir::cast<mlir::FloatType>(type);
     std::string tag = buildFloatTag(floatType);
@@ -2355,7 +2357,7 @@ static typename Interp::Value lowerExprInterp(const clang::Expr *expr,
     auto it = ctx.valueMap.find(vd);
     if (it == ctx.valueMap.end()) {
       ctx.fail("reference to unknown value");
-      return typename Interp::Value();
+      return ValueT();
     }
     auto result = wrapMlirValue(interp, it->second);
     if constexpr (!std::is_same_v<typename Interp::Value, mlir::Value>) {
@@ -2374,24 +2376,24 @@ static typename Interp::Value lowerExprInterp(const clang::Expr *expr,
       auto resource = lowerExprInterp(opCall->getArg(0)->IgnoreParenImpCasts(),
                                       ctx, interp);
       if (!resource)
-        return typename Interp::Value();
+        return ValueT();
 
       auto index = lowerExprInterp(opCall->getArg(1)->IgnoreParenImpCasts(), ctx,
                                    interp);
       if (!index)
-        return typename Interp::Value();
+        return ValueT();
 
       mlir::Type indexType = getValueType(index);
       if (!mlir::isa<mlir::IntegerType>(indexType)) {
         ctx.fail("buffer subscript index must be integer");
-        return typename Interp::Value();
+        return ValueT();
       }
 
       auto resourceType =
           mlir::dyn_cast<simt::dialect::ResourceType>(getValueType(resource));
       if (!resourceType) {
         ctx.fail("subscript base must be a buffer resource");
-        return typename Interp::Value();
+        return ValueT();
       }
 
       const clang::ValueDecl *decl = nullptr;
@@ -3367,35 +3369,35 @@ static mlir::Value lowerExprLegacy(const clang::Expr *expr,
   if (const auto *condOp = llvm::dyn_cast<clang::ConditionalOperator>(expr)) {
     auto condValue = lowerExprInterp(condOp->getCond(), ctx, interp);
     if (!condValue)
-      return typename Interp::Value();
+      return ValueT();
 
     mlir::Type boolType = ctx.builder.getI1Type();
     if (getValueType(condValue) != boolType) {
       ctx.fail("conditional operator requires boolean condition");
-      return typename Interp::Value();
+      return ValueT();
     }
 
-    auto thenBuilder = [&](LoweringContext &branchCtx) -> typename Interp::Value {
+    auto thenBuilder = [&](LoweringContext &branchCtx) -> ValueT {
       auto branchInterp = interp.fork(branchCtx);
       auto value = lowerExprInterp(condOp->getTrueExpr(), branchCtx, branchInterp);
       if (!value)
-        return typename Interp::Value();
+        return ValueT();
       if (getValueType(value) != type) {
         branchCtx.fail("conditional operator branch type mismatch");
-        return typename Interp::Value();
+        return ValueT();
       }
       return value;
     };
 
-    auto elseBuilder = [&](LoweringContext &branchCtx) -> typename Interp::Value {
+    auto elseBuilder = [&](LoweringContext &branchCtx) -> ValueT {
       auto branchInterp = interp.fork(branchCtx);
       auto value = lowerExprInterp(condOp->getFalseExpr(), branchCtx,
                                    branchInterp);
       if (!value)
-        return typename Interp::Value();
+        return ValueT();
       if (getValueType(value) != type) {
         branchCtx.fail("conditional operator branch type mismatch");
-        return typename Interp::Value();
+        return ValueT();
       }
       return value;
     };
