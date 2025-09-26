@@ -3015,6 +3015,7 @@ static mlir::Location getLocation(const clang::Stmt *stmt,
 
 static mlir::Value lowerExprLegacy(const clang::Expr *expr,
                                    LoweringContext &ctx) {
+
   if (!expr)
     return {};
 
@@ -3366,45 +3367,7 @@ static mlir::Value lowerExprLegacy(const clang::Expr *expr,
     }
   }
 
-  if (const auto *condOp = llvm::dyn_cast<clang::ConditionalOperator>(expr)) {
-    auto condValue = lowerExprInterp(condOp->getCond(), ctx, interp);
-    if (!condValue)
-      return ValueT();
 
-    mlir::Type boolType = ctx.builder.getI1Type();
-    if (getValueType(condValue) != boolType) {
-      ctx.fail("conditional operator requires boolean condition");
-      return ValueT();
-    }
-
-    auto thenBuilder = [&](LoweringContext &branchCtx) -> ValueT {
-      auto branchInterp = interp.fork(branchCtx);
-      auto value = lowerExprInterp(condOp->getTrueExpr(), branchCtx, branchInterp);
-      if (!value)
-        return ValueT();
-      if (getValueType(value) != type) {
-        branchCtx.fail("conditional operator branch type mismatch");
-        return ValueT();
-      }
-      return value;
-    };
-
-    auto elseBuilder = [&](LoweringContext &branchCtx) -> ValueT {
-      auto branchInterp = interp.fork(branchCtx);
-      auto value = lowerExprInterp(condOp->getFalseExpr(), branchCtx,
-                                   branchInterp);
-      if (!value)
-        return ValueT();
-      if (getValueType(value) != type) {
-        branchCtx.fail("conditional operator branch type mismatch");
-        return ValueT();
-      }
-      return value;
-    };
-
-    simt_hlsl_import::SourceLoc src{condOp, loc};
-    return interp.emitConditional(condValue, thenBuilder, elseBuilder, src);
-  }
   if (const auto *binOp = llvm::dyn_cast<clang::BinaryOperator>(expr)) {
     if (binOp->getOpcode() == clang::BinaryOperatorKind::BO_Assign)
       return lowerAssignment(binOp, ctx);
