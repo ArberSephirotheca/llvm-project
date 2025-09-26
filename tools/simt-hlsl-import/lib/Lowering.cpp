@@ -169,7 +169,7 @@ static SymValue makeSymValueForType(mlir::Type type) {
     return sym;
   }
 
-  if (type.isa<mlir::IndexType>()) {
+  if (mlir::isa<mlir::IndexType>(type)) {
     sym.kind = SymKind::ScalarInt;
     return sym;
   }
