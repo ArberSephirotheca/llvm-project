@@ -17,6 +17,7 @@ namespace clang {
 class SourceManager;
 class Stmt;
 class ValueDecl;
+class SwitchCase;
 } // namespace clang
 
 namespace simt_hlsl_import {
@@ -33,6 +34,39 @@ struct SymValue {
 };
 
 struct LoweringContext;
+
+struct LoopMutationSummary {
+  bool mutatedInBody = false;
+  bool mutatedOnBreak = false;
+  bool mutatedOnContinue = false;
+};
+
+struct LoopMetadata {
+  llvm::SmallVector<const clang::ValueDecl *, 8> carriedVars;
+  llvm::DenseMap<const clang::ValueDecl *, SymValue> symInfo;
+  llvm::DenseMap<const clang::ValueDecl *, LoopMutationSummary> mutationInfo;
+  bool hasFirstIterFlag = false;
+  SymValue firstIterSym;
+  bool bodyHasBreak = false;
+  bool bodyHasContinue = false;
+};
+
+struct SwitchCaseMetadata {
+  const clang::SwitchCase *label = nullptr;
+  bool hasBreak = false;
+  bool hasFallthrough = false;
+  bool hasReturn = false;
+  llvm::SmallVector<const clang::ValueDecl *, 8> mutatedVars;
+};
+
+struct SwitchMetadata {
+  llvm::SmallVector<const clang::ValueDecl *, 8> carriedVars;
+  llvm::DenseMap<const clang::ValueDecl *, SymValue> symInfo;
+  llvm::SmallVector<SwitchCaseMetadata, 8> cases;
+  bool needsHasMatchedFlag = false;
+  bool needsExecutingFlag = false;
+  bool needsCompletedFlag = false;
+};
 
 struct LoopScopeProvider {
   virtual ~LoopScopeProvider() = default;
@@ -52,6 +86,7 @@ struct LoopFrame {
   mlir::Value currentFirstIterValue;
   bool analysisOnly = false;
   LoopScopeProvider *activeScope = nullptr;
+  LoopMetadata *metadata = nullptr;
 };
 
 struct LoopSkeleton {
@@ -71,6 +106,7 @@ struct SwitchFrame {
   mlir::Value breakExecutingValue;
   mlir::Value breakCompletedValue;
   bool analysisOnly = false;
+  SwitchMetadata *metadata = nullptr;
 };
 
 struct ControlEntry {
@@ -91,6 +127,8 @@ struct LoweringContext {
   llvm::SmallVector<LoopFrame, 4> loopStack;
   llvm::SmallVector<SwitchFrame, 4> switchStack;
   llvm::SmallVector<ControlEntry, 8> controlStack;
+  llvm::SmallVector<LoopMetadata *, 4> loopMetadataStack;
+  llvm::SmallVector<SwitchMetadata *, 4> switchMetadataStack;
   const clang::SourceManager *sourceManager = nullptr;
 
   LoweringContext(mlir::OpBuilder &builder, mlir::Location loc,

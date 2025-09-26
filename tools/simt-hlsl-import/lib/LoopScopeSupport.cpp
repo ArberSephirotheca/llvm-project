@@ -142,6 +142,8 @@ SwitchScopeGuard::SwitchScopeGuard(LoweringContext &ctx, SwitchFrame frame)
   ctx.switchStack.push_back(std::move(frame));
   ctx.controlStack.push_back(
       {ControlEntryKind::Switch, ctx.switchStack.size() - 1});
+  if (!ctx.switchMetadataStack.empty())
+    ctx.switchStack.back().metadata = ctx.switchMetadataStack.back();
 }
 
 SwitchScopeGuard::~SwitchScopeGuard() {
@@ -166,6 +168,8 @@ void cloneContextState(const LoweringContext &parent, LoweringContext &child) {
   child.loopStack = parent.loopStack;
   child.switchStack = parent.switchStack;
   child.controlStack = parent.controlStack;
+  child.loopMetadataStack = parent.loopMetadataStack;
+  child.switchMetadataStack = parent.switchMetadataStack;
 }
 
 SwitchFrame makeSwitchFrame(LoweringContext &ctx,
@@ -186,6 +190,8 @@ SwitchFrame makeSwitchFrame(LoweringContext &ctx,
       ctx.builder.create<mlir::arith::ConstantIntOp>(loc, executingDefault, 1);
   frame.breakCompletedValue =
       ctx.builder.create<mlir::arith::ConstantIntOp>(loc, completedDefault, 1);
+  if (!ctx.switchMetadataStack.empty())
+    frame.metadata = ctx.switchMetadataStack.back();
   return frame;
 }
 
@@ -227,6 +233,8 @@ bool buildLoopSkeleton(LoweringContext &ctx,
     frame.firstIterIndex = mutatedVars.size();
     frame.currentFirstIterValue = firstIterInit;
   }
+  if (!ctx.loopMetadataStack.empty())
+    frame.metadata = ctx.loopMetadataStack.back();
   ctx.loopStack.push_back(frame);
   ctx.controlStack.push_back({ControlEntryKind::Loop, ctx.loopStack.size() - 1});
   LoopFrame *activeFrame = &ctx.loopStack.back();
@@ -470,6 +478,8 @@ AnalysisLoopScope::AnalysisLoopScope(
     frameState.firstIterIndex = carriedVars.size();
     frameState.currentFirstIterValue = firstIterInit;
   }
+  if (!parent.loopMetadataStack.empty())
+    frameState.metadata = parent.loopMetadataStack.back();
 
   parent.loopStack.push_back(frameState);
   parent.controlStack.push_back({ControlEntryKind::Loop,

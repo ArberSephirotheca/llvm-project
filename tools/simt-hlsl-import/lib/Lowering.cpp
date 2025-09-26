@@ -43,6 +43,7 @@
 #include <string>
 
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/ScopeExit.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
@@ -3221,8 +3222,8 @@ static void lowerCompoundStmt(const clang::CompoundStmt *compound,
 static bool collectLoopMutations(
     LoweringContext &ctx, const clang::Stmt *body,
     llvm::function_ref<bool(LoweringContext &)> extraWork,
-    llvm::SmallVector<const clang::ValueDecl *, 8> &mutatedVars) {
-  mutatedVars.clear();
+    LoopMetadata &metadata) {
+  metadata = LoopMetadata();
 
   mlir::Region analysisRegion;
   analysisRegion.emplaceBlock();
@@ -3232,6 +3233,12 @@ static bool collectLoopMutations(
   LoweringContext analysisCtx(analysisBuilder, ctx.defaultLoc, ctx.returnType,
                               ctx.errorMessage, ctx.sourceManager);
   cloneContextState(ctx, analysisCtx);
+
+  size_t previousDepth = analysisCtx.loopMetadataStack.size();
+  analysisCtx.loopMetadataStack.push_back(&metadata);
+  auto popMeta = llvm::make_scope_exit([&]() {
+    analysisCtx.loopMetadataStack.resize(previousDepth);
+  });
 
   if (body) {
     if (!lowerStatement(body, analysisCtx) || analysisCtx.failed)
@@ -3247,11 +3254,20 @@ static bool collectLoopMutations(
   mutatedSet.insert(analysisCtx.mutatedVars.begin(),
                     analysisCtx.mutatedVars.end());
 
-  mutatedVars.assign(mutatedSet.begin(), mutatedSet.end());
-  llvm::sort(mutatedVars,
+  metadata.carriedVars.assign(mutatedSet.begin(), mutatedSet.end());
+  llvm::sort(metadata.carriedVars,
              [](const clang::ValueDecl *lhs, const clang::ValueDecl *rhs) {
                return lhs < rhs;
              });
+
+  for (const clang::ValueDecl *vd : metadata.carriedVars) {
+    auto symIt = analysisCtx.symValueMap.find(vd);
+    if (symIt != analysisCtx.symValueMap.end())
+      metadata.symInfo[vd] = symIt->second;
+    else
+      metadata.symInfo[vd] = makeSymValue(vd);
+    (void)metadata.mutationInfo[vd];
+  }
 
   return true;
 }
@@ -3547,7 +3563,7 @@ static bool lowerForStmt(const clang::ForStmt *forStmt, LoweringContext &ctx,
     }
   }
 
-  llvm::SmallVector<const clang::ValueDecl *, 8> mutatedVars;
+  LoopMetadata loopMeta;
   const clang::Stmt *incStmt = forStmt->getInc();
   auto analyzeIncrement = [&](LoweringContext &analysisCtx) -> bool {
     if (!incStmt)
@@ -3561,8 +3577,15 @@ static bool lowerForStmt(const clang::ForStmt *forStmt, LoweringContext &ctx,
     return true;
   };
   if (!collectLoopMutations(ctx, forStmt->getBody(), analyzeIncrement,
-                            mutatedVars))
+                            loopMeta))
     return false;
+
+  auto &mutatedVars = loopMeta.carriedVars;
+  size_t previousMetaDepth = ctx.loopMetadataStack.size();
+  ctx.loopMetadataStack.push_back(&loopMeta);
+  auto popLoopMeta = llvm::make_scope_exit([&]() {
+    ctx.loopMetadataStack.resize(previousMetaDepth);
+  });
 
   auto loopScope = interp.beginLoop(mutatedVars, /*hasFirstIterFlag=*/false,
                                     mlir::Value(), loc);
@@ -3633,16 +3656,22 @@ static bool lowerWhileStmt(const clang::WhileStmt *whileStmt,
   mlir::Location loc = ctx.defaultLoc;
 
   const clang::Expr *condExpr = whileStmt->getCond();
-  llvm::SmallVector<const clang::ValueDecl *, 8> mutatedVars;
+  LoopMetadata loopMeta;
   auto analyzeCond = [&](LoweringContext &analysisCtx) -> bool {
     if (!condExpr)
       return true;
     (void)lowerExpr(condExpr, analysisCtx);
     return !analysisCtx.failed;
   };
-  if (!collectLoopMutations(ctx, whileStmt->getBody(), analyzeCond,
-                            mutatedVars))
+  if (!collectLoopMutations(ctx, whileStmt->getBody(), analyzeCond, loopMeta))
     return false;
+
+  auto &mutatedVars = loopMeta.carriedVars;
+  size_t previousMetaDepth = ctx.loopMetadataStack.size();
+  ctx.loopMetadataStack.push_back(&loopMeta);
+  auto popLoopMeta = llvm::make_scope_exit([&]() {
+    ctx.loopMetadataStack.resize(previousMetaDepth);
+  });
 
   auto loopScope = interp.beginLoop(mutatedVars, /*hasFirstIterFlag=*/false,
                                     mlir::Value(), loc);
@@ -3707,15 +3736,25 @@ static bool lowerDoStmt(const clang::DoStmt *doStmt, LoweringContext &ctx,
   mlir::Location loc = ctx.defaultLoc;
 
   const clang::Expr *condExpr = doStmt->getCond();
-  llvm::SmallVector<const clang::ValueDecl *, 8> mutatedVars;
+  LoopMetadata loopMeta;
   auto analyzeCond = [&](LoweringContext &analysisCtx) -> bool {
     if (!condExpr)
       return true;
     (void)lowerExpr(condExpr, analysisCtx);
     return !analysisCtx.failed;
   };
-  if (!collectLoopMutations(ctx, doStmt->getBody(), analyzeCond, mutatedVars))
+  if (!collectLoopMutations(ctx, doStmt->getBody(), analyzeCond, loopMeta))
     return false;
+
+  loopMeta.hasFirstIterFlag = true;
+  loopMeta.firstIterSym.kind = SymKind::ScalarInt;
+  loopMeta.firstIterSym.bitWidth = 1;
+  auto &mutatedVars = loopMeta.carriedVars;
+  size_t previousMetaDepth = ctx.loopMetadataStack.size();
+  ctx.loopMetadataStack.push_back(&loopMeta);
+  auto popLoopMeta = llvm::make_scope_exit([&]() {
+    ctx.loopMetadataStack.resize(previousMetaDepth);
+  });
 
   mlir::Value firstIterInit =
       ctx.builder.create<mlir::arith::ConstantIntOp>(loc, 1, 1);
@@ -3927,8 +3966,14 @@ static bool lowerSwitchStmt(const clang::SwitchStmt *switchStmt,
   if (!selector)
     return false;
 
+  SwitchMetadata switchMeta;
+  switchMeta.cases.reserve(cases.size());
+
   llvm::SmallPtrSet<const clang::ValueDecl *, 8> mutatedSet;
   for (const CaseInfo &info : cases) {
+    SwitchCaseMetadata caseMeta;
+    caseMeta.label = info.label;
+
     mlir::Region analysisRegion;
     analysisRegion.emplaceBlock();
     mlir::OpBuilder analysisBuilder(ctx.builder.getContext());
@@ -3936,8 +3981,16 @@ static bool lowerSwitchStmt(const clang::SwitchStmt *switchStmt,
     LoweringContext analysisCtx(analysisBuilder, loc, ctx.returnType,
                                 ctx.errorMessage, ctx.sourceManager);
     cloneContextState(ctx, analysisCtx);
+
+    size_t previousDepth = analysisCtx.switchMetadataStack.size();
+    analysisCtx.switchMetadataStack.push_back(&switchMeta);
+    auto popMeta = llvm::make_scope_exit([&]() {
+      analysisCtx.switchMetadataStack.resize(previousDepth);
+    });
+
     SwitchScopeGuard analysisGuard(analysisCtx, SwitchFrame{});
     analysisGuard.frame().analysisOnly = true;
+    analysisGuard.frame().metadata = &switchMeta;
 
     for (const clang::Stmt *caseStmt : info.statements) {
       if (!lowerStatement(caseStmt, analysisCtx) || analysisCtx.failed)
@@ -3945,17 +3998,38 @@ static bool lowerSwitchStmt(const clang::SwitchStmt *switchStmt,
       if (analysisCtx.emittedTerminator)
         break;
     }
-    mutatedSet.insert(analysisCtx.mutatedVars.begin(),
-                      analysisCtx.mutatedVars.end());
+
+    llvm::SmallPtrSet<const clang::ValueDecl *, 8> caseMutated;
+    caseMutated.insert(analysisCtx.mutatedVars.begin(),
+                       analysisCtx.mutatedVars.end());
+    caseMeta.mutatedVars.assign(caseMutated.begin(), caseMutated.end());
+    llvm::sort(caseMeta.mutatedVars,
+               [](const clang::ValueDecl *lhs, const clang::ValueDecl *rhs) {
+                 return lhs < rhs;
+               });
+
+    mutatedSet.insert(caseMutated.begin(), caseMutated.end());
+    switchMeta.cases.push_back(std::move(caseMeta));
   }
 
-  llvm::SmallVector<const clang::ValueDecl *, 8> mutatedVars(mutatedSet.begin(),
-                                                             mutatedSet.end());
-  llvm::sort(mutatedVars,
+  switchMeta.carriedVars.assign(mutatedSet.begin(), mutatedSet.end());
+  llvm::sort(switchMeta.carriedVars,
              [](const clang::ValueDecl *lhs, const clang::ValueDecl *rhs) {
                return lhs < rhs;
              });
 
+  for (const clang::ValueDecl *vd : switchMeta.carriedVars) {
+    if (auto it = ctx.symValueMap.find(vd); it != ctx.symValueMap.end())
+      switchMeta.symInfo[vd] = it->second;
+    else
+      switchMeta.symInfo[vd] = makeSymValue(vd);
+  }
+
+  switchMeta.needsHasMatchedFlag = true;
+  switchMeta.needsExecutingFlag = true;
+  switchMeta.needsCompletedFlag = true;
+
+  auto &mutatedVars = switchMeta.carriedVars;
   llvm::SmallVector<mlir::Value, 8> currentValues;
   currentValues.reserve(mutatedVars.size());
   for (const clang::ValueDecl *vd : mutatedVars) {
@@ -3964,6 +4038,12 @@ static bool lowerSwitchStmt(const clang::SwitchStmt *switchStmt,
       return ctx.fail("reference to unknown switch variable");
     currentValues.push_back(initial);
   }
+
+  size_t previousSwitchDepth = ctx.switchMetadataStack.size();
+  ctx.switchMetadataStack.push_back(&switchMeta);
+  auto popSwitchMeta = llvm::make_scope_exit([&]() {
+    ctx.switchMetadataStack.resize(previousSwitchDepth);
+  });
 
   mlir::Value boolZero =
       ctx.builder.create<mlir::arith::ConstantIntOp>(loc, 0, 1);
