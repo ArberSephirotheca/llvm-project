@@ -2360,6 +2360,62 @@ static typename Interp::Value lowerExprInterp(const clang::Expr *expr,
     }
   }
 
+  if (const auto *binOp = llvm::dyn_cast<clang::BinaryOperator>(expr)) {
+    auto getOperand = [&](const clang::Expr *subExpr) -> typename Interp::Value {
+      return lowerExprInterp(subExpr, ctx, interp);
+    };
+
+    simt_hlsl_import::SourceLoc src{binOp, loc};
+
+    auto requireOperands = [&](typename Interp::Value &lhs,
+                               typename Interp::Value &rhs) -> bool {
+      if (!lhs || ctx.failed)
+        return false;
+      rhs = getOperand(binOp->getRHS());
+      if (!rhs || ctx.failed)
+        return false;
+      return true;
+    };
+
+    switch (binOp->getOpcode()) {
+    case clang::BinaryOperatorKind::BO_Add:
+    case clang::BinaryOperatorKind::BO_Sub:
+    case clang::BinaryOperatorKind::BO_Mul:
+    case clang::BinaryOperatorKind::BO_Div:
+    case clang::BinaryOperatorKind::BO_Rem: {
+      auto lhs = getOperand(binOp->getLHS());
+      typename Interp::Value rhs;
+      if (!requireOperands(lhs, rhs))
+        return typename Interp::Value();
+
+      simt_hlsl_import::ArithOp arithOp;
+      switch (binOp->getOpcode()) {
+      case clang::BinaryOperatorKind::BO_Add:
+        arithOp = simt_hlsl_import::ArithOp::Add;
+        break;
+      case clang::BinaryOperatorKind::BO_Sub:
+        arithOp = simt_hlsl_import::ArithOp::Sub;
+        break;
+      case clang::BinaryOperatorKind::BO_Mul:
+        arithOp = simt_hlsl_import::ArithOp::Mul;
+        break;
+      case clang::BinaryOperatorKind::BO_Div:
+        arithOp = simt_hlsl_import::ArithOp::Div;
+        break;
+      case clang::BinaryOperatorKind::BO_Rem:
+        arithOp = simt_hlsl_import::ArithOp::Rem;
+        break;
+      default:
+        llvm_unreachable("unexpected opcode");
+      }
+
+      return interp.emitArithmetic(arithOp, lhs, rhs, src);
+    }
+    default:
+      break;
+    }
+  }
+
   mlir::Value value = lowerExprLegacy(expr, ctx);
   if (!value)
     return typename Interp::Value();
