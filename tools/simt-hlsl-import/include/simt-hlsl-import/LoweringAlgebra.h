@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "mlir/IR/Location.h"
+#include "simt-hlsl-import/LoopScopeSupport.h"
 #include "llvm/ADT/ArrayRef.h"
 
 namespace clang {
@@ -15,6 +16,80 @@ class ValueDecl;
 namespace simt_hlsl_import {
 
 struct LoweringContext;
+
+struct AnalysisValue {
+  AnalysisValue() = default;
+  AnalysisValue(mlir::Value v) { setValue(v); }
+
+  static AnalysisValue invalid() { return AnalysisValue(); }
+
+  static AnalysisValue fromValue(mlir::Value v) {
+    AnalysisValue result;
+    result.setValue(v);
+    return result;
+  }
+
+  static AnalysisValue fromSym(SymValue sym) {
+    AnalysisValue result;
+    result.setSym(std::move(sym));
+    return result;
+  }
+
+  void setValue(mlir::Value v) {
+    value = v;
+    hasValue = (v != nullptr);
+  }
+
+  bool hasMlirValue() const { return hasValue; }
+  mlir::Value getValue() const { return value; }
+  mlir::Value getValueOrNull() const { return value; }
+
+  bool isValid() const { return hasValue || hasSym || isConstant; }
+
+  mlir::Type getType() const {
+    return value ? value.getType() : mlir::Type();
+  }
+
+  explicit operator bool() const { return isValid(); }
+  operator mlir::Value() const { return value; }
+
+  void clearValue() {
+    value = nullptr;
+    hasValue = false;
+  }
+
+  void setSym(SymValue sym) {
+    symValue = std::move(sym);
+    hasSym = true;
+  }
+
+  const SymValue *getSym() const { return hasSym ? &symValue : nullptr; }
+  bool hasSymValue() const { return hasSym; }
+
+  void setConstantInt(int64_t v) {
+    isConstant = true;
+    intConstant = v;
+    floatConstant.reset();
+  }
+
+  void setConstantFloat(double v) {
+    isConstant = true;
+    floatConstant = v;
+    intConstant.reset();
+  }
+
+  std::optional<int64_t> getConstantInt() const { return intConstant; }
+  std::optional<double> getConstantFloat() const { return floatConstant; }
+
+private:
+  mlir::Value value;
+  SymValue symValue;
+  bool hasSym = false;
+  bool hasValue = false;
+  bool isConstant = false;
+  std::optional<int64_t> intConstant;
+  std::optional<double> floatConstant;
+};
 
 struct SourceLoc {
   const clang::Stmt *clangNode = nullptr;

@@ -1183,7 +1183,8 @@ struct EmitInterpreter
 };
 
 struct AnalysisInterpreter
-    : simt_hlsl_import::LoweringAlgebra<AnalysisInterpreter, mlir::Value> {
+    : simt_hlsl_import::LoweringAlgebra<AnalysisInterpreter,
+                                        simt_hlsl_import::AnalysisValue> {
 
   explicit AnalysisInterpreter(LoweringContext &ctx) : ctx(ctx) {}
 
@@ -1775,12 +1776,22 @@ struct AnalysisInterpreter
   }
 
   Value emitBufferLoad(Value resourceHandle, Value index,
-                       const clang::ValueDecl *,
+                       const clang::ValueDecl *decl,
                        simt_hlsl_import::SourceLoc loc) {
     mlir::Location mlirLoc = resolveLoc(loc, ctx);
-    return ctx.builder
-        .create<simt::dialect::BufferLoadOp>(mlirLoc, resourceHandle, index)
-        .getResult();
+    mlir::Value load =
+        ctx.builder
+            .create<simt::dialect::BufferLoadOp>(mlirLoc, resourceHandle,
+                                                 index)
+            .getResult();
+    simt_hlsl_import::AnalysisValue result =
+        simt_hlsl_import::AnalysisValue::fromValue(load);
+    if (decl) {
+      if (auto symIt = ctx.symValueMap.find(decl);
+          symIt != ctx.symValueMap.end())
+        result.setSym(symIt->second);
+    }
+    return result;
   }
 
   void emitBufferStore(Value, Value, Value, const clang::ValueDecl *,
@@ -1804,12 +1815,22 @@ struct AnalysisInterpreter
 
   Value lookupVariable(const clang::ValueDecl *decl) {
     auto it = ctx.valueMap.find(decl);
-    return it != ctx.valueMap.end() ? it->second : mlir::Value();
+    simt_hlsl_import::AnalysisValue result;
+    if (it != ctx.valueMap.end())
+      result.setValue(it->second);
+    if (auto symIt = ctx.symValueMap.find(decl);
+        symIt != ctx.symValueMap.end())
+      result.setSym(symIt->second);
+    return result;
   }
 
   void bindVariable(const clang::ValueDecl *decl, Value value) {
-    ctx.valueMap[decl] = value;
-    ctx.symValueMap[decl] = makeSymValue(decl);
+    if (mlir::Value mlirVal = value.getValueOrNull())
+      ctx.valueMap[decl] = mlirVal;
+    if (const SymValue *sym = value.getSym())
+      ctx.symValueMap[decl] = *sym;
+    else
+      ctx.symValueMap[decl] = makeSymValue(decl);
   }
 
   void noteMutation(const clang::ValueDecl *decl) {
