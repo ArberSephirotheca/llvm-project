@@ -38,6 +38,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <tuple>
 #include <type_traits>
 #include <string>
 
@@ -2234,6 +2235,43 @@ static std::optional<BufferAccessInfo>
 lowerBufferAccessOperands(const clang::CXXOperatorCallExpr *opCall,
                           LoweringContext &ctx);
 
+template <typename Interp>
+static std::optional<std::tuple<typename Interp::Value, typename Interp::Value,
+                                simt::dialect::ResourceType,
+                                const clang::ValueDecl *>>
+lowerBufferAccessInterp(const clang::Expr *baseExpr,
+                        const clang::Expr *indexExpr, LoweringContext &ctx,
+                        Interp &interp) {
+  auto resource = lowerExprInterp(baseExpr->IgnoreParenImpCasts(), ctx, interp);
+  if (!resource)
+    return std::nullopt;
+
+  auto index = lowerExprInterp(indexExpr->IgnoreParenImpCasts(), ctx, interp);
+  if (!index)
+    return std::nullopt;
+
+  mlir::Type indexType = getValueType(index);
+  if (!mlir::isa<mlir::IntegerType>(indexType)) {
+    ctx.fail("buffer subscript index must be integer");
+    return std::nullopt;
+  }
+
+  auto resourceType =
+      mlir::dyn_cast<simt::dialect::ResourceType>(getValueType(resource));
+  if (!resourceType) {
+    ctx.fail("subscript base must be a buffer resource");
+    return std::nullopt;
+  }
+
+  const clang::ValueDecl *decl = nullptr;
+  if (const auto *declRef =
+          llvm::dyn_cast<clang::DeclRefExpr>(
+              baseExpr->IgnoreParenImpCasts()))
+    decl = declRef->getDecl();
+
+  return std::make_optional(std::make_tuple(resource, index, resourceType, decl));
+}
+
 static mlir::Value lowerAssignment(const clang::BinaryOperator *binOp,
                                    LoweringContext &ctx);
 
@@ -3327,41 +3365,42 @@ static mlir::Value lowerExprLegacy(const clang::Expr *expr,
   }
 
   if (const auto *condOp = llvm::dyn_cast<clang::ConditionalOperator>(expr)) {
-    mlir::Value condValue = lowerExprLegacy(condOp->getCond(), ctx);
+    auto condValue = lowerExprInterp(condOp->getCond(), ctx, interp);
     if (!condValue)
-      return {};
-    if (condValue.getType() != ctx.builder.getI1Type())
-      return ctx.fail("conditional operator requires boolean condition"),
-             mlir::Value();
+      return typename Interp::Value();
 
-    auto thenBuilder = [&](LoweringContext &branchCtx) -> mlir::Value {
-      mlir::Value value = lowerExprLegacy(condOp->getTrueExpr(), branchCtx);
+    mlir::Type boolType = ctx.builder.getI1Type();
+    if (getValueType(condValue) != boolType) {
+      ctx.fail("conditional operator requires boolean condition");
+      return typename Interp::Value();
+    }
+
+    auto thenBuilder = [&](LoweringContext &branchCtx) -> typename Interp::Value {
+      auto branchInterp = interp.fork(branchCtx);
+      auto value = lowerExprInterp(condOp->getTrueExpr(), branchCtx, branchInterp);
       if (!value)
-        return mlir::Value();
-      if (value.getType() != type) {
+        return typename Interp::Value();
+      if (getValueType(value) != type) {
         branchCtx.fail("conditional operator branch type mismatch");
-        return mlir::Value();
+        return typename Interp::Value();
       }
       return value;
     };
 
-    auto elseBuilder = [&](LoweringContext &branchCtx) -> mlir::Value {
-      mlir::Value value = lowerExprLegacy(condOp->getFalseExpr(), branchCtx);
+    auto elseBuilder = [&](LoweringContext &branchCtx) -> typename Interp::Value {
+      auto branchInterp = interp.fork(branchCtx);
+      auto value = lowerExprInterp(condOp->getFalseExpr(), branchCtx,
+                                   branchInterp);
       if (!value)
-        return mlir::Value();
-      if (value.getType() != type) {
+        return typename Interp::Value();
+      if (getValueType(value) != type) {
         branchCtx.fail("conditional operator branch type mismatch");
-        return mlir::Value();
+        return typename Interp::Value();
       }
       return value;
     };
 
     simt_hlsl_import::SourceLoc src{condOp, loc};
-    if (isEmitContext(ctx)) {
-      EmitInterpreter interp(ctx);
-      return interp.emitConditional(condValue, thenBuilder, elseBuilder, src);
-    }
-    AnalysisInterpreter interp(ctx);
     return interp.emitConditional(condValue, thenBuilder, elseBuilder, src);
   }
   if (const auto *binOp = llvm::dyn_cast<clang::BinaryOperator>(expr)) {
@@ -3745,80 +3784,86 @@ lowerAtomicMemberCall(const clang::CXXMemberCallExpr *call,
   return mlir::Value();
 }
 
-static mlir::Value lowerAssignment(const clang::BinaryOperator *binOp,
-                                   LoweringContext &ctx) {
-  mlir::Location loc = getLocation(binOp, ctx);
-  mlir::Value rhs = lowerExpr(binOp->getRHS(), ctx);
+template <typename Interp>
+static typename Interp::Value
+lowerAssignmentInterp(const clang::BinaryOperator *binOp, LoweringContext &ctx,
+                      Interp &interp) {
+  auto rhs = lowerExprInterp(binOp->getRHS(), ctx, interp);
   if (!rhs)
-    return {};
+    return typename Interp::Value();
 
-  bool emitMode = isEmitContext(ctx);
+  mlir::Value rhsValue = unwrapValue(rhs);
+  mlir::Type rhsType = getValueType(rhs);
+  mlir::Location loc = getLocation(binOp, ctx);
 
   const clang::Expr *lhsExpr = binOp->getLHS()->IgnoreParenImpCasts();
   if (const auto *lhsDeclRef = llvm::dyn_cast<clang::DeclRefExpr>(lhsExpr)) {
     const clang::ValueDecl *vd = lhsDeclRef->getDecl();
     auto it = ctx.valueMap.find(vd);
-    if (it != ctx.valueMap.end()) {
-      if (emitMode) {
-        EmitInterpreter interp(ctx);
-        interp.bindVariable(vd, rhs);
-        interp.noteMutation(vd);
-      }
-      it->second = rhs;
-      ctx.mutatedVars.insert(vd);
-      ctx.symValueMap[vd] = makeSymValue(vd);
-      return rhs;
+    if (it == ctx.valueMap.end()) {
+      ctx.fail("reference to unknown value");
+      return typename Interp::Value();
     }
-    return ctx.fail("reference to unknown value"), mlir::Value();
+
+    interp.bindVariable(vd, rhs);
+    interp.noteMutation(vd);
+
+    if (rhsValue)
+      it->second = rhsValue;
+    ctx.mutatedVars.insert(vd);
+    ctx.symValueMap[vd] = makeSymValue(vd);
+    return rhs;
   }
+
+  auto emitBufferStore = [&](typename Interp::Value resource,
+                             typename Interp::Value index,
+                             simt::dialect::ResourceType resourceType,
+                             const clang::ValueDecl *decl) -> typename Interp::Value {
+    if (rhsType != resourceType.getElementType()) {
+      ctx.fail("assignment value must match buffer element type");
+      return typename Interp::Value();
+    }
+
+    interp.emitBufferStore(resource, index, rhs, decl, {binOp, loc});
+    if (decl)
+      ctx.mutatedVars.insert(decl);
+    return rhs;
+  };
 
   if (const auto *subscript =
           llvm::dyn_cast<clang::CXXOperatorCallExpr>(lhsExpr)) {
     if (subscript->getOperator() == clang::OO_Subscript) {
-      auto infoOpt = lowerBufferAccessOperands(subscript, ctx);
-      if (!infoOpt)
-        return {};
-      const auto &info = *infoOpt;
-      if (rhs.getType() != info.resourceType.getElementType())
-        return ctx.fail("assignment value must match buffer element type"),
-               mlir::Value();
-      if (emitMode) {
-        EmitInterpreter interp(ctx);
-        interp.emitBufferStore(info.resource, info.index, rhs, info.decl,
-                               {binOp, loc});
-      } else {
-        ctx.builder.create<simt::dialect::BufferStoreOp>(loc, info.resource,
-                                                         info.index, rhs);
-        if (info.decl)
-          ctx.mutatedVars.insert(info.decl);
-      }
-      return rhs;
+      auto info = lowerBufferAccessInterp(subscript->getArg(0),
+                                          subscript->getArg(1), ctx, interp);
+      if (!info)
+        return typename Interp::Value();
+      auto [resource, index, resourceType, decl] = *info;
+      return emitBufferStore(resource, index, resourceType, decl);
     }
   }
 
   if (const auto *arraySub = llvm::dyn_cast<clang::ArraySubscriptExpr>(lhsExpr)) {
-    auto infoOpt =
-        getBufferAccessInfo(arraySub->getBase(), arraySub->getIdx(), ctx);
-    if (!infoOpt)
-      return {};
-    const auto &info = *infoOpt;
-    if (rhs.getType() != info.resourceType.getElementType())
-      return ctx.fail("assignment value must match buffer element type"),
-             mlir::Value();
-    if (emitMode) {
-      EmitInterpreter interp(ctx);
-      interp.emitBufferStore(info.resource, info.index, rhs, info.decl,
-                             {binOp, loc});
-    } else {
-      ctx.builder.create<simt::dialect::BufferStoreOp>(loc, info.resource,
-                                                       info.index, rhs);
-      if (info.decl)
-        ctx.mutatedVars.insert(info.decl);
-    }
-    return rhs;
+    auto info = lowerBufferAccessInterp(arraySub->getBase(), arraySub->getIdx(),
+                                        ctx, interp);
+    if (!info)
+      return typename Interp::Value();
+    auto [resource, index, resourceType, decl] = *info;
+    return emitBufferStore(resource, index, resourceType, decl);
   }
 
-  return ctx.fail("unsupported assignment target"), mlir::Value();
+  ctx.fail("unsupported assignment target");
+  return typename Interp::Value();
+}
+
+static mlir::Value lowerAssignment(const clang::BinaryOperator *binOp,
+                                   LoweringContext &ctx) {
+  if (isEmitContext(ctx)) {
+    EmitInterpreter interp(ctx);
+    return lowerAssignmentInterp(binOp, ctx, interp);
+  }
+  AnalysisInterpreter interp(ctx);
+  auto result = lowerAssignmentInterp(binOp, ctx, interp);
+  return result.getValueOrNull();
 }
 
 static mlir::Value buildZeroValue(LoweringContext &ctx, mlir::Type type) {
