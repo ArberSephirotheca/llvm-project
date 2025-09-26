@@ -2367,7 +2367,7 @@ static typename Interp::Value lowerExprInterp(const clang::Expr *expr,
   }
 
   if (const auto *unOp = llvm::dyn_cast<clang::UnaryOperator>(expr)) {
-    auto operand = lowerExprInterp(unOp->getSubExpr(), ctx, interp);
+    auto operand = lowerExpr(unOp->getSubExpr(), ctx, interp);
     if (!operand)
       return typename Interp::Value();
 
@@ -2446,6 +2446,43 @@ static typename Interp::Value lowerExprInterp(const clang::Expr *expr,
       }
 
       return interp.emitArithmetic(arithOp, lhs, rhs, src);
+    }
+    case clang::BinaryOperatorKind::BO_EQ:
+    case clang::BinaryOperatorKind::BO_NE:
+    case clang::BinaryOperatorKind::BO_LT:
+    case clang::BinaryOperatorKind::BO_LE:
+    case clang::BinaryOperatorKind::BO_GT:
+    case clang::BinaryOperatorKind::BO_GE: {
+      auto lhs = getOperand(binOp->getLHS());
+      auto rhs = getOperand(binOp->getRHS());
+      if (!lhs || !rhs)
+        return typename Interp::Value();
+
+      simt_hlsl_import::CmpOp cmpOp;
+      switch (binOp->getOpcode()) {
+      case clang::BinaryOperatorKind::BO_EQ:
+        cmpOp = simt_hlsl_import::CmpOp::EQ;
+        break;
+      case clang::BinaryOperatorKind::BO_NE:
+        cmpOp = simt_hlsl_import::CmpOp::NE;
+        break;
+      case clang::BinaryOperatorKind::BO_LT:
+        cmpOp = simt_hlsl_import::CmpOp::LT;
+        break;
+      case clang::BinaryOperatorKind::BO_LE:
+        cmpOp = simt_hlsl_import::CmpOp::LE;
+        break;
+      case clang::BinaryOperatorKind::BO_GT:
+        cmpOp = simt_hlsl_import::CmpOp::GT;
+        break;
+      case clang::BinaryOperatorKind::BO_GE:
+        cmpOp = simt_hlsl_import::CmpOp::GE;
+        break;
+      default:
+        llvm_unreachable("unexpected comparison opcode");
+      }
+
+      return interp.emitCompare(cmpOp, lhs, rhs, src);
     }
     default:
       break;
