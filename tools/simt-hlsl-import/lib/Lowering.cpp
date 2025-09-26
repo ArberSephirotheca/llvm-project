@@ -2367,7 +2367,7 @@ static typename Interp::Value lowerExprInterp(const clang::Expr *expr,
   }
 
   if (const auto *unOp = llvm::dyn_cast<clang::UnaryOperator>(expr)) {
-    auto operand = lowerExpr(unOp->getSubExpr(), ctx, interp);
+    auto operand = lowerExprInterp(unOp->getSubExpr(), ctx, interp);
     if (!operand)
       return typename Interp::Value();
 
