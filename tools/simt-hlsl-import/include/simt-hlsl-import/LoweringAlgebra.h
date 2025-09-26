@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "mlir/IR/Location.h"
+#include "mlir/IR/Types.h"
 #include "simt-hlsl-import/LoopScopeSupport.h"
 #include "llvm/ADT/ArrayRef.h"
 
@@ -38,6 +39,8 @@ struct AnalysisValue {
   void setValue(mlir::Value v) {
     value = v;
     hasValue = (v != nullptr);
+    if (hasValue)
+      recordedType = value.getType();
   }
 
   bool hasMlirValue() const { return hasValue; }
@@ -47,7 +50,9 @@ struct AnalysisValue {
   bool isValid() const { return hasValue || hasSym || isConstant; }
 
   mlir::Type getType() const {
-    return value ? value.getType() : mlir::Type();
+    if (value)
+      return value.getType();
+    return recordedType;
   }
 
   explicit operator bool() const { return isValid(); }
@@ -56,6 +61,7 @@ struct AnalysisValue {
   void clearValue() {
     value = nullptr;
     hasValue = false;
+    recordedType = mlir::Type();
   }
 
   void setSym(SymValue sym) {
@@ -66,16 +72,23 @@ struct AnalysisValue {
   const SymValue *getSym() const { return hasSym ? &symValue : nullptr; }
   bool hasSymValue() const { return hasSym; }
 
+  void setTypeHint(mlir::Type type) { recordedType = type; }
+  bool hasTypeHint() const { return static_cast<bool>(recordedType); }
+
   void setConstantInt(int64_t v) {
     isConstant = true;
     intConstant = v;
     floatConstant.reset();
+    if (!recordedType)
+      recordedType = mlir::Type();
   }
 
   void setConstantFloat(double v) {
     isConstant = true;
     floatConstant = v;
     intConstant.reset();
+    if (!recordedType)
+      recordedType = mlir::Type();
   }
 
   std::optional<int64_t> getConstantInt() const { return intConstant; }
@@ -89,6 +102,7 @@ private:
   bool isConstant = false;
   std::optional<int64_t> intConstant;
   std::optional<double> floatConstant;
+  mlir::Type recordedType;
 };
 
 struct SourceLoc {

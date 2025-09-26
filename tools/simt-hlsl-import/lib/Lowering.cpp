@@ -140,6 +140,43 @@ static mlir::Type parseTypeTag(llvm::StringRef tag, LoweringContext &ctx) {
   return {};
 }
 
+static SymValue makeSymValueForType(mlir::Type type) {
+  SymValue sym;
+  if (!type)
+    return sym;
+
+  if (auto intType = llvm::dyn_cast<mlir::IntegerType>(type)) {
+    sym.kind = SymKind::ScalarInt;
+    sym.bitWidth = intType.getWidth();
+    return sym;
+  }
+
+  if (auto floatType = llvm::dyn_cast<mlir::FloatType>(type)) {
+    sym.kind = SymKind::ScalarFloat;
+    sym.bitWidth = floatType.getWidth();
+    return sym;
+  }
+
+  if (auto vectorType = llvm::dyn_cast<mlir::VectorType>(type)) {
+    sym.kind = SymKind::Vector;
+    sym.elementCount = vectorType.getNumElements();
+    if (auto elemInt =
+            llvm::dyn_cast<mlir::IntegerType>(vectorType.getElementType()))
+      sym.bitWidth = elemInt.getWidth();
+    else if (auto elemFloat =
+                 llvm::dyn_cast<mlir::FloatType>(vectorType.getElementType()))
+      sym.bitWidth = elemFloat.getWidth();
+    return sym;
+  }
+
+  if (type.isa<mlir::IndexType>()) {
+    sym.kind = SymKind::ScalarInt;
+    return sym;
+  }
+
+  return sym;
+}
+
 
 struct EmitInterpreter
     : simt_hlsl_import::LoweringAlgebra<EmitInterpreter, mlir::Value> {
@@ -1380,13 +1417,37 @@ struct AnalysisInterpreter
     return IfScope(ctx, ifOp, carriedVars, hasElseBranch, needsElseRegion, loc);
   }
 
-  Value emitConstantInt(int64_t, const char *,
+  Value emitConstantInt(int64_t value, const char *tag,
                         simt_hlsl_import::SourceLoc) {
-    return {};
+    llvm::StringRef tagRef(tag ? tag : "");
+    mlir::Type type = parseTypeTag(tagRef, ctx);
+    if (!type)
+      type = ctx.builder.getI32Type();
+
+    Value result;
+    result.setTypeHint(type);
+
+    SymValue sym = makeSymValueForType(type);
+    sym.isConst = true;
+    result.setSym(sym);
+    result.setConstantInt(value);
+    return result;
   }
-  Value emitConstantFloat(double, const char *,
+  Value emitConstantFloat(double value, const char *tag,
                           simt_hlsl_import::SourceLoc) {
-    return {};
+    llvm::StringRef tagRef(tag ? tag : "");
+    mlir::Type type = parseTypeTag(tagRef, ctx);
+    if (!type)
+      type = ctx.builder.getF32Type();
+
+    Value result;
+    result.setTypeHint(type);
+
+    SymValue sym = makeSymValueForType(type);
+    sym.isConst = true;
+    result.setSym(sym);
+    result.setConstantFloat(value);
+    return result;
   }
   Value emitArithmetic(simt_hlsl_import::ArithOp op, Value lhs, Value rhs,
                        simt_hlsl_import::SourceLoc loc) {
