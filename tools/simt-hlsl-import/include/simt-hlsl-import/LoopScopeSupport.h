@@ -150,6 +150,14 @@ private:
 
 void cloneContextState(const LoweringContext &parent, LoweringContext &child);
 
+SwitchFrame makeSwitchFrame(LoweringContext &ctx,
+                            llvm::ArrayRef<const clang::ValueDecl *> carriedVars,
+                            llvm::ArrayRef<mlir::Value> currentValues,
+                            mlir::Location loc,
+                            bool hasMatchedDefault = true,
+                            bool executingDefault = false,
+                            bool completedDefault = true);
+
 class LoopScopeState : public LoopScopeProvider {
 public:
   LoopScopeState(LoweringContext &parentCtx,

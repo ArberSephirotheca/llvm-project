@@ -158,6 +158,27 @@ void cloneContextState(const LoweringContext &parent, LoweringContext &child) {
   child.controlStack = parent.controlStack;
 }
 
+SwitchFrame makeSwitchFrame(LoweringContext &ctx,
+                            llvm::ArrayRef<const clang::ValueDecl *> carriedVars,
+                            llvm::ArrayRef<mlir::Value> currentValues,
+                            mlir::Location loc,
+                            bool hasMatchedDefault, bool executingDefault,
+                            bool completedDefault) {
+  SwitchFrame frame;
+  frame.carriedVars.append(carriedVars.begin(), carriedVars.end());
+  frame.hasMatchedIndex = carriedVars.size();
+  frame.executingIndex = carriedVars.size() + 1;
+  frame.completedIndex = carriedVars.size() + 2;
+  frame.initialValues.assign(currentValues.begin(), currentValues.end());
+  frame.breakHasMatchedValue =
+      ctx.builder.create<mlir::arith::ConstantIntOp>(loc, hasMatchedDefault, 1);
+  frame.breakExecutingValue =
+      ctx.builder.create<mlir::arith::ConstantIntOp>(loc, executingDefault, 1);
+  frame.breakCompletedValue =
+      ctx.builder.create<mlir::arith::ConstantIntOp>(loc, completedDefault, 1);
+  return frame;
+}
+
 bool buildLoopSkeleton(LoweringContext &ctx,
                        llvm::ArrayRef<const clang::ValueDecl *> mutatedVars,
                        bool hasFirstIterFlag, mlir::Value firstIterInit,

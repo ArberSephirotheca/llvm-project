@@ -4251,19 +4251,8 @@ static bool lowerSwitchStmt(const clang::SwitchStmt *switchStmt,
 
     auto caseInterp = interp.fork(caseCtx);
 
-    SwitchFrame frame;
-    frame.carriedVars = mutatedVars;
-    frame.hasMatchedIndex = mutatedVars.size();
-    frame.executingIndex = mutatedVars.size() + 1;
-    frame.completedIndex = mutatedVars.size() + 2;
-    frame.initialValues.assign(currentValues.begin(), currentValues.end());
-    frame.breakHasMatchedValue =
-        thenBuilder.create<mlir::arith::ConstantIntOp>(loc, 1, 1);
-    frame.breakExecutingValue =
-        thenBuilder.create<mlir::arith::ConstantIntOp>(loc, 0, 1);
-    frame.breakCompletedValue =
-        thenBuilder.create<mlir::arith::ConstantIntOp>(loc, 1, 1);
-    SwitchScopeGuard caseGuard(caseCtx, std::move(frame));
+    SwitchScopeGuard caseGuard(
+        caseCtx, makeSwitchFrame(caseCtx, mutatedVars, currentValues, loc));
 
     for (const clang::Stmt *caseStmt : info.statements) {
       if (!lowerStatement(caseStmt, caseCtx, caseInterp) || caseCtx.failed)
