@@ -56,6 +56,8 @@ struct SwitchCaseMetadata {
   bool hasBreak = false;
   bool hasFallthrough = false;
   bool hasReturn = false;
+  std::optional<size_t> fallthroughIndex;
+  bool fallsThroughToExit = false;
   llvm::SmallVector<const clang::ValueDecl *, 8> mutatedVars;
 };
 

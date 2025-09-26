@@ -4063,6 +4063,15 @@ static bool lowerSwitchStmt(const clang::SwitchStmt *switchStmt,
                  return lhs < rhs;
                });
 
+    if (!analysisCtx.emittedTerminator && !caseMeta.hasBreak &&
+        !caseMeta.hasReturn) {
+      caseMeta.hasFallthrough = true;
+      if (caseIndex + 1 < cases.size())
+        caseMeta.fallthroughIndex = caseIndex + 1;
+      else
+        caseMeta.fallsThroughToExit = true;
+    }
+
     mutatedSet.insert(caseMutated.begin(), caseMutated.end());
   }
 
@@ -4132,6 +4141,12 @@ static bool lowerSwitchStmt(const clang::SwitchStmt *switchStmt,
     mlir::Value enterCase = ctx.builder.create<mlir::arith::AndIOp>(
         loc, executeCondition, notCompleted);
 
+    const SwitchCaseMetadata *metaCase =
+        caseIndex < switchMeta.cases.size() ? &switchMeta.cases[caseIndex]
+                                            : nullptr;
+    bool caseFallsThrough = metaCase && metaCase->hasFallthrough;
+    bool fallsOutOfSwitch = caseFallsThrough && metaCase->fallsThroughToExit;
+
     llvm::SmallVector<mlir::Type, 8> resultTypes;
     resultTypes.reserve(mutatedVars.size() + 3);
     for (mlir::Value value : currentValues)
@@ -4188,8 +4203,14 @@ static bool lowerSwitchStmt(const clang::SwitchStmt *switchStmt,
       }
       mlir::Value updatedHasMatched = thenBuilder.create<mlir::arith::OrIOp>(
           loc, currentHasMatched, caseMatch);
-      mlir::Value updatedExecuting = thenBuilder.create<mlir::arith::OrIOp>(
-          loc, currentExecuting, caseMatch);
+      mlir::Value updatedExecuting;
+      if (caseFallsThrough && !fallsOutOfSwitch) {
+        updatedExecuting =
+            thenBuilder.create<mlir::arith::ConstantIntOp>(loc, 1, 1);
+      } else {
+        updatedExecuting =
+            thenBuilder.create<mlir::arith::ConstantIntOp>(loc, 0, 1);
+      }
       yieldValues.push_back(updatedHasMatched);
       yieldValues.push_back(updatedExecuting);
       yieldValues.push_back(currentCompleted);
