@@ -2416,6 +2416,39 @@ static typename Interp::Value lowerExprInterp(const clang::Expr *expr,
     }
   }
 
+  if (const auto *arraySub = llvm::dyn_cast<clang::ArraySubscriptExpr>(expr)) {
+    auto resource = lowerExprInterp(arraySub->getBase()->IgnoreParenImpCasts(),
+                                    ctx, interp);
+    if (!resource)
+      return typename Interp::Value();
+
+    auto index = lowerExprInterp(arraySub->getIdx()->IgnoreParenImpCasts(), ctx,
+                                 interp);
+    if (!index)
+      return typename Interp::Value();
+
+    mlir::Type indexType = getValueType(index);
+    if (!mlir::isa<mlir::IntegerType>(indexType)) {
+      ctx.fail("buffer subscript index must be integer");
+      return typename Interp::Value();
+    }
+
+    auto resourceType =
+        mlir::dyn_cast<simt::dialect::ResourceType>(getValueType(resource));
+    if (!resourceType) {
+      ctx.fail("subscript base must be a buffer resource");
+      return typename Interp::Value();
+    }
+
+    const clang::ValueDecl *decl = nullptr;
+    if (const auto *declRef =
+            llvm::dyn_cast<clang::DeclRefExpr>(
+                arraySub->getBase()->IgnoreParenImpCasts()))
+      decl = declRef->getDecl();
+
+    return interp.emitBufferLoad(resource, index, decl, {expr, loc});
+  }
+
   mlir::Value value = lowerExprLegacy(expr, ctx);
   if (!value)
     return typename Interp::Value();
