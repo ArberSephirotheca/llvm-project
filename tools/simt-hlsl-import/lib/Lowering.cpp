@@ -213,14 +213,18 @@ static mlir::Type getValueType(const ValueT &value) {
 struct EmitInterpreter
     : simt_hlsl_import::LoweringAlgebra<EmitInterpreter, mlir::Value> {
 
-  explicit EmitInterpreter(LoweringContext &ctx) : ctx(ctx) {
-    assert(isEmitContext(ctx) && "EmitInterpreter requires anchored builder");
+  explicit EmitInterpreter(LoweringContext &ctx,
+                           bool allowUnanchored = false)
+      : ctx(ctx) {
+    if (!allowUnanchored)
+      assert(isEmitContext(ctx) &&
+             "EmitInterpreter requires anchored builder");
   }
 
   using Value = mlir::Value;
 
   EmitInterpreter fork(LoweringContext &childCtx) {
-    return EmitInterpreter(childCtx);
+    return EmitInterpreter(childCtx, /*allowUnanchored=*/true);
   }
 
   struct IfScope {
