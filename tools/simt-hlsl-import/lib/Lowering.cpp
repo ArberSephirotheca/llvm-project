@@ -36,7 +36,6 @@
 #include <algorithm>
 #include <cassert>
 #include <functional>
-#include <cmath>
 #include <memory>
 #include <optional>
 #include <tuple>
@@ -44,7 +43,6 @@
 #include <string>
 
 #include "llvm/ADT/DenseMap.h"
-#include "llvm/ADT/APInt.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
@@ -1434,125 +1432,69 @@ struct AnalysisInterpreter
   }
   Value emitArithmetic(simt_hlsl_import::ArithOp op, Value lhs, Value rhs,
                        simt_hlsl_import::SourceLoc loc) {
-    (void)loc;
+    mlir::Location mlirLoc = resolveLoc(loc, ctx);
 
-    Value result;
-    mlir::Type type = lhs.getType();
-    if (!type)
-      type = rhs.getType();
-    if (!type) {
-      ctx.fail("unsupported arithmetic operation for type");
-      return {};
+    if (auto intType = mlir::dyn_cast<mlir::IntegerType>(lhs.getType())) {
+      switch (op) {
+      case simt_hlsl_import::ArithOp::Add:
+        return ctx.builder.create<mlir::arith::AddIOp>(mlirLoc, lhs, rhs)
+            .getResult();
+      case simt_hlsl_import::ArithOp::Sub:
+        return ctx.builder.create<mlir::arith::SubIOp>(mlirLoc, lhs, rhs)
+            .getResult();
+      case simt_hlsl_import::ArithOp::Mul:
+        return ctx.builder.create<mlir::arith::MulIOp>(mlirLoc, lhs, rhs)
+            .getResult();
+      case simt_hlsl_import::ArithOp::Div:
+        return ctx.builder.create<mlir::arith::DivSIOp>(mlirLoc, lhs, rhs)
+            .getResult();
+      case simt_hlsl_import::ArithOp::Rem:
+        return ctx.builder.create<mlir::arith::RemSIOp>(mlirLoc, lhs, rhs)
+            .getResult();
+      case simt_hlsl_import::ArithOp::Neg: {
+        auto zero = ctx.builder.create<mlir::arith::ConstantIntOp>(
+            mlirLoc, 0, intType.getWidth());
+        return ctx.builder
+            .create<mlir::arith::SubIOp>(mlirLoc, zero.getResult(), lhs)
+            .getResult();
+      }
+      case simt_hlsl_import::ArithOp::BitAnd:
+        return ctx.builder.create<mlir::arith::AndIOp>(mlirLoc, lhs, rhs)
+            .getResult();
+      case simt_hlsl_import::ArithOp::BitOr:
+        return ctx.builder.create<mlir::arith::OrIOp>(mlirLoc, lhs, rhs)
+            .getResult();
+      case simt_hlsl_import::ArithOp::BitXor:
+        return ctx.builder.create<mlir::arith::XOrIOp>(mlirLoc, lhs, rhs)
+            .getResult();
+      }
     }
 
-    result.setTypeHint(type);
-    result.setSym(makeSymValueForType(type));
-
-    auto lhsInt = lhs.getConstantInt();
-    auto rhsInt = rhs.getConstantInt();
-    auto lhsFloat = lhs.getConstantFloat();
-    auto rhsFloat = rhs.getConstantFloat();
-
-    if (auto intType = llvm::dyn_cast<mlir::IntegerType>(type);
-        intType || mlir::isa<mlir::IndexType>(type)) {
-      if (lhsInt && (op == simt_hlsl_import::ArithOp::Neg || rhsInt)) {
-        unsigned width = intType ? intType.getWidth() : 64;
-        llvm::APInt lhsValue(width, static_cast<uint64_t>(*lhsInt), true);
-        llvm::APInt rhsValue(width, static_cast<uint64_t>(rhsInt.value_or(0)),
-                             true);
-        llvm::APInt computed(width, 0, false);
-
-        switch (op) {
-        case simt_hlsl_import::ArithOp::Add:
-          computed = lhsValue + rhsValue;
-          break;
-        case simt_hlsl_import::ArithOp::Sub:
-          computed = lhsValue - rhsValue;
-          break;
-        case simt_hlsl_import::ArithOp::Mul:
-          computed = lhsValue * rhsValue;
-          break;
-        case simt_hlsl_import::ArithOp::Div:
-          if (rhsInt && rhsValue != 0)
-            computed = lhsValue.sdiv(rhsValue);
-          else
-            return result;
-          break;
-        case simt_hlsl_import::ArithOp::Rem:
-          if (rhsInt && rhsValue != 0)
-            computed = lhsValue.srem(rhsValue);
-          else
-            return result;
-          break;
-        case simt_hlsl_import::ArithOp::Neg:
-          computed = -lhsValue;
-          break;
-        case simt_hlsl_import::ArithOp::BitAnd:
-          if (!rhsInt)
-            return result;
-          computed = lhsValue & rhsValue;
-          break;
-        case simt_hlsl_import::ArithOp::BitOr:
-          if (!rhsInt)
-            return result;
-          computed = lhsValue | rhsValue;
-          break;
-        case simt_hlsl_import::ArithOp::BitXor:
-          if (!rhsInt)
-            return result;
-          computed = lhsValue ^ rhsValue;
-          break;
-        }
-
-        if (computed.getBitWidth() <= 64)
-          result.setConstantInt(computed.getSExtValue());
-        return result;
+    if (mlir::isa<mlir::FloatType>(lhs.getType())) {
+      switch (op) {
+      case simt_hlsl_import::ArithOp::Add:
+        return ctx.builder.create<mlir::arith::AddFOp>(mlirLoc, lhs, rhs)
+            .getResult();
+      case simt_hlsl_import::ArithOp::Sub:
+        return ctx.builder.create<mlir::arith::SubFOp>(mlirLoc, lhs, rhs)
+            .getResult();
+      case simt_hlsl_import::ArithOp::Mul:
+        return ctx.builder.create<mlir::arith::MulFOp>(mlirLoc, lhs, rhs)
+            .getResult();
+      case simt_hlsl_import::ArithOp::Div:
+        return ctx.builder.create<mlir::arith::DivFOp>(mlirLoc, lhs, rhs)
+            .getResult();
+      case simt_hlsl_import::ArithOp::Rem:
+        return ctx.builder.create<mlir::arith::RemFOp>(mlirLoc, lhs, rhs)
+            .getResult();
+      case simt_hlsl_import::ArithOp::Neg:
+        return ctx.builder.create<mlir::arith::NegFOp>(mlirLoc, lhs)
+            .getResult();
+      case simt_hlsl_import::ArithOp::BitAnd:
+      case simt_hlsl_import::ArithOp::BitOr:
+      case simt_hlsl_import::ArithOp::BitXor:
+        break;
       }
-      return result;
-    }
-
-    if (auto floatType = llvm::dyn_cast<mlir::FloatType>(type)) {
-      if (lhsFloat && (op == simt_hlsl_import::ArithOp::Neg || rhsFloat)) {
-        double lhsVal = *lhsFloat;
-        double rhsVal = rhsFloat.value_or(0.0);
-        double computed = lhsVal;
-
-        switch (op) {
-        case simt_hlsl_import::ArithOp::Add:
-          computed = lhsVal + rhsVal;
-          break;
-        case simt_hlsl_import::ArithOp::Sub:
-          computed = lhsVal - rhsVal;
-          break;
-        case simt_hlsl_import::ArithOp::Mul:
-          computed = lhsVal * rhsVal;
-          break;
-        case simt_hlsl_import::ArithOp::Div:
-          if (rhsFloat && rhsVal != 0.0)
-            computed = lhsVal / rhsVal;
-          else
-            return result;
-          break;
-        case simt_hlsl_import::ArithOp::Rem:
-          if (rhsFloat && rhsVal != 0.0)
-            computed = std::remainder(lhsVal, rhsVal);
-          else
-            return result;
-          break;
-        case simt_hlsl_import::ArithOp::Neg:
-          computed = -lhsVal;
-          break;
-        case simt_hlsl_import::ArithOp::BitAnd:
-        case simt_hlsl_import::ArithOp::BitOr:
-        case simt_hlsl_import::ArithOp::BitXor:
-          ctx.fail("bitwise operation requires integer operands");
-          return {};
-        }
-
-        result.setConstantFloat(computed);
-        return result;
-      }
-      return result;
     }
 
     ctx.fail("unsupported arithmetic operation for type");
@@ -1560,83 +1502,59 @@ struct AnalysisInterpreter
   }
   Value emitCompare(simt_hlsl_import::CmpOp op, Value lhs, Value rhs,
                     simt_hlsl_import::SourceLoc loc) {
-    (void)loc;
+    mlir::Location mlirLoc = resolveLoc(loc, ctx);
     mlir::Type type = lhs.getType();
-    if (!type)
-      type = rhs.getType();
-
-    mlir::Type boolType = ctx.builder.getI1Type();
-    Value result;
-    result.setTypeHint(boolType);
-    result.setSym(makeSymValueForType(boolType));
 
     if (mlir::isa<mlir::IntegerType>(type) || mlir::isa<mlir::IndexType>(type)) {
-      if (auto lhsConst = lhs.getConstantInt(); lhsConst) {
-        if (auto rhsConst = rhs.getConstantInt(); rhsConst) {
-          unsigned width = mlir::isa<mlir::IntegerType>(type)
-                               ? llvm::cast<mlir::IntegerType>(type).getWidth()
-                               : 64;
-          llvm::APInt lhsValue(width, static_cast<uint64_t>(*lhsConst), true);
-          llvm::APInt rhsValue(width, static_cast<uint64_t>(*rhsConst), true);
-          bool comparison = false;
-          switch (op) {
-          case simt_hlsl_import::CmpOp::EQ:
-            comparison = lhsValue == rhsValue;
-            break;
-          case simt_hlsl_import::CmpOp::NE:
-            comparison = lhsValue != rhsValue;
-            break;
-          case simt_hlsl_import::CmpOp::LT:
-            comparison = lhsValue.slt(rhsValue);
-            break;
-          case simt_hlsl_import::CmpOp::LE:
-            comparison = lhsValue.sle(rhsValue);
-            break;
-          case simt_hlsl_import::CmpOp::GT:
-            comparison = lhsValue.sgt(rhsValue);
-            break;
-          case simt_hlsl_import::CmpOp::GE:
-            comparison = lhsValue.sge(rhsValue);
-            break;
-          }
-          result.setConstantInt(comparison ? 1 : 0);
-          return result;
-        }
+      mlir::arith::CmpIPredicate pred;
+      switch (op) {
+      case simt_hlsl_import::CmpOp::EQ:
+        pred = mlir::arith::CmpIPredicate::eq;
+        break;
+      case simt_hlsl_import::CmpOp::NE:
+        pred = mlir::arith::CmpIPredicate::ne;
+        break;
+      case simt_hlsl_import::CmpOp::LT:
+        pred = mlir::arith::CmpIPredicate::slt;
+        break;
+      case simt_hlsl_import::CmpOp::LE:
+        pred = mlir::arith::CmpIPredicate::sle;
+        break;
+      case simt_hlsl_import::CmpOp::GT:
+        pred = mlir::arith::CmpIPredicate::sgt;
+        break;
+      case simt_hlsl_import::CmpOp::GE:
+        pred = mlir::arith::CmpIPredicate::sge;
+        break;
       }
-      return result;
+      return ctx.builder.create<mlir::arith::CmpIOp>(mlirLoc, pred, lhs, rhs)
+          .getResult();
     }
 
-    if (auto floatType = llvm::dyn_cast<mlir::FloatType>(type)) {
-      auto lhsConst = lhs.getConstantFloat();
-      auto rhsConst = rhs.getConstantFloat();
-      if (lhsConst && rhsConst) {
-        double lhsVal = *lhsConst;
-        double rhsVal = *rhsConst;
-        bool comparison = false;
-        switch (op) {
-        case simt_hlsl_import::CmpOp::EQ:
-          comparison = lhsVal == rhsVal;
-          break;
-        case simt_hlsl_import::CmpOp::NE:
-          comparison = lhsVal != rhsVal;
-          break;
-        case simt_hlsl_import::CmpOp::LT:
-          comparison = lhsVal < rhsVal;
-          break;
-        case simt_hlsl_import::CmpOp::LE:
-          comparison = lhsVal <= rhsVal;
-          break;
-        case simt_hlsl_import::CmpOp::GT:
-          comparison = lhsVal > rhsVal;
-          break;
-        case simt_hlsl_import::CmpOp::GE:
-          comparison = lhsVal >= rhsVal;
-          break;
-        }
-        result.setConstantInt(comparison ? 1 : 0);
-        return result;
+    if (mlir::isa<mlir::FloatType>(type)) {
+      mlir::arith::CmpFPredicate pred;
+      switch (op) {
+      case simt_hlsl_import::CmpOp::EQ:
+        pred = mlir::arith::CmpFPredicate::OEQ;
+        break;
+      case simt_hlsl_import::CmpOp::NE:
+        pred = mlir::arith::CmpFPredicate::UNE;
+        break;
+      case simt_hlsl_import::CmpOp::LT:
+        pred = mlir::arith::CmpFPredicate::OLT;
+        break;
+      case simt_hlsl_import::CmpOp::LE:
+        pred = mlir::arith::CmpFPredicate::OLE;
+        break;
+      case simt_hlsl_import::CmpOp::GT:
+        pred = mlir::arith::CmpFPredicate::OGT;
+        break;
+      case simt_hlsl_import::CmpOp::GE:
+        pred = mlir::arith::CmpFPredicate::OGE;
+        break;
       }
-      return result;
+      return ctx.builder.create<mlir::arith::CmpFOp>(mlirLoc, pred, lhs, rhs)
+          .getResult();
     }
 
     ctx.fail("unsupported compare operands");
@@ -1644,35 +1562,9 @@ struct AnalysisInterpreter
   }
   Value emitSelect(Value cond, Value trueV, Value falseV,
                    simt_hlsl_import::SourceLoc loc) {
-    (void)loc;
-    if (auto condConst = cond.getConstantInt())
-      return *condConst ? trueV : falseV;
-
-    Value result;
-    mlir::Type resultType = trueV.getType();
-    if (!resultType)
-      resultType = falseV.getType();
-    if (resultType)
-      result.setTypeHint(resultType);
-
-    if (const SymValue *sym = trueV.getSym())
-      result.setSym(*sym);
-    else if (const SymValue *sym = falseV.getSym())
-      result.setSym(*sym);
-    else if (resultType)
-      result.setSym(makeSymValueForType(resultType));
-
-    if (auto lhsConst = trueV.getConstantInt(); lhsConst) {
-      if (auto rhsConst = falseV.getConstantInt(); rhsConst && *rhsConst == *lhsConst)
-        result.setConstantInt(*lhsConst);
-    }
-
-    if (auto lhsConst = trueV.getConstantFloat(); lhsConst) {
-      if (auto rhsConst = falseV.getConstantFloat(); rhsConst && *rhsConst == *lhsConst)
-        result.setConstantFloat(*lhsConst);
-    }
-
-    return result;
+    return ctx.builder
+        .create<mlir::arith::SelectOp>(resolveLoc(loc, ctx), cond, trueV, falseV)
+        .getResult();
   }
 
   template <typename RHSMake>
@@ -1812,18 +1704,14 @@ struct AnalysisInterpreter
   Value emitBufferLoad(Value resourceHandle, Value index,
                        const clang::ValueDecl *decl,
                        simt_hlsl_import::SourceLoc loc) {
-    (void)loc;
-    auto resourceType =
-        mlir::dyn_cast<simt::dialect::ResourceType>(resourceHandle.getType());
-    if (!resourceType) {
-      ctx.fail("buffer load requires resource handle");
-      return {};
-    }
-
-    Value result;
-    mlir::Type elementType = resourceType.getElementType();
-    result.setTypeHint(elementType);
-    result.setSym(makeSymValueForType(elementType));
+    mlir::Location mlirLoc = resolveLoc(loc, ctx);
+    mlir::Value load =
+        ctx.builder
+            .create<simt::dialect::BufferLoadOp>(mlirLoc, resourceHandle,
+                                                 index)
+            .getResult();
+    simt_hlsl_import::AnalysisValue result =
+        simt_hlsl_import::AnalysisValue::fromValue(load);
     if (decl) {
       if (auto symIt = ctx.symValueMap.find(decl);
           symIt != ctx.symValueMap.end())
