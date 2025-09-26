@@ -2174,15 +2174,289 @@ lowerBufferAccessOperands(const clang::CXXOperatorCallExpr *opCall,
   return getBufferAccessInfo(opCall->getArg(0), opCall->getArg(1), ctx);
 }
 
+static mlir::Location getLocation(const clang::Stmt *stmt,
+                                  LoweringContext &ctx);
+
+template <typename Interp>
+static typename Interp::Value lowerExprInterp(const clang::Expr *expr,
+                                              LoweringContext &ctx,
+                                              Interp &interp);
+
+template <typename Interp>
+static std::optional<typename Interp::Value>
+lowerWaveIntrinsicCallInterp(const clang::CallExpr *call,
+                             LoweringContext &ctx, Interp &interp);
+
+template <typename Interp>
+static std::optional<
+    std::tuple<typename Interp::Value, typename Interp::Value,
+               simt::dialect::ResourceType, const clang::ValueDecl *>>
+getBufferAccessInfoFromLValueInterp(const clang::Expr *expr,
+                                    LoweringContext &ctx, Interp &interp) {
+  if (!expr)
+    return std::nullopt;
+
+  expr = expr->IgnoreParenImpCasts();
+
+  if (const auto *outExpr = llvm::dyn_cast<clang::HLSLOutArgExpr>(expr))
+    expr = outExpr->getArgLValue()->IgnoreParenImpCasts();
+
+  if (const auto *subscript =
+          llvm::dyn_cast<clang::CXXOperatorCallExpr>(expr)) {
+    if (subscript->getOperator() == clang::OO_Subscript &&
+        subscript->getNumArgs() >= 2) {
+      auto lowerSubExpr = [&](const clang::Expr *subExpr)
+          -> typename Interp::Value {
+        return lowerExprInterp(subExpr, ctx, interp);
+      };
+      return lowerBufferAccessInterp<typename Interp::Value>(
+          subscript->getArg(0), subscript->getArg(1), ctx, lowerSubExpr);
+    }
+  }
+
+  if (const auto *arraySub = llvm::dyn_cast<clang::ArraySubscriptExpr>(expr)) {
+    auto lowerSubExpr = [&](const clang::Expr *subExpr) -> typename Interp::Value {
+      return lowerExprInterp(subExpr, ctx, interp);
+    };
+    return lowerBufferAccessInterp<typename Interp::Value>(
+        arraySub->getBase(), arraySub->getIdx(), ctx, lowerSubExpr);
+  }
+
+  return std::nullopt;
+}
+
+template <typename Interp>
+static std::optional<typename Interp::Value>
+lowerAtomicCallInterp(const clang::CallExpr *call, LoweringContext &ctx,
+                      Interp &interp) {
+  using ValueT = typename Interp::Value;
+
+  if (!call)
+    return std::nullopt;
+
+  const auto *callee = call->getDirectCallee();
+  if (!callee)
+    return std::nullopt;
+
+  auto kind =
+      llvm::StringSwitch<std::optional<simt_hlsl_import::BufferAtomicOp>>(
+          callee->getName())
+          .Case("InterlockedAdd", simt_hlsl_import::BufferAtomicOp::Add)
+          .Case("InterlockedExchange",
+                 simt_hlsl_import::BufferAtomicOp::Exchange)
+          .Case("InterlockedCompareExchange",
+                 simt_hlsl_import::BufferAtomicOp::CompareExchange)
+          .Case("InterlockedMin", simt_hlsl_import::BufferAtomicOp::Min)
+          .Case("InterlockedMax", simt_hlsl_import::BufferAtomicOp::Max)
+          .Case("InterlockedAnd", simt_hlsl_import::BufferAtomicOp::And)
+          .Case("InterlockedOr", simt_hlsl_import::BufferAtomicOp::Or)
+          .Case("InterlockedXor", simt_hlsl_import::BufferAtomicOp::Xor)
+          .Default(std::nullopt);
+  if (!kind)
+    return std::nullopt;
+
+  unsigned numArgs = call->getNumArgs();
+  unsigned valueOperandCount =
+      *kind == simt_hlsl_import::BufferAtomicOp::CompareExchange ? 2U : 1U;
+  unsigned baseArgCount = 1 + valueOperandCount;
+  if (numArgs != baseArgCount && numArgs != baseArgCount + 1) {
+    ctx.fail("unexpected argument count for atomic call");
+    return std::optional<ValueT>(ValueT());
+  }
+
+  mlir::Location loc = getLocation(call, ctx);
+
+  const clang::Expr *destArg = call->getArg(0);
+  if (!destArg) {
+    ctx.fail("atomic call missing destination argument");
+    return std::optional<ValueT>(ValueT());
+  }
+
+  auto destInfo = getBufferAccessInfoFromLValueInterp(destArg, ctx, interp);
+  if (!destInfo) {
+    ctx.fail("atomic destination must be a buffer element");
+    return std::optional<ValueT>(ValueT());
+  }
+  auto [resource, index, resourceType, decl] = *destInfo;
+  (void)resourceType;
+
+  unsigned argIndex = 1;
+  ValueT compareValue;
+  ValueT valueValue;
+  if (*kind == simt_hlsl_import::BufferAtomicOp::CompareExchange) {
+    compareValue = lowerExprInterp(call->getArg(argIndex++), ctx, interp);
+    if (!compareValue)
+      return std::optional<ValueT>(ValueT());
+    valueValue = lowerExprInterp(call->getArg(argIndex++), ctx, interp);
+    if (!valueValue)
+      return std::optional<ValueT>(ValueT());
+  } else {
+    valueValue = lowerExprInterp(call->getArg(argIndex++), ctx, interp);
+    if (!valueValue)
+      return std::optional<ValueT>(ValueT());
+  }
+
+  const clang::Expr *outArg = nullptr;
+  if (numArgs == baseArgCount + 1)
+    outArg = call->getArg(argIndex++);
+
+  ValueT oldValue = interp.emitAtomic(*kind, resource, index, valueValue,
+                                      compareValue, decl, {call, loc});
+  if (!oldValue && ctx.failed)
+    return std::optional<ValueT>(ValueT());
+
+  if (decl)
+    ctx.mutatedVars.insert(decl);
+
+  if (outArg) {
+    const clang::Expr *stripped = outArg->IgnoreParenImpCasts();
+    if (const auto *outExpr =
+            llvm::dyn_cast<clang::HLSLOutArgExpr>(stripped))
+      stripped = outExpr->getArgLValue()->IgnoreParenImpCasts();
+    const clang::ValueDecl *outDecl = nullptr;
+    if (const auto *declRef =
+            llvm::dyn_cast<clang::DeclRefExpr>(stripped))
+      outDecl = declRef->getDecl();
+    if (!outDecl) {
+      ctx.fail("atomic original value argument must reference a variable");
+      return std::optional<ValueT>(ValueT());
+    }
+    if (mlir::Value oldMlir = unwrapValue(oldValue))
+      ctx.valueMap[outDecl] = oldMlir;
+    ctx.symValueMap[outDecl] = makeSymValue(outDecl);
+    ctx.mutatedVars.insert(outDecl);
+  }
+
+  return std::optional<ValueT>(oldValue);
+}
+
+template <typename Interp>
+static std::optional<typename Interp::Value>
+lowerAtomicMemberCallInterp(const clang::CXXMemberCallExpr *call,
+                            LoweringContext &ctx, Interp &interp) {
+  using ValueT = typename Interp::Value;
+
+  if (!call)
+    return std::nullopt;
+
+  const auto *methodDecl = call->getMethodDecl();
+  if (!methodDecl)
+    return std::nullopt;
+
+  auto kind =
+      llvm::StringSwitch<std::optional<simt_hlsl_import::BufferAtomicOp>>(
+          methodDecl->getName())
+          .Case("InterlockedAdd", simt_hlsl_import::BufferAtomicOp::Add)
+          .Case("InterlockedExchange",
+                 simt_hlsl_import::BufferAtomicOp::Exchange)
+          .Case("InterlockedCompareExchange",
+                 simt_hlsl_import::BufferAtomicOp::CompareExchange)
+          .Case("InterlockedMin", simt_hlsl_import::BufferAtomicOp::Min)
+          .Case("InterlockedMax", simt_hlsl_import::BufferAtomicOp::Max)
+          .Case("InterlockedAnd", simt_hlsl_import::BufferAtomicOp::And)
+          .Case("InterlockedOr", simt_hlsl_import::BufferAtomicOp::Or)
+          .Case("InterlockedXor", simt_hlsl_import::BufferAtomicOp::Xor)
+          .Default(std::nullopt);
+  if (!kind)
+    return std::nullopt;
+
+  const clang::Expr *objectExpr = call->getImplicitObjectArgument();
+  if (!objectExpr) {
+    ctx.fail("atomic call requires an object expression");
+    return std::optional<ValueT>(ValueT());
+  }
+
+  ValueT resource = lowerExprInterp(objectExpr, ctx, interp);
+  if (!resource)
+    return std::optional<ValueT>(ValueT());
+
+  auto resourceType =
+      mlir::dyn_cast<simt::dialect::ResourceType>(getValueType(resource));
+  if (!resourceType) {
+    ctx.fail("atomic call requires a buffer resource");
+    return std::optional<ValueT>(ValueT());
+  }
+  (void)resourceType;
+
+  unsigned numArgs = call->getNumArgs();
+  unsigned valueOperandCount =
+      *kind == simt_hlsl_import::BufferAtomicOp::CompareExchange ? 2U : 1U;
+  unsigned baseArgCount = 1 + valueOperandCount;
+  if (numArgs != baseArgCount && numArgs != baseArgCount + 1) {
+    ctx.fail("unexpected argument count for atomic call");
+    return std::optional<ValueT>(ValueT());
+  }
+
+  mlir::Location loc = getLocation(call, ctx);
+
+  unsigned argIndex = 0;
+  ValueT indexValue = lowerExprInterp(call->getArg(argIndex++), ctx, interp);
+  if (!indexValue)
+    return std::optional<ValueT>(ValueT());
+
+  ValueT compareValue;
+  ValueT valueValue;
+  if (*kind == simt_hlsl_import::BufferAtomicOp::CompareExchange) {
+    compareValue = lowerExprInterp(call->getArg(argIndex++), ctx, interp);
+    if (!compareValue)
+      return std::optional<ValueT>(ValueT());
+    valueValue = lowerExprInterp(call->getArg(argIndex++), ctx, interp);
+    if (!valueValue)
+      return std::optional<ValueT>(ValueT());
+  } else {
+    valueValue = lowerExprInterp(call->getArg(argIndex++), ctx, interp);
+    if (!valueValue)
+      return std::optional<ValueT>(ValueT());
+  }
+
+  const clang::Expr *outArg = nullptr;
+  if (numArgs == baseArgCount + 1)
+    outArg = call->getArg(argIndex++);
+
+  const clang::ValueDecl *objectDecl = nullptr;
+  if (const auto *declRef = llvm::dyn_cast<clang::DeclRefExpr>(
+          objectExpr->IgnoreParenImpCasts()))
+    objectDecl = declRef->getDecl();
+
+  ValueT oldValue = interp.emitAtomic(*kind, resource, indexValue, valueValue,
+                                      compareValue, /*resourceDecl=*/nullptr,
+                                      {call, loc});
+  if (!oldValue && ctx.failed)
+    return std::optional<ValueT>(ValueT());
+
+  if (objectDecl) {
+    ctx.mutatedVars.insert(objectDecl);
+    ctx.symValueMap[objectDecl] = makeSymValue(objectDecl);
+  }
+
+  if (outArg) {
+    const clang::Expr *stripped = outArg->IgnoreParenImpCasts();
+    if (const auto *outExpr =
+            llvm::dyn_cast<clang::HLSLOutArgExpr>(stripped))
+      stripped = outExpr->getArgLValue()->IgnoreParenImpCasts();
+    const clang::ValueDecl *outDecl = nullptr;
+    if (const auto *declRef =
+            llvm::dyn_cast<clang::DeclRefExpr>(stripped))
+      outDecl = declRef->getDecl();
+    if (!outDecl) {
+      ctx.fail("atomic original value argument must reference a variable");
+      return std::optional<ValueT>(ValueT());
+    }
+    if (mlir::Value oldMlir = unwrapValue(oldValue))
+      ctx.valueMap[outDecl] = oldMlir;
+    ctx.symValueMap[outDecl] = makeSymValue(outDecl);
+    ctx.mutatedVars.insert(outDecl);
+  }
+
+  return std::optional<ValueT>(oldValue);
+}
+
 static mlir::Value lowerAssignment(const clang::BinaryOperator *binOp,
                                    LoweringContext &ctx);
 
 static std::optional<mlir::Value>
 lowerAtomicMemberCall(const clang::CXXMemberCallExpr *call,
                       LoweringContext &ctx);
-
-static mlir::Location getLocation(const clang::Stmt *stmt,
-                                  LoweringContext &ctx);
 
 template <typename Interp>
 static typename Interp::Value lowerExprInterp(const clang::Expr *expr,
@@ -2582,156 +2856,21 @@ lowerWaveIntrinsicCallInterp(const clang::CallExpr *call, LoweringContext &ctx,
   return std::nullopt;
 }
 
-static std::optional<BufferAccessInfo>
-getBufferAccessInfoFromLValue(const clang::Expr *expr,
-                              LoweringContext &ctx) {
-  if (!expr)
-    return std::nullopt;
-
-  expr = expr->IgnoreParenImpCasts();
-
-  if (const auto *subscript =
-          llvm::dyn_cast<clang::CXXOperatorCallExpr>(expr)) {
-    if (subscript->getOperator() == clang::OO_Subscript)
-      return lowerBufferAccessOperands(subscript, ctx);
-  }
-
-  if (const auto *arraySub = llvm::dyn_cast<clang::ArraySubscriptExpr>(expr))
-    return getBufferAccessInfo(arraySub->getBase(), arraySub->getIdx(), ctx);
-
-  return std::nullopt;
-}
-
 static std::optional<mlir::Value>
 lowerAtomicCall(const clang::CallExpr *call, LoweringContext &ctx) {
   if (!call)
     return std::nullopt;
 
-  const auto *callee = call->getDirectCallee();
-  if (!callee)
-    return std::nullopt;
-
-  auto kind =
-      llvm::StringSwitch<std::optional<simt_hlsl_import::BufferAtomicOp>>(
-          callee->getName())
-          .Case("InterlockedAdd", simt_hlsl_import::BufferAtomicOp::Add)
-          .Case("InterlockedExchange",
-                 simt_hlsl_import::BufferAtomicOp::Exchange)
-          .Case("InterlockedCompareExchange",
-                 simt_hlsl_import::BufferAtomicOp::CompareExchange)
-          .Case("InterlockedMin", simt_hlsl_import::BufferAtomicOp::Min)
-          .Case("InterlockedMax", simt_hlsl_import::BufferAtomicOp::Max)
-          .Case("InterlockedAnd", simt_hlsl_import::BufferAtomicOp::And)
-          .Case("InterlockedOr", simt_hlsl_import::BufferAtomicOp::Or)
-          .Case("InterlockedXor", simt_hlsl_import::BufferAtomicOp::Xor)
-          .Default(std::nullopt);
-  if (!kind)
-    return std::nullopt;
-
-  unsigned numArgs = call->getNumArgs();
-  unsigned valueOperandCount =
-      *kind == simt_hlsl_import::BufferAtomicOp::CompareExchange ? 2U : 1U;
-  unsigned baseArgCount = 1 + valueOperandCount;
-  if (numArgs != baseArgCount && numArgs != baseArgCount + 1)
-    return ctx.fail("unexpected argument count for atomic call"),
-           std::optional<mlir::Value>(mlir::Value());
-
-  const clang::Expr *destArg = call->getArg(0);
-  if (!destArg)
-    return ctx.fail("atomic call missing destination argument"),
-           std::optional<mlir::Value>(mlir::Value());
-
-  destArg = destArg->IgnoreParenImpCasts();
-  if (const auto *outExpr =
-          llvm::dyn_cast<clang::HLSLOutArgExpr>(destArg))
-    destArg = outExpr->getArgLValue()->IgnoreParenImpCasts();
-
-  auto infoOpt = getBufferAccessInfoFromLValue(destArg, ctx);
-  if (!infoOpt)
-    return ctx.fail("atomic destination must be a buffer element"),
-           std::optional<mlir::Value>(mlir::Value());
-
-  BufferAccessInfo info = *infoOpt;
-  mlir::Location loc = getLocation(call, ctx);
-
-  unsigned argIndex = 1;
-
-  mlir::Value compareValue;
-  mlir::Value valueValue;
-  if (*kind == simt_hlsl_import::BufferAtomicOp::CompareExchange) {
-    compareValue = lowerExpr(call->getArg(argIndex++), ctx);
-    if (!compareValue)
-      return mlir::Value();
-    valueValue = lowerExpr(call->getArg(argIndex++), ctx);
-    if (!valueValue)
-      return mlir::Value();
-  } else {
-    valueValue = lowerExpr(call->getArg(argIndex++), ctx);
-    if (!valueValue)
-      return mlir::Value();
-  }
-
-  const clang::Expr *outArg = nullptr;
-  if (numArgs == baseArgCount + 1)
-    outArg = call->getArg(argIndex++);
-
   if (isEmitContext(ctx)) {
     EmitInterpreter interp(ctx);
-    mlir::Value oldValue = interp.emitAtomic(
-        *kind, info.resource, info.index, valueValue, compareValue, info.decl,
-        {call, loc});
-    if (!oldValue && ctx.failed)
-      return mlir::Value();
-
-    if (info.decl)
-      ctx.mutatedVars.insert(info.decl);
-
-    if (outArg) {
-      const clang::Expr *stripped = outArg->IgnoreParenImpCasts();
-      if (const auto *outExpr =
-              llvm::dyn_cast<clang::HLSLOutArgExpr>(stripped))
-        stripped = outExpr->getArgLValue()->IgnoreParenImpCasts();
-      const clang::ValueDecl *outDecl = nullptr;
-      if (const auto *declRef =
-              llvm::dyn_cast<clang::DeclRefExpr>(stripped))
-        outDecl = declRef->getDecl();
-      if (!outDecl)
-        return ctx.fail("atomic original value argument must reference a "
-                        "variable"),
-               std::optional<mlir::Value>(mlir::Value());
-      ctx.valueMap[outDecl] = oldValue;
-      ctx.symValueMap[outDecl] = makeSymValue(outDecl);
-      ctx.mutatedVars.insert(outDecl);
-    }
-
-    return mlir::Value();
+    return lowerAtomicCallInterp(call, ctx, interp);
   }
 
   AnalysisInterpreter interp(ctx);
-  interp.emitAtomic(*kind, info.resource, info.index, valueValue, compareValue,
-                    info.decl, {call, loc});
-
-  if (info.decl)
-    ctx.mutatedVars.insert(info.decl);
-
-  if (outArg) {
-    const clang::Expr *stripped = outArg->IgnoreParenImpCasts();
-    if (const auto *outExpr =
-            llvm::dyn_cast<clang::HLSLOutArgExpr>(stripped))
-      stripped = outExpr->getArgLValue()->IgnoreParenImpCasts();
-    const clang::ValueDecl *outDecl = nullptr;
-    if (const auto *declRef =
-            llvm::dyn_cast<clang::DeclRefExpr>(stripped))
-      outDecl = declRef->getDecl();
-    if (!outDecl)
-      return ctx.fail("atomic original value argument must reference a "
-                      "variable"),
-             std::optional<mlir::Value>(mlir::Value());
-    ctx.symValueMap[outDecl] = makeSymValue(outDecl);
-    ctx.mutatedVars.insert(outDecl);
-  }
-
-  return mlir::Value();
+  auto result = lowerAtomicCallInterp(call, ctx, interp);
+  if (!result)
+    return std::nullopt;
+  return std::optional<mlir::Value>(result->getValueOrNull());
 }
 
 static std::optional<mlir::Value>
@@ -3460,145 +3599,16 @@ lowerAtomicMemberCall(const clang::CXXMemberCallExpr *call,
                       LoweringContext &ctx) {
   if (!call)
     return std::nullopt;
-
-  const auto *methodDecl = call->getMethodDecl();
-  if (!methodDecl)
-    return std::nullopt;
-
-  auto kind =
-      llvm::StringSwitch<std::optional<simt_hlsl_import::BufferAtomicOp>>(
-          methodDecl->getName())
-          .Case("InterlockedAdd", simt_hlsl_import::BufferAtomicOp::Add)
-          .Case("InterlockedExchange",
-                 simt_hlsl_import::BufferAtomicOp::Exchange)
-          .Case("InterlockedCompareExchange",
-                 simt_hlsl_import::BufferAtomicOp::CompareExchange)
-          .Case("InterlockedMin", simt_hlsl_import::BufferAtomicOp::Min)
-          .Case("InterlockedMax", simt_hlsl_import::BufferAtomicOp::Max)
-          .Case("InterlockedAnd", simt_hlsl_import::BufferAtomicOp::And)
-          .Case("InterlockedOr", simt_hlsl_import::BufferAtomicOp::Or)
-          .Case("InterlockedXor", simt_hlsl_import::BufferAtomicOp::Xor)
-          .Default(std::nullopt);
-  if (!kind)
-    return std::nullopt;
-
-  const clang::Expr *objectExpr = call->getImplicitObjectArgument();
-  if (!objectExpr)
-    return ctx.fail("atomic call requires an object expression"),
-           std::optional<mlir::Value>(mlir::Value());
-
-  mlir::Value resource = lowerExpr(objectExpr, ctx);
-  if (!resource)
-    return mlir::Value();
-
-  auto resourceType =
-      mlir::dyn_cast<simt::dialect::ResourceType>(resource.getType());
-  if (!resourceType)
-    return ctx.fail("atomic call requires a buffer resource"),
-           std::optional<mlir::Value>(mlir::Value());
-
-  mlir::Location loc = getLocation(call, ctx);
-
-  unsigned numArgs = call->getNumArgs();
-  unsigned valueOperandCount =
-      *kind == simt_hlsl_import::BufferAtomicOp::CompareExchange ? 2U : 1U;
-  unsigned baseArgCount = 1 + valueOperandCount;
-  if (numArgs != baseArgCount && numArgs != baseArgCount + 1)
-    return ctx.fail("unexpected argument count for atomic call"),
-           std::optional<mlir::Value>(mlir::Value());
-
-  unsigned argIndex = 0;
-  mlir::Value indexValue = lowerExpr(call->getArg(argIndex++), ctx);
-  if (!indexValue)
-    return mlir::Value();
-
-  BufferAccessInfo info{resource, indexValue, resourceType, nullptr};
-
-  mlir::Value compareValue;
-  mlir::Value valueValue;
-  if (*kind == simt_hlsl_import::BufferAtomicOp::CompareExchange) {
-    compareValue = lowerExpr(call->getArg(argIndex++), ctx);
-    if (!compareValue)
-      return mlir::Value();
-    valueValue = lowerExpr(call->getArg(argIndex++), ctx);
-    if (!valueValue)
-      return mlir::Value();
-  } else {
-    valueValue = lowerExpr(call->getArg(argIndex++), ctx);
-    if (!valueValue)
-      return mlir::Value();
-  }
-
-  const clang::Expr *outArg = nullptr;
-  if (numArgs == baseArgCount + 1)
-    outArg = call->getArg(argIndex++);
-
-  const clang::ValueDecl *objectDecl = nullptr;
-  if (const auto *declRef = llvm::dyn_cast<clang::DeclRefExpr>(
-          objectExpr->IgnoreParenImpCasts()))
-    objectDecl = declRef->getDecl();
-
   if (isEmitContext(ctx)) {
     EmitInterpreter interp(ctx);
-    mlir::Value oldValue = interp.emitAtomic(
-        *kind, info.resource, info.index, valueValue, compareValue,
-        /*resourceDecl=*/nullptr, {call, loc});
-    if (!oldValue && ctx.failed)
-      return mlir::Value();
-
-    if (objectDecl) {
-      ctx.mutatedVars.insert(objectDecl);
-      ctx.symValueMap[objectDecl] = makeSymValue(objectDecl);
-    }
-
-    if (outArg) {
-      const clang::Expr *stripped = outArg->IgnoreParenImpCasts();
-      if (const auto *outExpr =
-              llvm::dyn_cast<clang::HLSLOutArgExpr>(stripped))
-        stripped = outExpr->getArgLValue()->IgnoreParenImpCasts();
-      const clang::ValueDecl *outDecl = nullptr;
-      if (const auto *declRef =
-              llvm::dyn_cast<clang::DeclRefExpr>(stripped))
-        outDecl = declRef->getDecl();
-      if (!outDecl)
-        return ctx.fail("atomic original value argument must reference a "
-                        "variable"),
-               std::optional<mlir::Value>(mlir::Value());
-      ctx.valueMap[outDecl] = oldValue;
-      ctx.symValueMap[outDecl] = makeSymValue(outDecl);
-      ctx.mutatedVars.insert(outDecl);
-    }
-
-    return mlir::Value();
+    return lowerAtomicMemberCallInterp(call, ctx, interp);
   }
 
   AnalysisInterpreter interp(ctx);
-  interp.emitAtomic(*kind, info.resource, info.index, valueValue, compareValue,
-                    /*resourceDecl=*/nullptr, {call, loc});
-
-  if (objectDecl) {
-    ctx.mutatedVars.insert(objectDecl);
-    ctx.symValueMap[objectDecl] = makeSymValue(objectDecl);
-  }
-
-  if (outArg) {
-    const clang::Expr *stripped = outArg->IgnoreParenImpCasts();
-    if (const auto *outExpr =
-            llvm::dyn_cast<clang::HLSLOutArgExpr>(stripped))
-      stripped = outExpr->getArgLValue()->IgnoreParenImpCasts();
-    const clang::ValueDecl *outDecl = nullptr;
-    if (const auto *declRef =
-            llvm::dyn_cast<clang::DeclRefExpr>(stripped))
-      outDecl = declRef->getDecl();
-    if (!outDecl)
-      return ctx.fail("atomic original value argument must reference a "
-                      "variable"),
-             std::optional<mlir::Value>(mlir::Value());
-    ctx.symValueMap[outDecl] = makeSymValue(outDecl);
-    ctx.mutatedVars.insert(outDecl);
-  }
-
-  return mlir::Value();
+  auto result = lowerAtomicMemberCallInterp(call, ctx, interp);
+  if (!result)
+    return std::nullopt;
+  return std::optional<mlir::Value>(result->getValueOrNull());
 }
 
 template <typename Interp>
