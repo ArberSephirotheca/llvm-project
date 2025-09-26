@@ -2243,7 +2243,25 @@ lowerAtomicMemberCall(const clang::CXXMemberCallExpr *call,
 
 static mlir::Location getLocation(const clang::Stmt *stmt,
                                   LoweringContext &ctx);
-static mlir::Value lowerExpr(const clang::Expr *expr, LoweringContext &ctx);
+static mlir::Value lowerExprLegacy(const clang::Expr *expr, LoweringContext &ctx);
+
+template <typename Interp>
+static typename Interp::Value lowerExprInterp(const clang::Expr *expr,
+                                              LoweringContext &ctx,
+                                              Interp &interp) {
+  mlir::Value value = lowerExprLegacy(expr, ctx);
+  if (!value)
+    return typename Interp::Value();
+  return wrapMlirValue(interp, value);
+}
+
+static mlir::Value lowerExpr(const clang::Expr *expr, LoweringContext &ctx) {
+  if (isEmitContext(ctx))
+    return lowerExprLegacy(expr, ctx);
+  AnalysisInterpreter interp(ctx);
+  auto result = lowerExprInterp(expr, ctx, interp);
+  return result.getValueOrNull();
+}
 
 static std::optional<mlir::Value>
 lowerAtomicCall(const clang::CallExpr *call, LoweringContext &ctx);
@@ -2660,7 +2678,8 @@ static mlir::Location getLocation(const clang::Stmt *stmt,
                                    presumed.getColumn());
 }
 
-static mlir::Value lowerExpr(const clang::Expr *expr, LoweringContext &ctx) {
+static mlir::Value lowerExprLegacy(const clang::Expr *expr,
+                                   LoweringContext &ctx) {
   if (!expr)
     return {};
 
@@ -2687,13 +2706,13 @@ static mlir::Value lowerExpr(const clang::Expr *expr, LoweringContext &ctx) {
   }
 
   if (const auto *paren = llvm::dyn_cast<clang::ParenExpr>(expr))
-    return lowerExpr(paren->getSubExpr(), ctx);
+    return lowerExprLegacy(paren->getSubExpr(), ctx);
 
   if (const auto *implicitCast = llvm::dyn_cast<clang::ImplicitCastExpr>(expr))
-    return lowerExpr(implicitCast->getSubExpr(), ctx);
+    return lowerExprLegacy(implicitCast->getSubExpr(), ctx);
 
   if (const auto *constExpr = llvm::dyn_cast<clang::ConstantExpr>(expr))
-    return lowerExpr(constExpr->getSubExpr(), ctx);
+    return lowerExprLegacy(constExpr->getSubExpr(), ctx);
 
   if (const auto *floatLit = llvm::dyn_cast<clang::FloatingLiteral>(expr)) {
     if (!mlir::isa<mlir::FloatType>(type))
@@ -2770,7 +2789,7 @@ static mlir::Value lowerExpr(const clang::Expr *expr, LoweringContext &ctx) {
       return ctx.fail("pointer-based vector swizzles are unsupported"),
              mlir::Value();
 
-    mlir::Value base = lowerExpr(vecElem->getBase(), ctx);
+    mlir::Value base = lowerExprLegacy(vecElem->getBase(), ctx);
     if (!base)
       return {};
 
@@ -2821,7 +2840,7 @@ static mlir::Value lowerExpr(const clang::Expr *expr, LoweringContext &ctx) {
   }
 
   if (const auto *unOp = llvm::dyn_cast<clang::UnaryOperator>(expr)) {
-    mlir::Value operand = lowerExpr(unOp->getSubExpr(), ctx);
+    mlir::Value operand = lowerExprLegacy(unOp->getSubExpr(), ctx);
     if (!operand)
       return {};
 
@@ -3013,7 +3032,7 @@ static mlir::Value lowerExpr(const clang::Expr *expr, LoweringContext &ctx) {
   }
 
   if (const auto *condOp = llvm::dyn_cast<clang::ConditionalOperator>(expr)) {
-    mlir::Value condValue = lowerExpr(condOp->getCond(), ctx);
+    mlir::Value condValue = lowerExprLegacy(condOp->getCond(), ctx);
     if (!condValue)
       return {};
     if (condValue.getType() != ctx.builder.getI1Type())
@@ -3021,7 +3040,7 @@ static mlir::Value lowerExpr(const clang::Expr *expr, LoweringContext &ctx) {
              mlir::Value();
 
     auto thenBuilder = [&](LoweringContext &branchCtx) -> mlir::Value {
-      mlir::Value value = lowerExpr(condOp->getTrueExpr(), branchCtx);
+      mlir::Value value = lowerExprLegacy(condOp->getTrueExpr(), branchCtx);
       if (!value)
         return mlir::Value();
       if (value.getType() != type) {
@@ -3032,7 +3051,7 @@ static mlir::Value lowerExpr(const clang::Expr *expr, LoweringContext &ctx) {
     };
 
     auto elseBuilder = [&](LoweringContext &branchCtx) -> mlir::Value {
-      mlir::Value value = lowerExpr(condOp->getFalseExpr(), branchCtx);
+      mlir::Value value = lowerExprLegacy(condOp->getFalseExpr(), branchCtx);
       if (!value)
         return mlir::Value();
       if (value.getType() != type) {
@@ -3054,7 +3073,7 @@ static mlir::Value lowerExpr(const clang::Expr *expr, LoweringContext &ctx) {
     if (binOp->getOpcode() == clang::BinaryOperatorKind::BO_Assign)
       return lowerAssignment(binOp, ctx);
 
-    mlir::Value lhs = lowerExpr(binOp->getLHS(), ctx);
+    mlir::Value lhs = lowerExprLegacy(binOp->getLHS(), ctx);
     if (ctx.failed || !lhs)
       return {};
 
@@ -3062,7 +3081,7 @@ static mlir::Value lowerExpr(const clang::Expr *expr, LoweringContext &ctx) {
     bool rhsEvaluated = false;
     auto getRHS = [&]() -> mlir::Value {
       if (!rhsEvaluated) {
-        rhsStorage = lowerExpr(binOp->getRHS(), ctx);
+        rhsStorage = lowerExprLegacy(binOp->getRHS(), ctx);
         rhsEvaluated = true;
       }
       return rhsStorage;
@@ -3137,7 +3156,7 @@ static mlir::Value lowerExpr(const clang::Expr *expr, LoweringContext &ctx) {
         return ctx.fail("logical and requires boolean operands"), mlir::Value();
 
       auto rhsBuilder = [&](LoweringContext &branchCtx) -> mlir::Value {
-        return lowerExpr(binOp->getRHS(), branchCtx);
+        return lowerExprLegacy(binOp->getRHS(), branchCtx);
       };
       simt_hlsl_import::SourceLoc src{binOp, loc};
       if (isEmitContext(ctx)) {
@@ -3154,7 +3173,7 @@ static mlir::Value lowerExpr(const clang::Expr *expr, LoweringContext &ctx) {
         return ctx.fail("logical or requires boolean operands"), mlir::Value();
 
       auto rhsBuilder = [&](LoweringContext &branchCtx) -> mlir::Value {
-        return lowerExpr(binOp->getRHS(), branchCtx);
+        return lowerExprLegacy(binOp->getRHS(), branchCtx);
       };
       simt_hlsl_import::SourceLoc src{binOp, loc};
       if (isEmitContext(ctx)) {
@@ -3255,7 +3274,7 @@ getBufferAccessInfo(const clang::Expr *baseExpr, const clang::Expr *indexExpr,
   baseExpr = baseExpr->IgnoreParenImpCasts();
   indexExpr = indexExpr->IgnoreParenImpCasts();
 
-  mlir::Value resource = lowerExpr(baseExpr, ctx);
+  mlir::Value resource = lowerExprLegacy(baseExpr, ctx);
   if (!resource)
     return std::nullopt;
 
@@ -3264,7 +3283,7 @@ getBufferAccessInfo(const clang::Expr *baseExpr, const clang::Expr *indexExpr,
   if (!resourceType)
     return ctx.fail("subscript base must be a buffer resource"), std::nullopt;
 
-  mlir::Value index = lowerExpr(indexExpr, ctx);
+  mlir::Value index = lowerExprLegacy(indexExpr, ctx);
   if (!index)
     return std::nullopt;
   if (!mlir::isa<mlir::IntegerType>(index.getType()))
@@ -3541,7 +3560,8 @@ template <typename Interp>
 static bool lowerStatement(const clang::Stmt *stmt, LoweringContext &ctx,
                            Interp &interp);
 static bool lowerStatement(const clang::Stmt *stmt, LoweringContext &ctx);
-static mlir::Value lowerExpr(const clang::Expr *expr, LoweringContext &ctx);
+static mlir::Value lowerExprLegacy(const clang::Expr *expr,
+                                   LoweringContext &ctx);
 
 template <typename Interp>
 static bool lowerForStmt(const clang::ForStmt *stmt, LoweringContext &ctx,
