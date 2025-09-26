@@ -2584,6 +2584,38 @@ static typename Interp::Value lowerExprInterp(const clang::Expr *expr,
     return interp.emitBufferLoad(resource, index, decl, {expr, loc});
   }
 
+  if (const auto *condOp = llvm::dyn_cast<clang::ConditionalOperator>(expr)) {
+    auto condValue = lowerExprInterp(condOp->getCond(), ctx, interp);
+    if (!condValue)
+      return typename Interp::Value();
+
+    if (getValueType(condValue) != ctx.builder.getI1Type()) {
+      ctx.fail("conditional operator requires boolean condition");
+      return typename Interp::Value();
+    }
+
+    auto makeBranchBuilder = [&](const clang::Expr *branchExpr) {
+      return [&, branchExpr](LoweringContext &branchCtx)
+                 -> typename Interp::Value {
+        auto branchInterp = interp.fork(branchCtx);
+        auto branchValue = lowerExprInterp(branchExpr, branchCtx, branchInterp);
+        if (!branchValue)
+          return typename Interp::Value();
+        if (getValueType(branchValue) != type) {
+          branchCtx.fail("conditional operator branch type mismatch");
+          return typename Interp::Value();
+        }
+        return branchValue;
+      };
+    };
+
+    auto thenBuilder = makeBranchBuilder(condOp->getTrueExpr());
+    auto elseBuilder = makeBranchBuilder(condOp->getFalseExpr());
+
+    simt_hlsl_import::SourceLoc src{condOp, loc};
+    return interp.emitConditional(condValue, thenBuilder, elseBuilder, src);
+  }
+
   mlir::Value value = lowerExprLegacy(expr, ctx);
   if (!value)
     return typename Interp::Value();
