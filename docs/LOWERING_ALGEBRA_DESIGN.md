@@ -203,6 +203,9 @@ struct TraceInterpreter : LoweringAlgebra<TraceInterpreter<Inner>> {
   intrinsics now flow through the algebra. Analysis paths track symbolic
   `SymValue` metadata for bound variables; atomics mark resources as mutated
   without materialising IR.
+- Loop loop-scope construction and operand plumbing now live in
+  `LoopScopeSupport.*`, so lowering code no longer scrapes the raw
+  `controlStack`/`loopStack` when producing break/continue operands.
 - Analysis mode continues to run with a detached `OpBuilder`. The algebraized
   paths suppress barrier/fence emission, and emit-mode literals / basic
   arithmetic/comparisons now go through the algebra. Expression helpers still

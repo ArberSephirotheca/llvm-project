@@ -124,6 +124,17 @@ void collectLoopBreakOperands(LoweringContext &ctx, LoopFrame &frame,
 void collectLoopContinueOperands(LoweringContext &ctx, LoopFrame &frame,
                                  llvm::SmallVectorImpl<mlir::Value> &ops);
 
+LoopFrame *getInnermostLoop(LoweringContext &ctx);
+
+struct BreakTarget {
+  ControlEntryKind kind = ControlEntryKind::Loop;
+  LoopFrame *loop = nullptr;
+  SwitchFrame *switchFrame = nullptr;
+  explicit operator bool() const { return loop || switchFrame; }
+};
+
+BreakTarget getInnermostBreakTarget(LoweringContext &ctx);
+
 class LoopScopeState : public LoopScopeProvider {
 public:
   LoopScopeState(LoweringContext &parentCtx,

@@ -3637,88 +3637,72 @@ static bool lowerStatement(const clang::Stmt *stmt, LoweringContext &ctx,
     return lowerSwitchStmt(switchStmt, ctx, interp);
 
   if (llvm::isa<clang::BreakStmt>(stmt)) {
-    for (auto it = ctx.controlStack.rbegin(); it != ctx.controlStack.rend();
-         ++it) {
-      if (it->kind == ControlEntryKind::Switch) {
-        if (it->index >= ctx.switchStack.size())
-          continue;
-        auto &frame = ctx.switchStack[it->index];
-        if (frame.analysisOnly) {
-          ctx.emittedTerminator = true;
-          return true;
-        }
+    BreakTarget target = getInnermostBreakTarget(ctx);
+    if (!target)
+      return true;
 
-        llvm::SmallVector<mlir::Value, 8> yieldOperands;
-        yieldOperands.reserve(frame.carriedVars.size() + 3);
-        for (auto [index, vd] : llvm::enumerate(frame.carriedVars)) {
-          mlir::Value value = ctx.valueMap.lookup(vd);
-          if (!value && index < frame.initialValues.size())
-            value = frame.initialValues[index];
-          if (!value) {
-            ctx.fail("switch break missing value for case variable");
-            return false;
-          }
-          yieldOperands.push_back(value);
-          ctx.mutatedVars.insert(vd);
-          interp.noteMutation(vd);
-        }
-
-        auto ensureBool = [&](mlir::Value v, int constant) -> mlir::Value {
-          if (v)
-            return v;
-          return ctx.builder.create<mlir::arith::ConstantIntOp>(ctx.defaultLoc,
-                                                                constant, 1);
-        };
-
-        yieldOperands.push_back(ensureBool(frame.breakHasMatchedValue, 1));
-        yieldOperands.push_back(ensureBool(frame.breakExecutingValue, 0));
-        yieldOperands.push_back(ensureBool(frame.breakCompletedValue, 1));
-
-        ctx.builder.create<simt::dialect::YieldOp>(ctx.defaultLoc,
-                                                   yieldOperands);
-        ctx.emittedTerminator = true;
-        return true;
-      }
-      if (it->kind == ControlEntryKind::Loop) {
-        if (it->index >= ctx.loopStack.size())
-          continue;
-        auto &frame = ctx.loopStack[it->index];
-        llvm::SmallVector<mlir::Value, 8> operands;
-        collectLoopBreakOperands(ctx, frame, operands);
-        ctx.builder.create<simt::dialect::BreakOp>(ctx.defaultLoc, operands);
-        ctx.mutatedVars.insert(frame.carriedVars.begin(),
-                               frame.carriedVars.end());
-        for (const clang::ValueDecl *vd : frame.carriedVars)
-          interp.noteMutation(vd);
-        ctx.emittedTerminator = true;
-        return true;
-      }
+    if (target.kind == ControlEntryKind::Loop && target.loop) {
+      llvm::SmallVector<mlir::Value, 8> operands;
+      collectLoopBreakOperands(ctx, *target.loop, operands);
+      ctx.builder.create<simt::dialect::BreakOp>(ctx.defaultLoc, operands);
+      ctx.mutatedVars.insert(target.loop->carriedVars.begin(),
+                             target.loop->carriedVars.end());
+      for (const clang::ValueDecl *vd : target.loop->carriedVars)
+        interp.noteMutation(vd);
+      ctx.emittedTerminator = true;
+      return true;
     }
 
+    if (target.kind == ControlEntryKind::Switch && target.switchFrame) {
+      auto *switchFrame = target.switchFrame;
+      if (switchFrame->analysisOnly) {
+        ctx.emittedTerminator = true;
+        return true;
+      }
+
+      llvm::SmallVector<mlir::Value, 8> yieldOperands;
+      yieldOperands.reserve(switchFrame->carriedVars.size() + 3);
+      for (auto [index, vd] : llvm::enumerate(switchFrame->carriedVars)) {
+        mlir::Value value = ctx.valueMap.lookup(vd);
+        if (!value && index < switchFrame->initialValues.size())
+          value = switchFrame->initialValues[index];
+        if (!value) {
+          ctx.fail("switch break missing value for case variable");
+          return false;
+        }
+        yieldOperands.push_back(value);
+        ctx.mutatedVars.insert(vd);
+        interp.noteMutation(vd);
+      }
+
+      auto ensureBool = [&](mlir::Value v, int constant) -> mlir::Value {
+        if (v)
+          return v;
+        return ctx.builder.create<mlir::arith::ConstantIntOp>(ctx.defaultLoc,
+                                                              constant, 1);
+      };
+
+      yieldOperands.push_back(ensureBool(switchFrame->breakHasMatchedValue, 1));
+      yieldOperands.push_back(ensureBool(switchFrame->breakExecutingValue, 0));
+      yieldOperands.push_back(ensureBool(switchFrame->breakCompletedValue, 1));
+
+      ctx.builder.create<simt::dialect::YieldOp>(ctx.defaultLoc, yieldOperands);
+      ctx.emittedTerminator = true;
+    }
     return true;
   }
 
   if (llvm::isa<clang::ContinueStmt>(stmt)) {
-    LoopFrame *loopFrame = nullptr;
-    for (auto it = ctx.controlStack.rbegin(); it != ctx.controlStack.rend();
-         ++it) {
-      if (it->kind == ControlEntryKind::Loop) {
-        if (it->index >= ctx.loopStack.size())
-          continue;
-        loopFrame = &ctx.loopStack[it->index];
-        break;
-      }
+    if (LoopFrame *loopFrame = getInnermostLoop(ctx)) {
+      llvm::SmallVector<mlir::Value, 8> operands;
+      collectLoopContinueOperands(ctx, *loopFrame, operands);
+      ctx.builder.create<simt::dialect::ContinueOp>(ctx.defaultLoc, operands);
+      ctx.mutatedVars.insert(loopFrame->carriedVars.begin(),
+                             loopFrame->carriedVars.end());
+      for (const clang::ValueDecl *vd : loopFrame->carriedVars)
+        interp.noteMutation(vd);
+      ctx.emittedTerminator = true;
     }
-    if (!loopFrame)
-      return true;
-    auto &frame = *loopFrame;
-    llvm::SmallVector<mlir::Value, 8> operands;
-    collectLoopContinueOperands(ctx, frame, operands);
-    ctx.builder.create<simt::dialect::ContinueOp>(ctx.defaultLoc, operands);
-    ctx.mutatedVars.insert(frame.carriedVars.begin(), frame.carriedVars.end());
-    for (const clang::ValueDecl *vd : frame.carriedVars)
-      interp.noteMutation(vd);
-    ctx.emittedTerminator = true;
     return true;
   }
 

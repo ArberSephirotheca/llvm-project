@@ -96,6 +96,35 @@ void collectLoopContinueOperands(LoweringContext &ctx, LoopFrame &frame,
   collectLoopOperandsRaw(ctx, frame, ops, /*isContinue=*/true);
 }
 
+LoopFrame *getInnermostLoop(LoweringContext &ctx) {
+  for (auto it = ctx.controlStack.rbegin(); it != ctx.controlStack.rend(); ++it) {
+    if (it->kind != ControlEntryKind::Loop)
+      continue;
+    if (it->index >= ctx.loopStack.size())
+      continue;
+    return &ctx.loopStack[it->index];
+  }
+  return nullptr;
+}
+
+BreakTarget getInnermostBreakTarget(LoweringContext &ctx) {
+  for (auto it = ctx.controlStack.rbegin(); it != ctx.controlStack.rend(); ++it) {
+    if (it->kind == ControlEntryKind::Loop) {
+      if (it->index >= ctx.loopStack.size())
+        continue;
+      return BreakTarget{ControlEntryKind::Loop, &ctx.loopStack[it->index],
+                         nullptr};
+    }
+    if (it->kind == ControlEntryKind::Switch) {
+      if (it->index >= ctx.switchStack.size())
+        continue;
+      return BreakTarget{ControlEntryKind::Switch, nullptr,
+                         &ctx.switchStack[it->index]};
+    }
+  }
+  return BreakTarget{};
+}
+
 bool buildLoopSkeleton(LoweringContext &ctx,
                        llvm::ArrayRef<const clang::ValueDecl *> mutatedVars,
                        bool hasFirstIterFlag, mlir::Value firstIterInit,
@@ -317,4 +346,3 @@ void LoopScopeState::cleanup() {
 }
 
 } // namespace simt_hlsl_import
-
