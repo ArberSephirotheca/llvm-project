@@ -3725,6 +3725,48 @@ static bool collectIfMutations(
   return true;
 }
 
+static void collectLoopBreakOperands(LoweringContext &ctx, LoopFrame &frame,
+                                     llvm::SmallVectorImpl<mlir::Value> &ops) {
+  ops.clear();
+  mlir::Block &bodyBlock = frame.loop.getBodyRegion().front();
+  ops.reserve(frame.carriedVars.size() + (frame.hasFirstIterFlag ? 1 : 0));
+  for (auto [index, vd] : llvm::enumerate(frame.carriedVars)) {
+    mlir::Value value = ctx.valueMap.lookup(vd);
+    if (!value && index < bodyBlock.getNumArguments())
+      value = bodyBlock.getArgument(index);
+    if (!value)
+      value = frame.loop.getResult(index);
+    ops.push_back(value);
+  }
+  if (frame.hasFirstIterFlag) {
+    mlir::Value flag = frame.currentFirstIterValue;
+    if (!flag && frame.firstIterIndex < frame.loop.getNumResults())
+      flag = frame.loop.getResult(frame.firstIterIndex);
+    ops.push_back(flag);
+  }
+}
+
+static void collectLoopContinueOperands(LoweringContext &ctx, LoopFrame &frame,
+                                        llvm::SmallVectorImpl<mlir::Value> &ops) {
+  ops.clear();
+  mlir::Block &bodyBlock = frame.loop.getBodyRegion().front();
+  ops.reserve(frame.carriedVars.size() + (frame.hasFirstIterFlag ? 1 : 0));
+  for (auto [index, vd] : llvm::enumerate(frame.carriedVars)) {
+    mlir::Value value = ctx.valueMap.lookup(vd);
+    if (!value && index < bodyBlock.getNumArguments())
+      value = bodyBlock.getArgument(index);
+    if (!value)
+      value = frame.loop.getResult(index);
+    ops.push_back(value);
+  }
+  if (frame.hasFirstIterFlag) {
+    mlir::Value flag = frame.currentFirstIterValue;
+    if (!flag && frame.firstIterIndex < frame.loop.getNumResults())
+      flag = frame.loop.getResult(frame.firstIterIndex);
+    ops.push_back(flag);
+  }
+}
+
 bool buildLoopSkeleton(
     LoweringContext &ctx, llvm::ArrayRef<const clang::ValueDecl *> mutatedVars,
     bool hasFirstIterFlag, mlir::Value firstIterInit, LoopSkeleton &out) {
@@ -4034,20 +4076,7 @@ static bool lowerStatement(const clang::Stmt *stmt, LoweringContext &ctx,
           continue;
         auto &frame = ctx.loopStack[it->index];
         llvm::SmallVector<mlir::Value, 8> operands;
-        operands.reserve(frame.carriedVars.size() +
-                         (frame.hasFirstIterFlag ? 1 : 0));
-        for (auto [index, vd] : llvm::enumerate(frame.carriedVars)) {
-          mlir::Value value = ctx.valueMap.lookup(vd);
-          if (!value)
-            value = frame.loop.getResult(index);
-          operands.push_back(value);
-        }
-        if (frame.hasFirstIterFlag) {
-          mlir::Value flag = frame.currentFirstIterValue;
-          if (!flag && frame.firstIterIndex < frame.loop.getNumResults())
-            flag = frame.loop.getResult(frame.firstIterIndex);
-          operands.push_back(flag);
-        }
+        collectLoopBreakOperands(ctx, frame, operands);
         ctx.builder.create<simt::dialect::BreakOp>(ctx.defaultLoc, operands);
         ctx.mutatedVars.insert(frame.carriedVars.begin(),
                                frame.carriedVars.end());
@@ -4076,20 +4105,7 @@ static bool lowerStatement(const clang::Stmt *stmt, LoweringContext &ctx,
       return true;
     auto &frame = *loopFrame;
     llvm::SmallVector<mlir::Value, 8> operands;
-    operands.reserve(frame.carriedVars.size() +
-                     (frame.hasFirstIterFlag ? 1 : 0));
-    for (auto [index, vd] : llvm::enumerate(frame.carriedVars)) {
-      mlir::Value value = ctx.valueMap.lookup(vd);
-      if (!value)
-        value = frame.loop.getResult(index);
-      operands.push_back(value);
-    }
-    if (frame.hasFirstIterFlag) {
-      mlir::Value flag = frame.currentFirstIterValue;
-      if (!flag && frame.firstIterIndex < frame.loop.getNumResults())
-        flag = frame.loop.getResult(frame.firstIterIndex);
-      operands.push_back(flag);
-    }
+    collectLoopContinueOperands(ctx, frame, operands);
     ctx.builder.create<simt::dialect::ContinueOp>(ctx.defaultLoc, operands);
     ctx.mutatedVars.insert(frame.carriedVars.begin(), frame.carriedVars.end());
     for (const clang::ValueDecl *vd : frame.carriedVars)
