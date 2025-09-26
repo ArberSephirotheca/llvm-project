@@ -4661,4 +4661,6 @@ translateComputeShader(mlir::MLIRContext &context, llvm::StringRef fileName,
 
   return Result<mlir::OwningOpRef<mlir::ModuleOp>>::ok(std::move(module));
 
+} 
+
 } // namespace simt_hlsl_import
