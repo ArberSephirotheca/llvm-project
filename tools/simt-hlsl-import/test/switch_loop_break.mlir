@@ -1,3 +1,3 @@
-// MLIR-LABEL: "func.func"() <{function_type = (i32) -> (), sym_name = "main"}>
-// MLIR: "simt_step.break"
-// MLIR: return
+// CHECK-LABEL: func.func @main(%arg0: i32) attributes {simt.num_threads = array<i64: 1, 1, 1>}
+// CHECK: simt_step.break
+// CHECK: return
