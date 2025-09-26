@@ -2312,6 +2312,24 @@ static typename Interp::Value lowerExprInterp(const clang::Expr *expr,
   if (const auto *constExpr = llvm::dyn_cast<clang::ConstantExpr>(expr))
     return lowerExprInterp(constExpr->getSubExpr(), ctx, interp);
 
+  if (const auto *declRef = llvm::dyn_cast<clang::DeclRefExpr>(expr)) {
+    const clang::ValueDecl *vd = declRef->getDecl();
+    auto it = ctx.valueMap.find(vd);
+    if (it == ctx.valueMap.end()) {
+      ctx.fail("reference to unknown value");
+      return typename Interp::Value();
+    }
+    auto result = wrapMlirValue(interp, it->second);
+    if constexpr (!std::is_same_v<typename Interp::Value, mlir::Value>) {
+      auto symIt = ctx.symValueMap.find(vd);
+      if (symIt != ctx.symValueMap.end())
+        result.setSym(symIt->second);
+      if (!result.hasTypeHint())
+        result.setTypeHint(it->second.getType());
+    }
+    return result;
+  }
+
   mlir::Value value = lowerExprLegacy(expr, ctx);
   if (!value)
     return typename Interp::Value();
