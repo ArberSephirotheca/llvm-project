@@ -193,6 +193,27 @@ static std::string buildFloatTag(mlir::FloatType type) {
   return "";
 }
 
+static void ensureYield(LoweringContext &branchCtx, mlir::Region &region,
+                        llvm::ArrayRef<mlir::Value> operands,
+                        mlir::Location loc) {
+  if (operands.empty() || branchCtx.emittedTerminator)
+    return;
+
+  mlir::Block &block = region.front();
+  if (!block.empty()) {
+    mlir::Operation &terminator = block.back();
+    if (auto yield = llvm::dyn_cast<simt::dialect::YieldOp>(&terminator)) {
+      yield.getOperation()->setOperands(operands);
+      return;
+    }
+    if (terminator.hasTrait<mlir::OpTrait::IsTerminator>())
+      return;
+  }
+
+  mlir::OpBuilder::atBlockEnd(&block)
+      .create<simt::dialect::YieldOp>(loc, operands);
+}
+
 static mlir::Type parseTypeTag(llvm::StringRef tag, LoweringContext &ctx) {
   if (tag.empty())
     return {};
@@ -236,9 +257,182 @@ struct EmitInterpreter
     assert(isEmitContext(ctx) && "EmitInterpreter requires anchored builder");
   }
 
+  using Value = mlir::Value;
+
   EmitInterpreter fork(LoweringContext &childCtx) {
     return EmitInterpreter(childCtx);
   }
+
+  struct IfScope {
+    IfScope(LoweringContext &parentCtx, simt::dialect::IfOp op,
+            llvm::ArrayRef<const clang::ValueDecl *> carried, bool hasElse,
+            bool needsElseRegion, mlir::Location loc)
+        : parent(parentCtx), ifOp(op),
+          mutated(carried.begin(), carried.end()), hasElseBranch(hasElse),
+          needsElseRegion(needsElseRegion), loc(loc) {}
+
+    LoweringContext &thenContext() {
+      if (!thenCtxStorage) {
+        mlir::Region &region = ifOp.getThenRegion();
+        thenBuilder.emplace(parent.builder.getContext());
+        thenBuilder->setInsertionPointToEnd(&region.front());
+        thenCtxStorage.emplace(*thenBuilder, loc, parent.returnType,
+                               parent.errorMessage, parent.sourceManager);
+        thenCtxStorage->valueMap = parent.valueMap;
+        thenCtxStorage->symValueMap = parent.symValueMap;
+        thenCtxStorage->loopStack = parent.loopStack;
+        thenCtxStorage->switchStack = parent.switchStack;
+        thenCtxStorage->controlStack = parent.controlStack;
+      }
+      return *thenCtxStorage;
+    }
+
+    bool userHasElse() const { return hasElseBranch; }
+
+    LoweringContext &elseContext() {
+      if (!hasElseBranch)
+        llvm::report_fatal_error("elseContext requested but no else branch");
+      if (!elseCtxStorage) {
+        mlir::Region &region = ifOp.getElseRegion();
+        elseBuilder.emplace(parent.builder.getContext());
+        elseBuilder->setInsertionPointToEnd(&region.front());
+        elseCtxStorage.emplace(*elseBuilder, loc, parent.returnType,
+                               parent.errorMessage, parent.sourceManager);
+        elseCtxStorage->valueMap = parent.valueMap;
+        elseCtxStorage->symValueMap = parent.symValueMap;
+        elseCtxStorage->loopStack = parent.loopStack;
+        elseCtxStorage->switchStack = parent.switchStack;
+        elseCtxStorage->controlStack = parent.controlStack;
+      }
+      return *elseCtxStorage;
+    }
+
+    bool finalizeThen() {
+      if (thenClosed)
+        return !parent.failed;
+      thenClosed = true;
+      if (!thenCtxStorage || mutated.empty())
+        return !parent.failed;
+
+      llvm::SmallVector<mlir::Value, 8> operands;
+      operands.reserve(mutated.size());
+      for (const clang::ValueDecl *vd : mutated) {
+        mlir::Value value;
+        if (auto it = thenCtxStorage->valueMap.find(vd);
+            it != thenCtxStorage->valueMap.end())
+          value = it->second;
+        else if (auto pit = parent.valueMap.find(vd);
+                 pit != parent.valueMap.end())
+          value = pit->second;
+        if (!value) {
+          parent.fail("conditional branch missing carried value");
+          return false;
+        }
+        operands.push_back(value);
+      }
+      ensureYield(*thenCtxStorage, ifOp.getThenRegion(), operands, loc);
+      return !parent.failed;
+    }
+
+    bool finalizeElse() {
+      if (elseClosed)
+        return !parent.failed;
+      elseClosed = true;
+      if (!elseCtxStorage || mutated.empty())
+        return !parent.failed;
+
+      llvm::SmallVector<mlir::Value, 8> operands;
+      operands.reserve(mutated.size());
+      for (const clang::ValueDecl *vd : mutated) {
+        mlir::Value value;
+        if (auto it = elseCtxStorage->valueMap.find(vd);
+            it != elseCtxStorage->valueMap.end())
+          value = it->second;
+        else if (auto pit = parent.valueMap.find(vd);
+                 pit != parent.valueMap.end())
+          value = pit->second;
+        if (!value) {
+          parent.fail("conditional branch missing carried value");
+          return false;
+        }
+        operands.push_back(value);
+      }
+      ensureYield(*elseCtxStorage, ifOp.getElseRegion(), operands, loc);
+      return !parent.failed;
+    }
+
+    bool finalizeImplicitElse() {
+      if (!needsElseRegion || hasElseBranch || mutated.empty())
+        return true;
+      llvm::SmallVector<mlir::Value, 8> operands;
+      operands.reserve(mutated.size());
+      for (const clang::ValueDecl *vd : mutated) {
+        auto it = parent.valueMap.find(vd);
+        if (it == parent.valueMap.end()) {
+          parent.fail("conditional missing carried value for implicit else");
+          return false;
+        }
+        operands.push_back(it->second);
+      }
+      ensureYield(parent, ifOp.getElseRegion(), operands, loc);
+      return !parent.failed;
+    }
+
+    bool done() {
+      if (!finalizeThen())
+        return false;
+      if (hasElseBranch) {
+        if (!finalizeElse())
+          return false;
+      } else if (!finalizeImplicitElse()) {
+        return false;
+      }
+
+      unsigned resultIndex = 0;
+      for (const clang::ValueDecl *vd : mutated) {
+        parent.valueMap[vd] = ifOp.getResult(resultIndex++);
+        parent.mutatedVars.insert(vd);
+        if (thenCtxStorage) {
+          if (auto it = thenCtxStorage->symValueMap.find(vd);
+              it != thenCtxStorage->symValueMap.end())
+            parent.symValueMap[vd] = it->second;
+        }
+        if (elseCtxStorage) {
+          if (auto it = elseCtxStorage->symValueMap.find(vd);
+              it != elseCtxStorage->symValueMap.end())
+            parent.symValueMap[vd] = it->second;
+        }
+      }
+
+      bool thenTerminated =
+          thenCtxStorage && thenCtxStorage->emittedTerminator;
+      bool elseTerminated = false;
+      if (hasElseBranch)
+        elseTerminated = elseCtxStorage && elseCtxStorage->emittedTerminator;
+      else if (!needsElseRegion)
+        elseTerminated = true;
+
+      if (thenTerminated && (!needsElseRegion || elseTerminated))
+        parent.emittedTerminator = true;
+
+      return !parent.failed;
+    }
+
+    LoweringContext &parent;
+    simt::dialect::IfOp ifOp;
+    llvm::SmallVector<const clang::ValueDecl *, 8> mutated;
+    bool hasElseBranch = false;
+    bool needsElseRegion = false;
+    mlir::Location loc;
+
+    std::optional<mlir::OpBuilder> thenBuilder;
+    std::optional<LoweringContext> thenCtxStorage;
+    bool thenClosed = false;
+
+    std::optional<mlir::OpBuilder> elseBuilder;
+    std::optional<LoweringContext> elseCtxStorage;
+    bool elseClosed = false;
+  };
 
   Value emitConstantInt(int64_t value, const char *tag,
                         simt_hlsl_import::SourceLoc loc) {
