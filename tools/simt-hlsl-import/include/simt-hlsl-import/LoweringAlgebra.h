@@ -77,6 +77,11 @@ template <typename Self, typename ValueT> struct LoweringAlgebra {
     return self().beginIf(std::forward<Args>(args)...);
   }
 
+  template <typename... Args>
+  decltype(auto) beginLoop(Args &&... args) {
+    return self().beginLoop(std::forward<Args>(args)...);
+  }
+
   template <typename ThenMake, typename ElseMake>
   Value emitConditional(Value cond, ThenMake &&thenBuilder, ElseMake &&elseBuilder,
                         SourceLoc loc) {

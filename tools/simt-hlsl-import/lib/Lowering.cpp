@@ -35,6 +35,7 @@
 #include <algorithm>
 #include <cassert>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 
@@ -65,6 +66,13 @@ struct LoopFrame {
   bool hasFirstIterFlag = false;
   unsigned firstIterIndex = 0;
   mlir::Value currentFirstIterValue;
+};
+
+struct LoopSkeleton {
+  simt::dialect::LoopOp loop;
+  LoopFrame *frame = nullptr;
+  mlir::Block *prepareBlock = nullptr;
+  mlir::Block *bodyBlock = nullptr;
 };
 
 struct SwitchFrame {
@@ -250,6 +258,8 @@ static mlir::Type parseTypeTag(llvm::StringRef tag, LoweringContext &ctx) {
   return {};
 }
 
+class LoopScopeState;
+
 struct EmitInterpreter
     : simt_hlsl_import::LoweringAlgebra<EmitInterpreter, mlir::Value> {
 
@@ -433,6 +443,12 @@ struct EmitInterpreter
     std::optional<LoweringContext> elseCtxStorage;
     bool elseClosed = false;
   };
+
+  using LoopScope = LoopScopeState;
+
+  LoopScope beginLoop(llvm::ArrayRef<const clang::ValueDecl *> carriedVars,
+                      bool hasFirstIterFlag, mlir::Value firstIterInit,
+                      mlir::Location loc);
 
   IfScope beginIf(mlir::Value cond,
                   llvm::ArrayRef<const clang::ValueDecl *> carriedVars,
@@ -1490,6 +1506,12 @@ struct AnalysisInterpreter
     std::optional<LoweringContext> elseCtxStorage;
     bool elseClosed = false;
   };
+
+  using LoopScope = LoopScopeState;
+
+  LoopScope beginLoop(llvm::ArrayRef<const clang::ValueDecl *> carriedVars,
+                      bool hasFirstIterFlag, mlir::Value firstIterInit,
+                      mlir::Location loc);
 
   IfScope beginIf(mlir::Value cond,
                   llvm::ArrayRef<const clang::ValueDecl *> carriedVars,
@@ -3612,13 +3634,6 @@ static mlir::Value getLoopCarriedValue(const LoweringContext &ctx,
   return {};
 }
 
-struct LoopSkeleton {
-  simt::dialect::LoopOp loop;
-  LoopFrame *frame = nullptr;
-  mlir::Block *prepareBlock = nullptr;
-  mlir::Block *bodyBlock = nullptr;
-};
-
 static bool collectLoopMutations(
     LoweringContext &ctx, const clang::Stmt *body,
     llvm::function_ref<bool(LoweringContext &)> extraWork,
@@ -3710,7 +3725,7 @@ static bool collectIfMutations(
   return true;
 }
 
-static bool buildLoopSkeleton(
+bool buildLoopSkeleton(
     LoweringContext &ctx, llvm::ArrayRef<const clang::ValueDecl *> mutatedVars,
     bool hasFirstIterFlag, mlir::Value firstIterInit, LoopSkeleton &out) {
   mlir::Location loc = ctx.defaultLoc;
@@ -3775,6 +3790,142 @@ static bool buildLoopSkeleton(
   out.bodyBlock = bodyBlock;
 
   return true;
+}
+
+namespace {
+
+class LoopScopeState {
+public:
+  LoopScopeState(LoweringContext &parentCtx,
+                 llvm::ArrayRef<const clang::ValueDecl *> carried,
+                 bool hasFirstIterFlag, mlir::Value firstIterInit,
+                 mlir::Location loc)
+      : parent(parentCtx), loc(loc) {
+    carriedVars.assign(carried.begin(), carried.end());
+    if (!buildLoopSkeleton(parent, carriedVars, hasFirstIterFlag, firstIterInit,
+                           skeleton)) {
+      active = false;
+      return;
+    }
+    active = true;
+    setupPrepareContext();
+    setupBodyContext();
+  }
+
+  bool isValid() const { return active && !parent.failed; }
+
+  LoweringContext &prepareContext() {
+    assert(active && prepareCtx && "prepare context unavailable");
+    return *prepareCtx;
+  }
+
+  LoweringContext &bodyContext() {
+    assert(active && bodyCtx && "body context unavailable");
+    return *bodyCtx;
+  }
+
+  bool close() {
+    if (!active)
+      return !parent.failed;
+
+    unsigned index = 0;
+    for (const clang::ValueDecl *vd : carriedVars) {
+      parent.valueMap[vd] = skeleton.loop.getResult(index++);
+      parent.mutatedVars.insert(vd);
+      if (bodyCtx) {
+        if (auto it = bodyCtx->symValueMap.find(vd);
+            it != bodyCtx->symValueMap.end())
+          parent.symValueMap[vd] = it->second;
+      }
+    }
+
+    if (bodyCtx) {
+      parent.failed |= bodyCtx->failed;
+      parent.mutatedVars.insert(bodyCtx->mutatedVars.begin(),
+                                 bodyCtx->mutatedVars.end());
+    }
+
+    cleanup();
+    return !parent.failed;
+  }
+
+  ~LoopScopeState() { cleanup(); }
+
+private:
+  void setupPrepareContext() {
+    prepareBuilder.emplace(parent.builder.getContext());
+    prepareBuilder->setInsertionPointToStart(skeleton.prepareBlock);
+    prepareCtx = std::make_unique<LoweringContext>(
+        *prepareBuilder, loc, parent.returnType, parent.errorMessage,
+        parent.sourceManager);
+    copySharedState(*prepareCtx);
+    setBlockArguments(*prepareCtx, skeleton.prepareBlock);
+  }
+
+  void setupBodyContext() {
+    bodyBuilder.emplace(parent.builder.getContext());
+    bodyBuilder->setInsertionPointToStart(skeleton.bodyBlock);
+    bodyCtx = std::make_unique<LoweringContext>(
+        *bodyBuilder, loc, parent.returnType, parent.errorMessage,
+        parent.sourceManager);
+    copySharedState(*bodyCtx);
+    setBlockArguments(*bodyCtx, skeleton.bodyBlock);
+  }
+
+  void copySharedState(LoweringContext &childCtx) {
+    childCtx.valueMap = parent.valueMap;
+    childCtx.symValueMap = parent.symValueMap;
+    childCtx.loopStack = parent.loopStack;
+    childCtx.switchStack = parent.switchStack;
+    childCtx.controlStack = parent.controlStack;
+  }
+
+  void setBlockArguments(LoweringContext &childCtx, mlir::Block *block) {
+    if (!block)
+      return;
+    for (auto [idx, vd] : llvm::enumerate(carriedVars)) {
+      if (idx < block->getNumArguments())
+        childCtx.valueMap[vd] = block->getArgument(idx);
+    }
+  }
+
+  void cleanup() {
+    if (!active)
+      return;
+    active = false;
+    if (!parent.loopStack.empty())
+      parent.loopStack.pop_back();
+    if (!parent.controlStack.empty() &&
+        parent.controlStack.back().kind == ControlEntryKind::Loop)
+      parent.controlStack.pop_back();
+  }
+
+  LoweringContext &parent;
+  llvm::SmallVector<const clang::ValueDecl *, 8> carriedVars;
+  mlir::Location loc;
+  LoopSkeleton skeleton{};
+  bool active = false;
+
+  std::optional<mlir::OpBuilder> prepareBuilder;
+  std::unique_ptr<LoweringContext> prepareCtx;
+
+  std::optional<mlir::OpBuilder> bodyBuilder;
+  std::unique_ptr<LoweringContext> bodyCtx;
+};
+
+} // namespace
+
+EmitInterpreter::LoopScope
+EmitInterpreter::beginLoop(llvm::ArrayRef<const clang::ValueDecl *> carriedVars,
+                           bool hasFirstIterFlag, mlir::Value firstIterInit,
+                           mlir::Location loc) {
+  return LoopScopeState(ctx, carriedVars, hasFirstIterFlag, firstIterInit, loc);
+}
+
+AnalysisInterpreter::LoopScope AnalysisInterpreter::beginLoop(
+    llvm::ArrayRef<const clang::ValueDecl *> carriedVars, bool hasFirstIterFlag,
+    mlir::Value firstIterInit, mlir::Location loc) {
+  return LoopScopeState(ctx, carriedVars, hasFirstIterFlag, firstIterInit, loc);
 }
 
 template <typename Interp>
@@ -4052,106 +4203,67 @@ static bool lowerForStmt(const clang::ForStmt *forStmt, LoweringContext &ctx,
                             mutatedVars))
     return false;
 
-  LoopSkeleton skeleton;
-  if (!buildLoopSkeleton(ctx, mutatedVars, /*hasFirstIterFlag=*/false,
-                         mlir::Value(), skeleton))
+  auto loopScope = interp.beginLoop(mutatedVars, /*hasFirstIterFlag=*/false,
+                                    mlir::Value(), loc);
+  if (!loopScope.isValid())
     return false;
-  auto loopOp = skeleton.loop;
-  auto *prepareBlock = skeleton.prepareBlock;
-  auto *bodyBlock = skeleton.bodyBlock;
 
-  // Prepare region: evaluate loop condition.
-  {
-    mlir::OpBuilder prepBuilder(ctx.builder.getContext());
-    prepBuilder.setInsertionPointToStart(prepareBlock);
-    LoweringContext prepCtx(prepBuilder, loc, ctx.returnType, ctx.errorMessage,
-                            ctx.sourceManager);
-    prepCtx.valueMap = ctx.valueMap;
-    prepCtx.symValueMap = ctx.symValueMap;
-    prepCtx.loopStack = ctx.loopStack;
-    prepCtx.switchStack = ctx.switchStack;
-    prepCtx.controlStack = ctx.controlStack;
-    prepCtx.switchStack = ctx.switchStack;
-    prepCtx.controlStack = ctx.controlStack;
-    prepCtx.switchStack = ctx.switchStack;
-    prepCtx.controlStack = ctx.controlStack;
-    for (auto [index, vd] : llvm::enumerate(mutatedVars))
-      prepCtx.valueMap[vd] = prepareBlock->getArgument(index);
+  LoweringContext &prepareCtx = loopScope.prepareContext();
+  mlir::OpBuilder &prepBuilder = prepareCtx.builder;
 
-    mlir::Value condValue;
-    if (const clang::Expr *condExpr = forStmt->getCond()) {
-      condValue = lowerExpr(condExpr, prepCtx);
-      if (!condValue || prepCtx.failed)
-        return false;
-    } else {
-      condValue = prepBuilder.create<mlir::arith::ConstantIntOp>(loc, 1, 1);
-    }
-
-    llvm::SmallVector<mlir::Value, 8> forwarded;
-    forwarded.reserve(mutatedVars.size());
-    for (const clang::ValueDecl *vd : mutatedVars)
-      forwarded.push_back(prepCtx.valueMap.lookup(vd));
-
-    prepBuilder.create<simt::dialect::ConditionOp>(loc, condValue, forwarded);
+  mlir::Value condValue;
+  if (const clang::Expr *condExpr = forStmt->getCond()) {
+    condValue = lowerExpr(condExpr, prepareCtx);
+    if (!condValue || prepareCtx.failed)
+      return false;
+  } else {
+    condValue = prepBuilder.create<mlir::arith::ConstantIntOp>(loc, 1, 1);
   }
 
-  // Body region: execute loop body and increment.
-  {
-    mlir::OpBuilder bodyBuilder(ctx.builder.getContext());
-    bodyBuilder.setInsertionPointToStart(bodyBlock);
-    LoweringContext bodyCtx(bodyBuilder, loc, ctx.returnType, ctx.errorMessage,
-                            ctx.sourceManager);
-    bodyCtx.valueMap = ctx.valueMap;
-    bodyCtx.symValueMap = ctx.symValueMap;
-    bodyCtx.loopStack = ctx.loopStack;
-    bodyCtx.switchStack = ctx.switchStack;
-    bodyCtx.controlStack = ctx.controlStack;
-    for (auto [index, vd] : llvm::enumerate(mutatedVars))
-      bodyCtx.valueMap[vd] = bodyBlock->getArgument(index);
+  llvm::SmallVector<mlir::Value, 8> forwarded;
+  forwarded.reserve(mutatedVars.size());
+  for (const clang::ValueDecl *vd : mutatedVars) {
+    mlir::Value value = prepareCtx.valueMap.lookup(vd);
+    if (!value)
+      value = ctx.valueMap.lookup(vd);
+    forwarded.push_back(value);
+  }
 
-    auto bodyInterp = interp.fork(bodyCtx);
+  prepBuilder.create<simt::dialect::ConditionOp>(loc, condValue, forwarded);
 
-    if (const clang::Stmt *body = forStmt->getBody()) {
-      if (!lowerStatement(body, bodyCtx, bodyInterp) || bodyCtx.failed)
+  LoweringContext &bodyCtx = loopScope.bodyContext();
+  auto bodyInterp = interp.fork(bodyCtx);
+
+  if (const clang::Stmt *body = forStmt->getBody()) {
+    if (!lowerStatement(body, bodyCtx, bodyInterp) || bodyCtx.failed)
+      return false;
+  }
+
+  if (!bodyCtx.emittedTerminator) {
+    if (const auto *incExpr =
+            llvm::dyn_cast_or_null<clang::Expr>(forStmt->getInc())) {
+      (void)lowerExpr(incExpr, bodyCtx);
+      if (bodyCtx.failed)
+        return false;
+    } else if (const clang::Stmt *inc = forStmt->getInc()) {
+      if (!lowerStatement(inc, bodyCtx, bodyInterp) || bodyCtx.failed)
         return false;
     }
-
-    if (!bodyCtx.emittedTerminator) {
-      if (const auto *incExpr =
-              llvm::dyn_cast_or_null<clang::Expr>(forStmt->getInc())) {
-        (void)lowerExpr(incExpr, bodyCtx);
-        if (bodyCtx.failed)
-          return false;
-      } else if (const clang::Stmt *incStmt = forStmt->getInc()) {
-        if (!lowerStatement(incStmt, bodyCtx, bodyInterp) || bodyCtx.failed)
-          return false;
-      }
-    }
-
-    if (!bodyCtx.emittedTerminator) {
-      llvm::SmallVector<mlir::Value, 8> yieldOperands;
-      yieldOperands.reserve(mutatedVars.size());
-      for (const clang::ValueDecl *vd : mutatedVars) {
-        mlir::Value value = bodyCtx.valueMap.lookup(vd);
-        if (!value)
-          value = ctx.valueMap.lookup(vd);
-        yieldOperands.push_back(value);
-      }
-      bodyBuilder.create<simt::dialect::YieldOp>(loc, yieldOperands);
-    }
   }
 
-  for (auto [index, vd] : llvm::enumerate(mutatedVars)) {
-    ctx.valueMap[vd] = loopOp.getResult(index);
-    ctx.mutatedVars.insert(vd);
+  if (!bodyCtx.emittedTerminator) {
+    llvm::SmallVector<mlir::Value, 8> yieldOperands;
+    yieldOperands.reserve(mutatedVars.size());
+    for (const clang::ValueDecl *vd : mutatedVars) {
+      mlir::Value value = bodyCtx.valueMap.lookup(vd);
+      if (!value)
+        value = ctx.valueMap.lookup(vd);
+      yieldOperands.push_back(value);
+    }
+    bodyCtx.builder.create<simt::dialect::YieldOp>(loc, yieldOperands);
   }
 
-  ctx.loopStack.pop_back();
-  if (!ctx.controlStack.empty() &&
-      ctx.controlStack.back().kind == ControlEntryKind::Loop)
-    ctx.controlStack.pop_back();
-
-  return true;
+  return loopScope.close();
 }
 
 template <typename Interp>
