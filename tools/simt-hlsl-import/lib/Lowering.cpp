@@ -2114,26 +2114,17 @@ struct BufferAccessInfo {
   const clang::ValueDecl *decl = nullptr;
 };
 
-static std::optional<BufferAccessInfo>
-getBufferAccessInfo(const clang::Expr *baseExpr, const clang::Expr *indexExpr,
-                    LoweringContext &ctx);
-
-static std::optional<BufferAccessInfo>
-lowerBufferAccessOperands(const clang::CXXOperatorCallExpr *opCall,
-                          LoweringContext &ctx);
-
-template <typename Interp>
-static std::optional<std::tuple<typename Interp::Value, typename Interp::Value,
-                                simt::dialect::ResourceType,
+template <typename ValueT, typename LowerExprFn>
+static std::optional<std::tuple<ValueT, ValueT, simt::dialect::ResourceType,
                                 const clang::ValueDecl *>>
 lowerBufferAccessInterp(const clang::Expr *baseExpr,
                         const clang::Expr *indexExpr, LoweringContext &ctx,
-                        Interp &interp) {
-  auto resource = lowerExprInterp(baseExpr->IgnoreParenImpCasts(), ctx, interp);
+                        LowerExprFn &&lowerSubExpr) {
+  auto resource = lowerSubExpr(baseExpr->IgnoreParenImpCasts());
   if (!resource)
     return std::nullopt;
 
-  auto index = lowerExprInterp(indexExpr->IgnoreParenImpCasts(), ctx, interp);
+  auto index = lowerSubExpr(indexExpr->IgnoreParenImpCasts());
   if (!index)
     return std::nullopt;
 
@@ -2159,6 +2150,30 @@ lowerBufferAccessInterp(const clang::Expr *baseExpr,
   return std::make_optional(std::make_tuple(resource, index, resourceType, decl));
 }
 
+static mlir::Value lowerExprLegacy(const clang::Expr *expr, LoweringContext &ctx);
+
+static std::optional<BufferAccessInfo>
+getBufferAccessInfo(const clang::Expr *baseExpr, const clang::Expr *indexExpr,
+                    LoweringContext &ctx) {
+  auto info = lowerBufferAccessInterp<mlir::Value>(
+      baseExpr, indexExpr, ctx,
+      [&](const clang::Expr *expr) -> mlir::Value {
+        return lowerExprLegacy(expr, ctx);
+      });
+  if (!info)
+    return std::nullopt;
+  auto [resource, index, resourceType, decl] = *info;
+  return BufferAccessInfo{resource, index, resourceType, decl};
+}
+
+static std::optional<BufferAccessInfo>
+lowerBufferAccessOperands(const clang::CXXOperatorCallExpr *opCall,
+                          LoweringContext &ctx) {
+  if (!opCall || opCall->getNumArgs() < 2)
+    return std::nullopt;
+  return getBufferAccessInfo(opCall->getArg(0), opCall->getArg(1), ctx);
+}
+
 static mlir::Value lowerAssignment(const clang::BinaryOperator *binOp,
                                    LoweringContext &ctx);
 
@@ -2168,7 +2183,6 @@ lowerAtomicMemberCall(const clang::CXXMemberCallExpr *call,
 
 static mlir::Location getLocation(const clang::Stmt *stmt,
                                   LoweringContext &ctx);
-static mlir::Value lowerExprLegacy(const clang::Expr *expr, LoweringContext &ctx);
 
 template <typename Interp>
 static typename Interp::Value lowerExprInterp(const clang::Expr *expr,
@@ -2260,8 +2274,12 @@ static typename Interp::Value lowerExprInterp(const clang::Expr *expr,
   if (const auto *opCall = llvm::dyn_cast<clang::CXXOperatorCallExpr>(expr)) {
     if (opCall->getOperator() == clang::OO_Subscript &&
         opCall->getNumArgs() >= 2) {
-      auto info = lowerBufferAccessInterp(opCall->getArg(0), opCall->getArg(1),
-                                          ctx, interp);
+      auto lowerSubExpr = [&](const clang::Expr *subExpr)
+          -> typename Interp::Value {
+        return lowerExprInterp(subExpr, ctx, interp);
+      };
+      auto info = lowerBufferAccessInterp<typename Interp::Value>(
+          opCall->getArg(0), opCall->getArg(1), ctx, lowerSubExpr);
       if (!info)
         return ValueT();
       auto [resource, index, resourceType, decl] = *info;
@@ -2416,9 +2434,12 @@ static typename Interp::Value lowerExprInterp(const clang::Expr *expr,
   }
 
   if (const auto *arraySub = llvm::dyn_cast<clang::ArraySubscriptExpr>(expr)) {
-    auto info =
-        lowerBufferAccessInterp(arraySub->getBase(), arraySub->getIdx(), ctx,
-                                interp);
+    auto lowerSubExpr = [&](const clang::Expr *subExpr)
+        -> typename Interp::Value {
+      return lowerExprInterp(subExpr, ctx, interp);
+    };
+    auto info = lowerBufferAccessInterp<typename Interp::Value>(
+        arraySub->getBase(), arraySub->getIdx(), ctx, lowerSubExpr);
     if (!info)
       return typename Interp::Value();
     auto [resource, index, resourceType, decl] = *info;
@@ -3434,45 +3455,6 @@ static mlir::Value lowerExprLegacy(const clang::Expr *expr,
   return ctx.fail("unsupported expression lowering"), mlir::Value();
 }
 
-static std::optional<BufferAccessInfo>
-getBufferAccessInfo(const clang::Expr *baseExpr, const clang::Expr *indexExpr,
-                    LoweringContext &ctx) {
-  if (!baseExpr || !indexExpr)
-    return std::nullopt;
-
-  baseExpr = baseExpr->IgnoreParenImpCasts();
-  indexExpr = indexExpr->IgnoreParenImpCasts();
-
-  mlir::Value resource = lowerExprLegacy(baseExpr, ctx);
-  if (!resource)
-    return std::nullopt;
-
-  auto resourceType =
-      mlir::dyn_cast<simt::dialect::ResourceType>(resource.getType());
-  if (!resourceType)
-    return ctx.fail("subscript base must be a buffer resource"), std::nullopt;
-
-  mlir::Value index = lowerExprLegacy(indexExpr, ctx);
-  if (!index)
-    return std::nullopt;
-  if (!mlir::isa<mlir::IntegerType>(index.getType()))
-    return ctx.fail("buffer subscript index must be integer"), std::nullopt;
-
-  const clang::ValueDecl *decl = nullptr;
-  if (const auto *declRef = llvm::dyn_cast<clang::DeclRefExpr>(baseExpr))
-    decl = declRef->getDecl();
-
-  return BufferAccessInfo{resource, index, resourceType, decl};
-}
-
-static std::optional<BufferAccessInfo>
-lowerBufferAccessOperands(const clang::CXXOperatorCallExpr *opCall,
-                          LoweringContext &ctx) {
-  if (!opCall || opCall->getNumArgs() < 2)
-    return std::nullopt;
-  return getBufferAccessInfo(opCall->getArg(0), opCall->getArg(1), ctx);
-}
-
 static std::optional<mlir::Value>
 lowerAtomicMemberCall(const clang::CXXMemberCallExpr *call,
                       LoweringContext &ctx) {
@@ -3668,8 +3650,12 @@ lowerAssignmentInterp(const clang::BinaryOperator *binOp, LoweringContext &ctx,
   if (const auto *subscript =
           llvm::dyn_cast<clang::CXXOperatorCallExpr>(lhsExpr)) {
     if (subscript->getOperator() == clang::OO_Subscript) {
-      auto info = lowerBufferAccessInterp(subscript->getArg(0),
-                                          subscript->getArg(1), ctx, interp);
+      auto lowerSubExpr = [&](const clang::Expr *subExpr)
+          -> typename Interp::Value {
+        return lowerExprInterp(subExpr, ctx, interp);
+      };
+      auto info = lowerBufferAccessInterp<typename Interp::Value>(
+          subscript->getArg(0), subscript->getArg(1), ctx, lowerSubExpr);
       if (!info)
         return typename Interp::Value();
       auto [resource, index, resourceType, decl] = *info;
@@ -3678,8 +3664,12 @@ lowerAssignmentInterp(const clang::BinaryOperator *binOp, LoweringContext &ctx,
   }
 
   if (const auto *arraySub = llvm::dyn_cast<clang::ArraySubscriptExpr>(lhsExpr)) {
-    auto info = lowerBufferAccessInterp(arraySub->getBase(), arraySub->getIdx(),
-                                        ctx, interp);
+    auto lowerSubExpr = [&](const clang::Expr *subExpr)
+        -> typename Interp::Value {
+      return lowerExprInterp(subExpr, ctx, interp);
+    };
+    auto info = lowerBufferAccessInterp<typename Interp::Value>(
+        arraySub->getBase(), arraySub->getIdx(), ctx, lowerSubExpr);
     if (!info)
       return typename Interp::Value();
     auto [resource, index, resourceType, decl] = *info;
