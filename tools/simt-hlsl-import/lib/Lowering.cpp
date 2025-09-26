@@ -169,11 +169,7 @@ struct EmitInterpreter
         thenBuilder->setInsertionPointToEnd(&region.front());
         thenCtxStorage.emplace(*thenBuilder, loc, parent.returnType,
                                parent.errorMessage, parent.sourceManager);
-        thenCtxStorage->valueMap = parent.valueMap;
-        thenCtxStorage->symValueMap = parent.symValueMap;
-        thenCtxStorage->loopStack = parent.loopStack;
-        thenCtxStorage->switchStack = parent.switchStack;
-        thenCtxStorage->controlStack = parent.controlStack;
+        cloneContextState(parent, *thenCtxStorage);
       }
       return *thenCtxStorage;
     }
@@ -189,11 +185,7 @@ struct EmitInterpreter
         elseBuilder->setInsertionPointToEnd(&region.front());
         elseCtxStorage.emplace(*elseBuilder, loc, parent.returnType,
                                parent.errorMessage, parent.sourceManager);
-        elseCtxStorage->valueMap = parent.valueMap;
-        elseCtxStorage->symValueMap = parent.symValueMap;
-        elseCtxStorage->loopStack = parent.loopStack;
-        elseCtxStorage->switchStack = parent.switchStack;
-        elseCtxStorage->controlStack = parent.controlStack;
+        cloneContextState(parent, *elseCtxStorage);
       }
       return *elseCtxStorage;
     }
@@ -530,11 +522,7 @@ struct EmitInterpreter
     thenBuilderImpl.setInsertionPointToEnd(&thenRegion.front());
     LoweringContext thenCtx(thenBuilderImpl, mlirLoc, ctx.returnType,
                             ctx.errorMessage, ctx.sourceManager);
-    thenCtx.valueMap = ctx.valueMap;
-    thenCtx.symValueMap = ctx.symValueMap;
-    thenCtx.loopStack = ctx.loopStack;
-    thenCtx.switchStack = ctx.switchStack;
-    thenCtx.controlStack = ctx.controlStack;
+    cloneContextState(ctx, thenCtx);
 
     mlir::Value thenValue = thenBuilder(thenCtx);
     if (!thenValue)
@@ -550,11 +538,7 @@ struct EmitInterpreter
     elseBuilderImpl.setInsertionPointToEnd(&elseRegion.front());
     LoweringContext elseCtx(elseBuilderImpl, mlirLoc, ctx.returnType,
                             ctx.errorMessage, ctx.sourceManager);
-    elseCtx.valueMap = ctx.valueMap;
-    elseCtx.symValueMap = ctx.symValueMap;
-    elseCtx.loopStack = ctx.loopStack;
-    elseCtx.switchStack = ctx.switchStack;
-    elseCtx.controlStack = ctx.controlStack;
+    cloneContextState(ctx, elseCtx);
 
     mlir::Value elseValue = elseBuilder(elseCtx);
     if (!elseValue)
@@ -687,15 +671,11 @@ struct EmitInterpreter
     if (op == simt_hlsl_import::LogicalOp::And) {
       mlir::Region thenRegion;
       thenRegion.emplaceBlock();
-      mlir::OpBuilder thenBuilder(ctx.builder.getContext());
-      thenBuilder.setInsertionPointToEnd(&thenRegion.front());
-      LoweringContext thenCtx(thenBuilder, mlirLoc, ctx.returnType,
-                              ctx.errorMessage, ctx.sourceManager);
-      thenCtx.valueMap = ctx.valueMap;
-      thenCtx.symValueMap = ctx.symValueMap;
-      thenCtx.loopStack = ctx.loopStack;
-      thenCtx.switchStack = ctx.switchStack;
-      thenCtx.controlStack = ctx.controlStack;
+    mlir::OpBuilder thenBuilder(ctx.builder.getContext());
+    thenBuilder.setInsertionPointToEnd(&thenRegion.front());
+    LoweringContext thenCtx(thenBuilder, mlirLoc, ctx.returnType,
+                            ctx.errorMessage, ctx.sourceManager);
+    cloneContextState(ctx, thenCtx);
 
       mlir::Value rhsVal = rhsBuilder(thenCtx);
       if (!rhsVal)
@@ -811,11 +791,7 @@ struct EmitInterpreter
     elseBuilder.setInsertionPointToEnd(&elseRegion.front());
     LoweringContext elseCtx(elseBuilder, mlirLoc, ctx.returnType,
                             ctx.errorMessage, ctx.sourceManager);
-    elseCtx.valueMap = ctx.valueMap;
-    elseCtx.symValueMap = ctx.symValueMap;
-    elseCtx.loopStack = ctx.loopStack;
-    elseCtx.switchStack = ctx.switchStack;
-    elseCtx.controlStack = ctx.controlStack;
+    cloneContextState(ctx, elseCtx);
 
     mlir::Value rhsVal = rhsBuilder(elseCtx);
     if (!rhsVal)
@@ -1230,11 +1206,7 @@ struct AnalysisInterpreter
         thenBuilder->setInsertionPointToEnd(&region.front());
         thenCtxStorage.emplace(*thenBuilder, loc, parent.returnType,
                                parent.errorMessage, parent.sourceManager);
-        thenCtxStorage->valueMap = parent.valueMap;
-        thenCtxStorage->symValueMap = parent.symValueMap;
-        thenCtxStorage->loopStack = parent.loopStack;
-        thenCtxStorage->switchStack = parent.switchStack;
-        thenCtxStorage->controlStack = parent.controlStack;
+        cloneContextState(parent, *thenCtxStorage);
       }
       return *thenCtxStorage;
     }
@@ -1250,11 +1222,7 @@ struct AnalysisInterpreter
         elseBuilder->setInsertionPointToEnd(&region.front());
         elseCtxStorage.emplace(*elseBuilder, loc, parent.returnType,
                                parent.errorMessage, parent.sourceManager);
-        elseCtxStorage->valueMap = parent.valueMap;
-        elseCtxStorage->symValueMap = parent.symValueMap;
-        elseCtxStorage->loopStack = parent.loopStack;
-        elseCtxStorage->switchStack = parent.switchStack;
-        elseCtxStorage->controlStack = parent.controlStack;
+        cloneContextState(parent, *elseCtxStorage);
       }
       return *elseCtxStorage;
     }
@@ -1578,15 +1546,11 @@ struct AnalysisInterpreter
     if (op == simt_hlsl_import::LogicalOp::And) {
       mlir::Region thenRegion;
       thenRegion.emplaceBlock();
-      mlir::OpBuilder thenBuilder(ctx.builder.getContext());
-      thenBuilder.setInsertionPointToEnd(&thenRegion.front());
-      LoweringContext thenCtx(thenBuilder, mlirLoc, ctx.returnType,
-                              ctx.errorMessage, ctx.sourceManager);
-      thenCtx.valueMap = ctx.valueMap;
-      thenCtx.symValueMap = ctx.symValueMap;
-      thenCtx.loopStack = ctx.loopStack;
-      thenCtx.switchStack = ctx.switchStack;
-      thenCtx.controlStack = ctx.controlStack;
+    mlir::OpBuilder thenBuilder(ctx.builder.getContext());
+    thenBuilder.setInsertionPointToEnd(&thenRegion.front());
+    LoweringContext thenCtx(thenBuilder, mlirLoc, ctx.returnType,
+                            ctx.errorMessage, ctx.sourceManager);
+    cloneContextState(ctx, thenCtx);
 
       mlir::Value rhsVal = rhsBuilder(thenCtx);
       if (!rhsVal)
@@ -1702,11 +1666,7 @@ struct AnalysisInterpreter
     elseBuilder.setInsertionPointToEnd(&elseRegion.front());
     LoweringContext elseCtx(elseBuilder, mlirLoc, ctx.returnType,
                             ctx.errorMessage, ctx.sourceManager);
-    elseCtx.valueMap = ctx.valueMap;
-    elseCtx.symValueMap = ctx.symValueMap;
-    elseCtx.loopStack = ctx.loopStack;
-    elseCtx.switchStack = ctx.switchStack;
-    elseCtx.controlStack = ctx.controlStack;
+    cloneContextState(ctx, elseCtx);
 
     mlir::Value rhsVal = rhsBuilder(elseCtx);
     if (!rhsVal)
@@ -3521,11 +3481,7 @@ static bool collectLoopMutations(
 
   LoweringContext analysisCtx(analysisBuilder, ctx.defaultLoc, ctx.returnType,
                               ctx.errorMessage, ctx.sourceManager);
-  analysisCtx.valueMap = ctx.valueMap;
-  analysisCtx.symValueMap = ctx.symValueMap;
-  analysisCtx.loopStack = ctx.loopStack;
-  analysisCtx.switchStack = ctx.switchStack;
-  analysisCtx.controlStack = ctx.controlStack;
+  cloneContextState(ctx, analysisCtx);
 
   if (body) {
     if (!lowerStatement(body, analysisCtx) || analysisCtx.failed)
@@ -3569,11 +3525,7 @@ static bool collectIfMutations(
 
     LoweringContext analysisCtx(analysisBuilder, ctx.defaultLoc, ctx.returnType,
                                 ctx.errorMessage, ctx.sourceManager);
-    analysisCtx.valueMap = ctx.valueMap;
-    analysisCtx.symValueMap = ctx.symValueMap;
-    analysisCtx.loopStack = ctx.loopStack;
-    analysisCtx.switchStack = ctx.switchStack;
-    analysisCtx.controlStack = ctx.controlStack;
+    cloneContextState(ctx, analysisCtx);
 
     AnalysisInterpreter analysisInterp(analysisCtx);
     if (!lowerStatement(branchStmt, analysisCtx, analysisInterp) ||
@@ -4211,11 +4163,7 @@ static bool lowerSwitchStmt(const clang::SwitchStmt *switchStmt,
     analysisBuilder.setInsertionPointToStart(&analysisRegion.front());
     LoweringContext analysisCtx(analysisBuilder, loc, ctx.returnType,
                                 ctx.errorMessage, ctx.sourceManager);
-    analysisCtx.valueMap = ctx.valueMap;
-    analysisCtx.symValueMap = ctx.symValueMap;
-    analysisCtx.loopStack = ctx.loopStack;
-    analysisCtx.switchStack = ctx.switchStack;
-    analysisCtx.controlStack = ctx.controlStack;
+    cloneContextState(ctx, analysisCtx);
     SwitchScopeGuard analysisGuard(analysisCtx, SwitchFrame{});
     analysisGuard.frame().analysisOnly = true;
 
@@ -4297,11 +4245,7 @@ static bool lowerSwitchStmt(const clang::SwitchStmt *switchStmt,
 
     LoweringContext caseCtx(thenBuilder, loc, ctx.returnType, ctx.errorMessage,
                             ctx.sourceManager);
-    caseCtx.valueMap = ctx.valueMap;
-    caseCtx.symValueMap = ctx.symValueMap;
-    caseCtx.loopStack = ctx.loopStack;
-    caseCtx.switchStack = ctx.switchStack;
-    caseCtx.controlStack = ctx.controlStack;
+    cloneContextState(ctx, caseCtx);
     for (auto [vd, value] : llvm::zip(mutatedVars, currentValues))
       caseCtx.valueMap[vd] = value;
 

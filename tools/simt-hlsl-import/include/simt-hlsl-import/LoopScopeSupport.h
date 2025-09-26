@@ -148,6 +148,8 @@ private:
   bool valid = false;
 };
 
+void cloneContextState(const LoweringContext &parent, LoweringContext &child);
+
 class LoopScopeState : public LoopScopeProvider {
 public:
   LoopScopeState(LoweringContext &parentCtx,

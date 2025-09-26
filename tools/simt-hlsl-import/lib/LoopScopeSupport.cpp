@@ -150,6 +150,14 @@ SwitchFrame &SwitchScopeGuard::frame() {
   return ctx->switchStack.back();
 }
 
+void cloneContextState(const LoweringContext &parent, LoweringContext &child) {
+  child.valueMap = parent.valueMap;
+  child.symValueMap = parent.symValueMap;
+  child.loopStack = parent.loopStack;
+  child.switchStack = parent.switchStack;
+  child.controlStack = parent.controlStack;
+}
+
 bool buildLoopSkeleton(LoweringContext &ctx,
                        llvm::ArrayRef<const clang::ValueDecl *> mutatedVars,
                        bool hasFirstIterFlag, mlir::Value firstIterInit,
@@ -334,11 +342,7 @@ void LoopScopeState::setupBodyContext() {
 }
 
 void LoopScopeState::copySharedState(LoweringContext &childCtx) {
-  childCtx.valueMap = parent.valueMap;
-  childCtx.symValueMap = parent.symValueMap;
-  childCtx.loopStack = parent.loopStack;
-  childCtx.switchStack = parent.switchStack;
-  childCtx.controlStack = parent.controlStack;
+  cloneContextState(parent, childCtx);
 }
 
 void LoopScopeState::setBlockArguments(LoweringContext &childCtx,
