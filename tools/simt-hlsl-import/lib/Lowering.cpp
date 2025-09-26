@@ -2484,6 +2484,28 @@ static typename Interp::Value lowerExprInterp(const clang::Expr *expr,
 
       return interp.emitCompare(cmpOp, lhs, rhs, src);
     }
+    case clang::BinaryOperatorKind::BO_LAnd:
+    case clang::BinaryOperatorKind::BO_LOr: {
+      auto lhs = getOperand(binOp->getLHS());
+      if (!lhs)
+        return typename Interp::Value();
+
+      mlir::Type boolType = ctx.builder.getI1Type();
+      if (getValueType(lhs) != boolType) {
+        ctx.fail("logical operator requires boolean operands");
+        return typename Interp::Value();
+      }
+
+      auto rhsBuilder = [&](LoweringContext &branchCtx) -> typename Interp::Value {
+        auto childInterp = interp.fork(branchCtx);
+        return lowerExprInterp(binOp->getRHS(), branchCtx, childInterp);
+      };
+
+      auto logicalOp = binOp->getOpcode() == clang::BinaryOperatorKind::BO_LAnd
+                           ? simt_hlsl_import::LogicalOp::And
+                           : simt_hlsl_import::LogicalOp::Or;
+      return interp.emitShortCircuit(logicalOp, lhs, rhsBuilder, src);
+    }
     default:
       break;
     }
