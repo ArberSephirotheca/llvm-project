@@ -2249,6 +2249,69 @@ template <typename Interp>
 static typename Interp::Value lowerExprInterp(const clang::Expr *expr,
                                               LoweringContext &ctx,
                                               Interp &interp) {
+  if (!expr)
+    return typename Interp::Value();
+
+  mlir::Type type = convertType(expr->getType(), ctx.builder);
+  if (!type) {
+    ctx.fail("unsupported expression type");
+    return typename Interp::Value();
+  }
+
+  mlir::Location loc = getLocation(expr, ctx);
+
+  if (const auto *intLit = llvm::dyn_cast<clang::IntegerLiteral>(expr)) {
+    if (!mlir::isa<mlir::IntegerType>(type)) {
+      ctx.fail("integer literal expects integer type");
+      return typename Interp::Value();
+    }
+    auto intType = mlir::cast<mlir::IntegerType>(type);
+    std::string tag = buildIntegerTag(intType);
+    simt_hlsl_import::SourceLoc src{expr, loc};
+    auto result = interp.emitConstantInt(intLit->getValue().getSExtValue(),
+                                         tag.c_str(), src);
+    if constexpr (!std::is_same_v<typename Interp::Value, mlir::Value>) {
+      auto attr = ctx.builder.getIntegerAttr(intType, intLit->getValue());
+      mlir::Value mlirConst =
+          ctx.builder.create<mlir::arith::ConstantOp>(loc, attr);
+      result.setValue(mlirConst);
+      if (!result.hasSymValue())
+        result.setSym(makeSymValueForType(type));
+    }
+    return result;
+  }
+
+  if (const auto *floatLit = llvm::dyn_cast<clang::FloatingLiteral>(expr)) {
+    if (!mlir::isa<mlir::FloatType>(type)) {
+      ctx.fail("floating literal expects floating type");
+      return typename Interp::Value();
+    }
+    auto floatType = mlir::cast<mlir::FloatType>(type);
+    std::string tag = buildFloatTag(floatType);
+    simt_hlsl_import::SourceLoc src{expr, loc};
+    llvm::APFloat apValue = floatLit->getValue();
+    double value = apValue.convertToDouble();
+    auto result = interp.emitConstantFloat(value, tag.c_str(), src);
+    if constexpr (!std::is_same_v<typename Interp::Value, mlir::Value>) {
+      auto attr = ctx.builder.getFloatAttr(floatType, floatLit->getValue());
+      mlir::Value mlirConst =
+          ctx.builder.create<mlir::arith::ConstantOp>(loc, attr);
+      result.setValue(mlirConst);
+      if (!result.hasSymValue())
+        result.setSym(makeSymValueForType(type));
+    }
+    return result;
+  }
+
+  if (const auto *paren = llvm::dyn_cast<clang::ParenExpr>(expr))
+    return lowerExprInterp(paren->getSubExpr(), ctx, interp);
+
+  if (const auto *implicitCast = llvm::dyn_cast<clang::ImplicitCastExpr>(expr))
+    return lowerExprInterp(implicitCast->getSubExpr(), ctx, interp);
+
+  if (const auto *constExpr = llvm::dyn_cast<clang::ConstantExpr>(expr))
+    return lowerExprInterp(constExpr->getSubExpr(), ctx, interp);
+
   mlir::Value value = lowerExprLegacy(expr, ctx);
   if (!value)
     return typename Interp::Value();
