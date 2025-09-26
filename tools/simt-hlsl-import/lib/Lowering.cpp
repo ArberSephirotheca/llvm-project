@@ -2260,35 +2260,12 @@ static typename Interp::Value lowerExprInterp(const clang::Expr *expr,
   if (const auto *opCall = llvm::dyn_cast<clang::CXXOperatorCallExpr>(expr)) {
     if (opCall->getOperator() == clang::OO_Subscript &&
         opCall->getNumArgs() >= 2) {
-      auto resource = lowerExprInterp(opCall->getArg(0)->IgnoreParenImpCasts(),
-                                      ctx, interp);
-      if (!resource)
+      auto info = lowerBufferAccessInterp(opCall->getArg(0), opCall->getArg(1),
+                                          ctx, interp);
+      if (!info)
         return ValueT();
-
-      auto index = lowerExprInterp(opCall->getArg(1)->IgnoreParenImpCasts(), ctx,
-                                   interp);
-      if (!index)
-        return ValueT();
-
-      mlir::Type indexType = getValueType(index);
-      if (!mlir::isa<mlir::IntegerType>(indexType)) {
-        ctx.fail("buffer subscript index must be integer");
-        return ValueT();
-      }
-
-      auto resourceType =
-          mlir::dyn_cast<simt::dialect::ResourceType>(getValueType(resource));
-      if (!resourceType) {
-        ctx.fail("subscript base must be a buffer resource");
-        return ValueT();
-      }
-
-      const clang::ValueDecl *decl = nullptr;
-      if (const auto *declRef =
-              llvm::dyn_cast<clang::DeclRefExpr>(
-                  opCall->getArg(0)->IgnoreParenImpCasts()))
-        decl = declRef->getDecl();
-
+      auto [resource, index, resourceType, decl] = *info;
+      (void)resourceType;
       return interp.emitBufferLoad(resource, index, decl, {expr, loc});
     }
   }
@@ -2439,35 +2416,13 @@ static typename Interp::Value lowerExprInterp(const clang::Expr *expr,
   }
 
   if (const auto *arraySub = llvm::dyn_cast<clang::ArraySubscriptExpr>(expr)) {
-    auto resource = lowerExprInterp(arraySub->getBase()->IgnoreParenImpCasts(),
-                                    ctx, interp);
-    if (!resource)
+    auto info =
+        lowerBufferAccessInterp(arraySub->getBase(), arraySub->getIdx(), ctx,
+                                interp);
+    if (!info)
       return typename Interp::Value();
-
-    auto index = lowerExprInterp(arraySub->getIdx()->IgnoreParenImpCasts(), ctx,
-                                 interp);
-    if (!index)
-      return typename Interp::Value();
-
-    mlir::Type indexType = getValueType(index);
-    if (!mlir::isa<mlir::IntegerType>(indexType)) {
-      ctx.fail("buffer subscript index must be integer");
-      return typename Interp::Value();
-    }
-
-    auto resourceType =
-        mlir::dyn_cast<simt::dialect::ResourceType>(getValueType(resource));
-    if (!resourceType) {
-      ctx.fail("subscript base must be a buffer resource");
-      return typename Interp::Value();
-    }
-
-    const clang::ValueDecl *decl = nullptr;
-    if (const auto *declRef =
-            llvm::dyn_cast<clang::DeclRefExpr>(
-                arraySub->getBase()->IgnoreParenImpCasts()))
-      decl = declRef->getDecl();
-
+    auto [resource, index, resourceType, decl] = *info;
+    (void)resourceType;
     return interp.emitBufferLoad(resource, index, decl, {expr, loc});
   }
 
