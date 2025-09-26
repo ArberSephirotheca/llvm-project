@@ -3615,6 +3615,14 @@ static bool lowerStatement(const clang::Stmt *stmt, LoweringContext &ctx,
       return true;
 
     if (target.kind == ControlEntryKind::Loop && target.loop) {
+      if (target.loop->analysisOnly) {
+        ctx.mutatedVars.insert(target.loop->carriedVars.begin(),
+                               target.loop->carriedVars.end());
+        for (const clang::ValueDecl *vd : target.loop->carriedVars)
+          interp.noteMutation(vd);
+        ctx.emittedTerminator = true;
+        return true;
+      }
       llvm::SmallVector<mlir::Value, 8> operands;
       collectLoopBreakOperands(ctx, *target.loop, operands);
       ctx.builder.create<simt::dialect::BreakOp>(ctx.defaultLoc, operands);
@@ -3667,6 +3675,14 @@ static bool lowerStatement(const clang::Stmt *stmt, LoweringContext &ctx,
 
   if (llvm::isa<clang::ContinueStmt>(stmt)) {
     if (LoopFrame *loopFrame = getInnermostLoop(ctx)) {
+      if (loopFrame->analysisOnly) {
+        ctx.mutatedVars.insert(loopFrame->carriedVars.begin(),
+                               loopFrame->carriedVars.end());
+        for (const clang::ValueDecl *vd : loopFrame->carriedVars)
+          interp.noteMutation(vd);
+        ctx.emittedTerminator = true;
+        return true;
+      }
       llvm::SmallVector<mlir::Value, 8> operands;
       collectLoopContinueOperands(ctx, *loopFrame, operands);
       ctx.builder.create<simt::dialect::ContinueOp>(ctx.defaultLoc, operands);

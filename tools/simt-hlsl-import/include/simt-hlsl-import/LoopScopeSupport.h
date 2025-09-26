@@ -50,6 +50,7 @@ struct LoopFrame {
   bool hasFirstIterFlag = false;
   unsigned firstIterIndex = 0;
   mlir::Value currentFirstIterValue;
+  bool analysisOnly = false;
   LoopScopeProvider *activeScope = nullptr;
 };
 
@@ -169,6 +170,7 @@ public:
   bool isValid() const;
   LoweringContext &prepareContext();
   LoweringContext &bodyContext();
+  bool isAnalysisOnly() const;
 
   bool hasFirstIterFlag() const;
   unsigned getFirstIterIndex() const;

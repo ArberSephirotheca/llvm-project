@@ -64,6 +64,8 @@ void collectLoopOperandsRaw(LoweringContext &ctx, LoopFrame &frame,
                             llvm::SmallVectorImpl<mlir::Value> &ops,
                             bool /*isContinue*/) {
   ops.clear();
+  if (!frame.loop)
+    return;
   mlir::Block &bodyBlock = frame.loop.getBodyRegion().front();
   ops.reserve(frame.carriedVars.size() + (frame.hasFirstIterFlag ? 1 : 0));
   for (auto [index, vd] : llvm::enumerate(frame.carriedVars)) {
@@ -86,6 +88,10 @@ void collectLoopOperandsRaw(LoweringContext &ctx, LoopFrame &frame,
 
 void collectLoopBreakOperands(LoweringContext &ctx, LoopFrame &frame,
                               llvm::SmallVectorImpl<mlir::Value> &ops) {
+  if (frame.analysisOnly) {
+    ops.clear();
+    return;
+  }
   if (frame.activeScope)
     return frame.activeScope->collectBreakOperands(ctx, ops);
   collectLoopOperandsRaw(ctx, frame, ops, /*isContinue=*/false);
@@ -93,6 +99,10 @@ void collectLoopBreakOperands(LoweringContext &ctx, LoopFrame &frame,
 
 void collectLoopContinueOperands(LoweringContext &ctx, LoopFrame &frame,
                                  llvm::SmallVectorImpl<mlir::Value> &ops) {
+  if (frame.analysisOnly) {
+    ops.clear();
+    return;
+  }
   if (frame.activeScope)
     return frame.activeScope->collectContinueOperands(ctx, ops);
   collectLoopOperandsRaw(ctx, frame, ops, /*isContinue=*/true);
@@ -210,6 +220,7 @@ bool buildLoopSkeleton(LoweringContext &ctx,
 
   LoopFrame frame{loop, {}, /*hasFirstIterFlag=*/false,
                   /*firstIterIndex=*/0, /*currentFirstIterValue=*/mlir::Value()};
+  frame.analysisOnly = !isEmitContext(ctx);
   frame.carriedVars.append(mutatedVars.begin(), mutatedVars.end());
   frame.hasFirstIterFlag = hasFirstIterFlag;
   if (hasFirstIterFlag) {
@@ -278,6 +289,10 @@ LoweringContext &LoopScopeState::bodyContext() {
   return *bodyCtx;
 }
 
+bool LoopScopeState::isAnalysisOnly() const {
+  return skeleton.frame && skeleton.frame->analysisOnly;
+}
+
 bool LoopScopeState::hasFirstIterFlag() const {
   return skeleton.frame && skeleton.frame->hasFirstIterFlag;
 }
@@ -311,6 +326,25 @@ bool LoopScopeState::close() {
   if (!active)
     return !parent.failed;
 
+  if (skeleton.frame && skeleton.frame->analysisOnly) {
+    if (bodyCtx) {
+      parent.failed |= bodyCtx->failed;
+      parent.mutatedVars.insert(bodyCtx->mutatedVars.begin(),
+                                bodyCtx->mutatedVars.end());
+      for (const clang::ValueDecl *vd : carriedVars) {
+        if (auto it = bodyCtx->valueMap.find(vd);
+            it != bodyCtx->valueMap.end())
+          parent.valueMap[vd] = it->second;
+        if (auto symIt = bodyCtx->symValueMap.find(vd);
+            symIt != bodyCtx->symValueMap.end())
+          parent.symValueMap[vd] = symIt->second;
+      }
+    }
+    parent.mutatedVars.insert(carriedVars.begin(), carriedVars.end());
+    cleanup();
+    return !parent.failed;
+  }
+
   unsigned index = 0;
   for (const clang::ValueDecl *vd : carriedVars) {
     parent.valueMap[vd] = skeleton.loop.getResult(index++);
@@ -334,11 +368,19 @@ bool LoopScopeState::close() {
 
 void LoopScopeState::collectBreakOperands(
     LoweringContext &ctx, llvm::SmallVectorImpl<mlir::Value> &ops) {
+  if (skeleton.frame && skeleton.frame->analysisOnly) {
+    ops.clear();
+    return;
+  }
   collectLoopOperandsRaw(ctx, *skeleton.frame, ops, /*isContinue=*/false);
 }
 
 void LoopScopeState::collectContinueOperands(
     LoweringContext &ctx, llvm::SmallVectorImpl<mlir::Value> &ops) {
+  if (skeleton.frame && skeleton.frame->analysisOnly) {
+    ops.clear();
+    return;
+  }
   collectLoopOperandsRaw(ctx, *skeleton.frame, ops, /*isContinue=*/true);
 }
 
