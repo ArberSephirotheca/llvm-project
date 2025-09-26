@@ -58,6 +58,16 @@ namespace simt_hlsl_import {
 
 namespace {
 
+struct LoweringContext;
+
+struct LoopScopeProvider {
+  virtual ~LoopScopeProvider() = default;
+  virtual void collectBreakOperands(LoweringContext &ctx,
+                                    llvm::SmallVectorImpl<mlir::Value> &ops) = 0;
+  virtual void collectContinueOperands(
+      LoweringContext &ctx, llvm::SmallVectorImpl<mlir::Value> &ops) = 0;
+};
+
 enum class ControlEntryKind { Loop, Switch };
 
 struct LoopFrame {
@@ -66,6 +76,7 @@ struct LoopFrame {
   bool hasFirstIterFlag = false;
   unsigned firstIterIndex = 0;
   mlir::Value currentFirstIterValue;
+  LoopScopeProvider *activeScope = nullptr;
 };
 
 struct LoopSkeleton {
@@ -3725,8 +3736,9 @@ static bool collectIfMutations(
   return true;
 }
 
-static void collectLoopBreakOperands(LoweringContext &ctx, LoopFrame &frame,
-                                     llvm::SmallVectorImpl<mlir::Value> &ops) {
+static void collectLoopOperandsRaw(LoweringContext &ctx, LoopFrame &frame,
+                                   llvm::SmallVectorImpl<mlir::Value> &ops,
+                                   bool isContinue) {
   ops.clear();
   mlir::Block &bodyBlock = frame.loop.getBodyRegion().front();
   ops.reserve(frame.carriedVars.size() + (frame.hasFirstIterFlag ? 1 : 0));
@@ -3746,25 +3758,18 @@ static void collectLoopBreakOperands(LoweringContext &ctx, LoopFrame &frame,
   }
 }
 
+static void collectLoopBreakOperands(LoweringContext &ctx, LoopFrame &frame,
+                                     llvm::SmallVectorImpl<mlir::Value> &ops) {
+  if (frame.activeScope)
+    return frame.activeScope->collectBreakOperands(ctx, ops);
+  collectLoopOperandsRaw(ctx, frame, ops, /*isContinue=*/false);
+}
+
 static void collectLoopContinueOperands(LoweringContext &ctx, LoopFrame &frame,
                                         llvm::SmallVectorImpl<mlir::Value> &ops) {
-  ops.clear();
-  mlir::Block &bodyBlock = frame.loop.getBodyRegion().front();
-  ops.reserve(frame.carriedVars.size() + (frame.hasFirstIterFlag ? 1 : 0));
-  for (auto [index, vd] : llvm::enumerate(frame.carriedVars)) {
-    mlir::Value value = ctx.valueMap.lookup(vd);
-    if (!value && index < bodyBlock.getNumArguments())
-      value = bodyBlock.getArgument(index);
-    if (!value)
-      value = frame.loop.getResult(index);
-    ops.push_back(value);
-  }
-  if (frame.hasFirstIterFlag) {
-    mlir::Value flag = frame.currentFirstIterValue;
-    if (!flag && frame.firstIterIndex < frame.loop.getNumResults())
-      flag = frame.loop.getResult(frame.firstIterIndex);
-    ops.push_back(flag);
-  }
+  if (frame.activeScope)
+    return frame.activeScope->collectContinueOperands(ctx, ops);
+  collectLoopOperandsRaw(ctx, frame, ops, /*isContinue=*/true);
 }
 
 bool buildLoopSkeleton(
@@ -3836,7 +3841,7 @@ bool buildLoopSkeleton(
 
 namespace {
 
-class LoopScopeState {
+class LoopScopeState : public LoopScopeProvider {
 public:
   LoopScopeState(LoweringContext &parentCtx,
                  llvm::ArrayRef<const clang::ValueDecl *> carried,
@@ -3850,6 +3855,8 @@ public:
       return;
     }
     active = true;
+    if (skeleton.frame)
+      skeleton.frame->activeScope = this;
     setupPrepareContext();
     setupBodyContext();
   }
@@ -3922,6 +3929,16 @@ public:
 
   ~LoopScopeState() { cleanup(); }
 
+  void collectBreakOperands(LoweringContext &ctx,
+                            llvm::SmallVectorImpl<mlir::Value> &ops) override {
+    collectLoopOperandsRaw(ctx, *skeleton.frame, ops, /*isContinue=*/false);
+  }
+
+  void collectContinueOperands(LoweringContext &ctx,
+                               llvm::SmallVectorImpl<mlir::Value> &ops) override {
+    collectLoopOperandsRaw(ctx, *skeleton.frame, ops, /*isContinue=*/true);
+  }
+
 private:
   void setupPrepareContext() {
     prepareBuilder.emplace(parent.builder.getContext());
@@ -3970,6 +3987,8 @@ private:
     if (!active)
       return;
     active = false;
+    if (skeleton.frame && skeleton.frame->activeScope == this)
+      skeleton.frame->activeScope = nullptr;
     if (!parent.loopStack.empty())
       parent.loopStack.pop_back();
     if (!parent.controlStack.empty() &&
