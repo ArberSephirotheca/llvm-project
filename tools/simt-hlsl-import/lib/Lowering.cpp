@@ -3120,6 +3120,45 @@ static mlir::Value lowerExprLegacy(const clang::Expr *expr,
                                  {expr, loc});
   }
 
+  if (const auto *condOp = llvm::dyn_cast<clang::ConditionalOperator>(expr)) {
+    mlir::Value condValue = lowerExprLegacy(condOp->getCond(), ctx);
+    if (!condValue)
+      return {};
+    if (condValue.getType() != ctx.builder.getI1Type())
+      return ctx.fail("conditional operator requires boolean condition"),
+             mlir::Value();
+
+    auto thenBuilder = [&](LoweringContext &branchCtx) -> mlir::Value {
+      mlir::Value value = lowerExprLegacy(condOp->getTrueExpr(), branchCtx);
+      if (!value)
+        return mlir::Value();
+      if (value.getType() != type) {
+        branchCtx.fail("conditional operator branch type mismatch");
+        return mlir::Value();
+      }
+      return value;
+    };
+
+    auto elseBuilder = [&](LoweringContext &branchCtx) -> mlir::Value {
+      mlir::Value value = lowerExprLegacy(condOp->getFalseExpr(), branchCtx);
+      if (!value)
+        return mlir::Value();
+      if (value.getType() != type) {
+        branchCtx.fail("conditional operator branch type mismatch");
+        return mlir::Value();
+      }
+      return value;
+    };
+
+    simt_hlsl_import::SourceLoc src{condOp, loc};
+    if (isEmitContext(ctx)) {
+      EmitInterpreter interp(ctx);
+      return interp.emitConditional(condValue, thenBuilder, elseBuilder, src);
+    }
+    AnalysisInterpreter interp(ctx);
+    return interp.emitConditional(condValue, thenBuilder, elseBuilder, src);
+  }
+
   if (const auto *vecElem = llvm::dyn_cast<clang::ExtVectorElementExpr>(expr)) {
     if (vecElem->isArrow())
       return ctx.fail("pointer-based vector swizzles are unsupported"),
