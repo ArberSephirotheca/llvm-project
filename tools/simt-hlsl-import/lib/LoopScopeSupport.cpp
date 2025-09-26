@@ -437,4 +437,202 @@ void LoopScopeState::cleanup() {
     parent.controlStack.pop_back();
 }
 
+AnalysisLoopScope::AnalysisLoopScope(
+    LoweringContext &parentCtx,
+    llvm::ArrayRef<const clang::ValueDecl *> carried,
+    bool hasFirstIterFlag, mlir::Value firstIterInit, mlir::Location loc)
+    : parent(parentCtx), loc(loc) {
+  carriedVars.assign(carried.begin(), carried.end());
+
+  llvm::SmallVector<mlir::Type, 8> argTypes;
+  argTypes.reserve(carriedVars.size() + (hasFirstIterFlag ? 1 : 0));
+
+  for (const clang::ValueDecl *vd : carriedVars) {
+    mlir::Value initial = getLoopCarriedValue(parent, vd);
+    if (!initial) {
+      parent.fail("reference to unknown loop variable");
+      return;
+    }
+    argTypes.push_back(initial.getType());
+  }
+
+  if (hasFirstIterFlag)
+    argTypes.push_back(parent.builder.getI1Type());
+
+  if (parent.failed)
+    return;
+
+  LoopFrame frameState{};
+  frameState.carriedVars.append(carriedVars.begin(), carriedVars.end());
+  frameState.analysisOnly = true;
+  frameState.hasFirstIterFlag = hasFirstIterFlag;
+  if (hasFirstIterFlag) {
+    frameState.firstIterIndex = carriedVars.size();
+    frameState.currentFirstIterValue = firstIterInit;
+  }
+
+  parent.loopStack.push_back(frameState);
+  parent.controlStack.push_back({ControlEntryKind::Loop,
+                                 parent.loopStack.size() - 1});
+  frame = &parent.loopStack.back();
+  frame->activeScope = this;
+  if (hasFirstIterFlag)
+    frame->currentFirstIterValue = firstIterInit;
+
+  active = true;
+
+  prepareBlock = &prepareRegion.emplaceBlock();
+  bodyBlock = &bodyRegion.emplaceBlock();
+  if (!argTypes.empty()) {
+    llvm::SmallVector<mlir::Location, 8> argLocs(argTypes.size(), loc);
+    prepareBlock->addArguments(argTypes, argLocs);
+    bodyBlock->addArguments(argTypes, argLocs);
+  }
+
+  setupPrepareContext();
+  setupBodyContext();
+}
+
+AnalysisLoopScope::~AnalysisLoopScope() { cleanup(); }
+
+bool AnalysisLoopScope::isValid() const { return active && !parent.failed; }
+
+LoweringContext &AnalysisLoopScope::prepareContext() {
+  assert(active && prepareCtx && "prepare context unavailable");
+  return *prepareCtx;
+}
+
+LoweringContext &AnalysisLoopScope::bodyContext() {
+  assert(active && bodyCtx && "body context unavailable");
+  return *bodyCtx;
+}
+
+bool AnalysisLoopScope::isAnalysisOnly() const { return true; }
+
+bool AnalysisLoopScope::hasFirstIterFlag() const {
+  return frame && frame->hasFirstIterFlag;
+}
+
+unsigned AnalysisLoopScope::getFirstIterIndex() const {
+  assert(hasFirstIterFlag());
+  return frame->firstIterIndex;
+}
+
+mlir::Value AnalysisLoopScope::getPrepareFirstIterArg() const {
+  assert(hasFirstIterFlag() && prepareBlock);
+  return prepareBlock->getArgument(getFirstIterIndex());
+}
+
+mlir::Value AnalysisLoopScope::getBodyFirstIterArg() const {
+  assert(hasFirstIterFlag() && bodyBlock);
+  return bodyBlock->getArgument(getFirstIterIndex());
+}
+
+void AnalysisLoopScope::setCurrentFirstIterValue(mlir::Value value) {
+  if (!hasFirstIterFlag())
+    return;
+  frame->currentFirstIterValue = value;
+  if (prepareCtx && !prepareCtx->loopStack.empty())
+    prepareCtx->loopStack.back().currentFirstIterValue = value;
+  if (bodyCtx && !bodyCtx->loopStack.empty())
+    bodyCtx->loopStack.back().currentFirstIterValue = value;
+}
+
+bool AnalysisLoopScope::close() {
+  if (!active)
+    return !parent.failed;
+
+  if (bodyCtx) {
+    parent.failed |= bodyCtx->failed;
+    parent.mutatedVars.insert(bodyCtx->mutatedVars.begin(),
+                               bodyCtx->mutatedVars.end());
+    for (const clang::ValueDecl *vd : carriedVars) {
+      if (auto it = bodyCtx->valueMap.find(vd);
+          it != bodyCtx->valueMap.end())
+        parent.valueMap[vd] = it->second;
+      if (auto symIt = bodyCtx->symValueMap.find(vd);
+          symIt != bodyCtx->symValueMap.end())
+        parent.symValueMap[vd] = symIt->second;
+    }
+  }
+
+  parent.mutatedVars.insert(carriedVars.begin(), carriedVars.end());
+
+  cleanup();
+  return !parent.failed;
+}
+
+void AnalysisLoopScope::collectBreakOperands(
+    LoweringContext &, llvm::SmallVectorImpl<mlir::Value> &ops) {
+  ops.clear();
+}
+
+void AnalysisLoopScope::collectContinueOperands(
+    LoweringContext &, llvm::SmallVectorImpl<mlir::Value> &ops) {
+  ops.clear();
+}
+
+void AnalysisLoopScope::setupPrepareContext() {
+  prepareBuilder.emplace(parent.builder.getContext());
+  prepareBuilder->setInsertionPointToStart(prepareBlock);
+  prepareCtx = std::make_unique<LoweringContext>(
+      *prepareBuilder, loc, parent.returnType, parent.errorMessage,
+      parent.sourceManager);
+  copySharedState(*prepareCtx);
+  setBlockArguments(*prepareCtx, prepareBlock);
+}
+
+void AnalysisLoopScope::setupBodyContext() {
+  bodyBuilder.emplace(parent.builder.getContext());
+  bodyBuilder->setInsertionPointToStart(bodyBlock);
+  bodyCtx = std::make_unique<LoweringContext>(
+      *bodyBuilder, loc, parent.returnType, parent.errorMessage,
+      parent.sourceManager);
+  copySharedState(*bodyCtx);
+  setBlockArguments(*bodyCtx, bodyBlock);
+}
+
+void AnalysisLoopScope::copySharedState(LoweringContext &childCtx) {
+  cloneContextState(parent, childCtx);
+}
+
+void AnalysisLoopScope::setBlockArguments(LoweringContext &childCtx,
+                                          mlir::Block *block) {
+  if (!block)
+    return;
+  for (auto [idx, vd] : llvm::enumerate(carriedVars)) {
+    if (idx < block->getNumArguments())
+      childCtx.valueMap[vd] = block->getArgument(idx);
+  }
+  if (hasFirstIterFlag() && !childCtx.loopStack.empty() && frame &&
+      frame->firstIterIndex < block->getNumArguments()) {
+    childCtx.loopStack.back().currentFirstIterValue =
+        block->getArgument(frame->firstIterIndex);
+  }
+}
+
+void AnalysisLoopScope::cleanup() {
+  if (!active) {
+    prepareCtx.reset();
+    bodyCtx.reset();
+    prepareBuilder.reset();
+    bodyBuilder.reset();
+    return;
+  }
+
+  active = false;
+  if (frame && frame->activeScope == this)
+    frame->activeScope = nullptr;
+  if (!parent.loopStack.empty())
+    parent.loopStack.pop_back();
+  if (!parent.controlStack.empty() &&
+      parent.controlStack.back().kind == ControlEntryKind::Loop)
+    parent.controlStack.pop_back();
+  frame = nullptr;
+  prepareCtx.reset();
+  bodyCtx.reset();
+  prepareBuilder.reset();
+  bodyBuilder.reset();
+}
+
 } // namespace simt_hlsl_import

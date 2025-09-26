@@ -205,4 +205,54 @@ private:
   std::unique_ptr<LoweringContext> bodyCtx;
 };
 
+class AnalysisLoopScope : public LoopScopeProvider {
+public:
+  AnalysisLoopScope(LoweringContext &parentCtx,
+                    llvm::ArrayRef<const clang::ValueDecl *> carried,
+                    bool hasFirstIterFlag, mlir::Value firstIterInit,
+                    mlir::Location loc);
+  ~AnalysisLoopScope() override;
+
+  bool isValid() const;
+  LoweringContext &prepareContext();
+  LoweringContext &bodyContext();
+  bool isAnalysisOnly() const;
+  bool hasFirstIterFlag() const;
+  unsigned getFirstIterIndex() const;
+  mlir::Value getPrepareFirstIterArg() const;
+  mlir::Value getBodyFirstIterArg() const;
+  void setCurrentFirstIterValue(mlir::Value value);
+
+  bool close();
+
+  void collectBreakOperands(LoweringContext &ctx,
+                            llvm::SmallVectorImpl<mlir::Value> &ops) override;
+  void collectContinueOperands(
+      LoweringContext &ctx, llvm::SmallVectorImpl<mlir::Value> &ops) override;
+
+private:
+  void setupPrepareContext();
+  void setupBodyContext();
+  void copySharedState(LoweringContext &childCtx);
+  void setBlockArguments(LoweringContext &childCtx, mlir::Block *block);
+  void cleanup();
+
+  LoweringContext &parent;
+  llvm::SmallVector<const clang::ValueDecl *, 8> carriedVars;
+  mlir::Location loc;
+  LoopFrame *frame = nullptr;
+  bool active = false;
+
+  mlir::Region prepareRegion;
+  mlir::Region bodyRegion;
+  mlir::Block *prepareBlock = nullptr;
+  mlir::Block *bodyBlock = nullptr;
+
+  std::optional<mlir::OpBuilder> prepareBuilder;
+  std::unique_ptr<LoweringContext> prepareCtx;
+
+  std::optional<mlir::OpBuilder> bodyBuilder;
+  std::unique_ptr<LoweringContext> bodyCtx;
+};
+
 } // namespace simt_hlsl_import

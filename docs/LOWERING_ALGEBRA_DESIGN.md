@@ -274,6 +274,29 @@ struct TraceInterpreter : LoweringAlgebra<TraceInterpreter<Inner>> {
 Work through the items in order—the algebra surface may need to grow as each
 helper migrates, but the list above keeps the scope explicit for code review.
 
+### Loop Scope Metadata Plan
+
+- **Analysis-only loop scopes** – add an `AnalysisLoopScope` alongside
+  `LoopScopeState` that clones value/symbol maps, records carried-variable
+  state, and exposes the same RAII API (`prepareContext()`, `bodyContext()`,
+  `close()`) without creating `simt_step.loop` IR or region builders.
+- **Interpreter-driven entry points** – refactor `EmitInterpreter::beginLoop`
+  / `AnalysisInterpreter::beginLoop` to dispatch to the appropriate scope and
+  return a lightweight handle that loop lowering can use without inspecting the
+  underlying MLIR objects.
+- **Control-flow hooks** – extend the algebra with loop-specific helpers
+  (e.g., `emitLoopCondition`, `emitLoopYield`, `endLoop`) so `lowerFor`,
+  `lowerWhile`, `lowerDo`, and switch-scope break/continue logic can operate via
+  interpreter calls instead of reaching into `LoopScopeSupport.*` internals.
+- **Break/continue plumbing** – update `collectLoopBreakOperands`,
+  `collectLoopContinueOperands`, and the control-stack utilities to tolerate
+  metadata-only frames (no `LoopOp`, no region operands) while preserving the
+  emit path unchanged.
+- **Incremental migration & tests** – migrate one loop shape at a time
+  (starting with `while`) and add regression cases that exercise analysis mode
+  to ensure no IR is emitted while the loop helpers still behave correctly in
+  emit mode.
+
 ## Implementation Notes
 
 - `LoweringContext` becomes a lightweight owner of common state

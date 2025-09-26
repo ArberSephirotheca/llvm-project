@@ -1266,18 +1266,15 @@ struct AnalysisInterpreter
   }
 
   struct IfScope {
-    IfScope(LoweringContext &parentCtx, simt::dialect::IfOp op,
-            llvm::ArrayRef<const clang::ValueDecl *> carried, bool hasElse,
-            bool needsElseRegion, mlir::Location loc)
-        : parent(parentCtx), ifOp(op),
-          mutated(carried.begin(), carried.end()), hasElseBranch(hasElse),
-          needsElseRegion(needsElseRegion), loc(loc) {}
+    IfScope(LoweringContext &parentCtx,
+            llvm::ArrayRef<const clang::ValueDecl *> carriedVars,
+            bool hasElse, bool needsElseRegion, mlir::Location loc)
+        : parent(parentCtx), mutated(carriedVars.begin(), carriedVars.end()),
+          hasElseBranch(hasElse), needsElseRegion(needsElseRegion), loc(loc) {}
 
     LoweringContext &thenContext() {
       if (!thenCtxStorage) {
-        mlir::Region &region = ifOp.getThenRegion();
         thenBuilder.emplace(parent.builder.getContext());
-        thenBuilder->setInsertionPointToEnd(&region.front());
         thenCtxStorage.emplace(*thenBuilder, loc, parent.returnType,
                                parent.errorMessage, parent.sourceManager);
         cloneContextState(parent, *thenCtxStorage);
@@ -1291,9 +1288,7 @@ struct AnalysisInterpreter
       if (!hasElseBranch)
         llvm::report_fatal_error("elseContext requested but no else branch");
       if (!elseCtxStorage) {
-        mlir::Region &region = ifOp.getElseRegion();
         elseBuilder.emplace(parent.builder.getContext());
-        elseBuilder->setInsertionPointToEnd(&region.front());
         elseCtxStorage.emplace(*elseBuilder, loc, parent.returnType,
                                parent.errorMessage, parent.sourceManager);
         cloneContextState(parent, *elseCtxStorage);
@@ -1305,26 +1300,10 @@ struct AnalysisInterpreter
       if (thenClosed)
         return !parent.failed;
       thenClosed = true;
-      if (!thenCtxStorage || mutated.empty())
-        return !parent.failed;
-
-      llvm::SmallVector<mlir::Value, 8> operands;
-      operands.reserve(mutated.size());
-      for (const clang::ValueDecl *vd : mutated) {
-        mlir::Value value;
-        if (auto it = thenCtxStorage->valueMap.find(vd);
-            it != thenCtxStorage->valueMap.end())
-          value = it->second;
-        else if (auto pit = parent.valueMap.find(vd);
-                 pit != parent.valueMap.end())
-          value = pit->second;
-        if (!value) {
-          parent.fail("conditional branch missing carried value");
-          return false;
-        }
-        operands.push_back(value);
-      }
-      ensureYield(*thenCtxStorage, ifOp.getThenRegion(), operands, loc);
+      if (thenCtxStorage)
+        applyBranchResults(*thenCtxStorage);
+      else
+        parent.mutatedVars.insert(mutated.begin(), mutated.end());
       return !parent.failed;
     }
 
@@ -1332,90 +1311,67 @@ struct AnalysisInterpreter
       if (elseClosed)
         return !parent.failed;
       elseClosed = true;
-      if (!elseCtxStorage || mutated.empty())
-        return !parent.failed;
-
-      llvm::SmallVector<mlir::Value, 8> operands;
-      operands.reserve(mutated.size());
-      for (const clang::ValueDecl *vd : mutated) {
-        mlir::Value value;
-        if (auto it = elseCtxStorage->valueMap.find(vd);
-            it != elseCtxStorage->valueMap.end())
-          value = it->second;
-        else if (auto pit = parent.valueMap.find(vd);
-                 pit != parent.valueMap.end())
-          value = pit->second;
-        if (!value) {
-          parent.fail("conditional branch missing carried value");
-          return false;
-        }
-        operands.push_back(value);
-      }
-      ensureYield(*elseCtxStorage, ifOp.getElseRegion(), operands, loc);
+      if (elseCtxStorage)
+        applyBranchResults(*elseCtxStorage);
+      else
+        parent.mutatedVars.insert(mutated.begin(), mutated.end());
       return !parent.failed;
     }
 
     bool finalizeImplicitElse() {
-      if (!needsElseRegion || hasElseBranch || mutated.empty())
+      if (!needsElseRegion || hasElseBranch)
         return true;
-      llvm::SmallVector<mlir::Value, 8> operands;
-      operands.reserve(mutated.size());
-      for (const clang::ValueDecl *vd : mutated) {
-        auto it = parent.valueMap.find(vd);
-        if (it == parent.valueMap.end()) {
-          parent.fail("conditional missing carried value for implicit else");
-          return false;
-        }
-        operands.push_back(it->second);
-      }
-      ensureYield(parent, ifOp.getElseRegion(), operands, loc);
-      return !parent.failed;
+      parent.mutatedVars.insert(mutated.begin(), mutated.end());
+      return true;
     }
 
     bool done() {
       if (!finalizeThen())
         return false;
-      if (hasElseBranch || needsElseRegion) {
-        if (hasElseBranch) {
-          if (!finalizeElse())
-            return false;
-        } else if (!finalizeImplicitElse()) {
+      if (hasElseBranch) {
+        if (!finalizeElse())
           return false;
-        }
-      }
-
-      unsigned resultIndex = 0;
-      for (const clang::ValueDecl *vd : mutated) {
-        parent.valueMap[vd] = ifOp.getResult(resultIndex++);
-        parent.mutatedVars.insert(vd);
-        if (thenCtxStorage) {
-          if (auto it = thenCtxStorage->symValueMap.find(vd);
-              it != thenCtxStorage->symValueMap.end())
-            parent.symValueMap[vd] = it->second;
-        }
-        if (elseCtxStorage) {
-          if (auto it = elseCtxStorage->symValueMap.find(vd);
-              it != elseCtxStorage->symValueMap.end())
-            parent.symValueMap[vd] = it->second;
-        }
+      } else if (needsElseRegion) {
+        if (!finalizeImplicitElse())
+          return false;
       }
 
       bool thenTerminated =
           thenCtxStorage && thenCtxStorage->emittedTerminator;
       bool elseTerminated = false;
-      if (hasElseBranch)
+      if (hasElseBranch) {
         elseTerminated = elseCtxStorage && elseCtxStorage->emittedTerminator;
-      else if (!needsElseRegion)
+      } else if (!needsElseRegion) {
         elseTerminated = true;
+      }
 
-      if (thenTerminated && (!needsElseRegion || elseTerminated))
+      if (thenTerminated && elseTerminated)
         parent.emittedTerminator = true;
 
       return !parent.failed;
     }
 
+    void applyBranchResults(LoweringContext &branchCtx) {
+      parent.failed |= branchCtx.failed;
+      parent.mutatedVars.insert(branchCtx.mutatedVars.begin(),
+                                branchCtx.mutatedVars.end());
+
+      auto propagate = [&](const clang::ValueDecl *vd) {
+        if (auto valueIt = branchCtx.valueMap.find(vd);
+            valueIt != branchCtx.valueMap.end())
+          parent.valueMap[vd] = valueIt->second;
+        if (auto symIt = branchCtx.symValueMap.find(vd);
+            symIt != branchCtx.symValueMap.end())
+          parent.symValueMap[vd] = symIt->second;
+      };
+
+      for (const clang::ValueDecl *vd : branchCtx.mutatedVars)
+        propagate(vd);
+      for (const clang::ValueDecl *vd : mutated)
+        propagate(vd);
+    }
+
     LoweringContext &parent;
-    simt::dialect::IfOp ifOp;
     llvm::SmallVector<const clang::ValueDecl *, 8> mutated;
     bool hasElseBranch = false;
     bool needsElseRegion = false;
@@ -1430,27 +1386,16 @@ struct AnalysisInterpreter
     bool elseClosed = false;
   };
 
-  using LoopScope = LoopScopeState;
+  using LoopScope = AnalysisLoopScope;
 
   LoopScope beginLoop(llvm::ArrayRef<const clang::ValueDecl *> carriedVars,
                       bool hasFirstIterFlag, mlir::Value firstIterInit,
                       mlir::Location loc);
 
-  IfScope beginIf(mlir::Value cond,
+  IfScope beginIf(mlir::Value /*cond*/,
                   llvm::ArrayRef<const clang::ValueDecl *> carriedVars,
                   bool hasElseBranch, bool needsElseRegion, mlir::Location loc) {
-    llvm::SmallVector<mlir::Type, 8> resultTypes;
-    resultTypes.reserve(carriedVars.size());
-    for (const clang::ValueDecl *vd : carriedVars) {
-      mlir::Value incoming = ctx.valueMap.lookup(vd);
-      assert(incoming &&
-             "conditional carried variable must already have a bound value");
-      resultTypes.push_back(incoming.getType());
-    }
-
-    auto ifOp = ctx.builder.create<simt::dialect::IfOp>(
-        loc, resultTypes, cond, needsElseRegion);
-    return IfScope(ctx, ifOp, carriedVars, hasElseBranch, needsElseRegion, loc);
+    return IfScope(ctx, carriedVars, hasElseBranch, needsElseRegion, loc);
   }
 
   Value emitConstantInt(int64_t value, const char *tag,
@@ -3364,10 +3309,10 @@ EmitInterpreter::LoopScope EmitInterpreter::beginLoop(llvm::ArrayRef<const clang
   return LoopScopeState(ctx, carriedVars, hasFirstIterFlag, firstIterInit, loc);
 }
 
-AnalysisInterpreter::AnalysisInterpreter::LoopScope AnalysisInterpreter::beginLoop(
+AnalysisInterpreter::LoopScope AnalysisInterpreter::beginLoop(
     llvm::ArrayRef<const clang::ValueDecl *> carriedVars, bool hasFirstIterFlag,
     mlir::Value firstIterInit, mlir::Location loc) {
-  return LoopScopeState(ctx, carriedVars, hasFirstIterFlag, firstIterInit, loc);
+  return AnalysisLoopScope(ctx, carriedVars, hasFirstIterFlag, firstIterInit, loc);
 }
 
 template <typename Interp>
@@ -3716,16 +3661,20 @@ static bool lowerWhileStmt(const clang::WhileStmt *whileStmt,
     condValue = prepBuilder.create<mlir::arith::ConstantIntOp>(loc, 1, 1);
   }
 
-  llvm::SmallVector<mlir::Value, 8> forwarded;
-  forwarded.reserve(mutatedVars.size());
-  for (const clang::ValueDecl *vd : mutatedVars) {
-    mlir::Value value = prepareCtx.valueMap.lookup(vd);
-    if (!value)
-      value = ctx.valueMap.lookup(vd);
-    forwarded.push_back(value);
-  }
+  if (!loopScope.isAnalysisOnly()) {
+    llvm::SmallVector<mlir::Value, 8> forwarded;
+    forwarded.reserve(mutatedVars.size());
+    for (const clang::ValueDecl *vd : mutatedVars) {
+      mlir::Value value = prepareCtx.valueMap.lookup(vd);
+      if (!value)
+        value = ctx.valueMap.lookup(vd);
+      forwarded.push_back(value);
+    }
 
-  prepBuilder.create<simt::dialect::ConditionOp>(loc, condValue, forwarded);
+    prepBuilder.create<simt::dialect::ConditionOp>(loc, condValue, forwarded);
+  } else {
+    (void)condValue;
+  }
 
   LoweringContext &bodyCtx = loopScope.bodyContext();
   auto bodyInterp = interp.fork(bodyCtx);
@@ -3736,15 +3685,17 @@ static bool lowerWhileStmt(const clang::WhileStmt *whileStmt,
   }
 
   if (!bodyCtx.emittedTerminator) {
-    llvm::SmallVector<mlir::Value, 8> yieldOperands;
-    yieldOperands.reserve(mutatedVars.size());
-    for (const clang::ValueDecl *vd : mutatedVars) {
-      mlir::Value value = bodyCtx.valueMap.lookup(vd);
-      if (!value)
-        value = ctx.valueMap.lookup(vd);
-      yieldOperands.push_back(value);
+    if (!loopScope.isAnalysisOnly()) {
+      llvm::SmallVector<mlir::Value, 8> yieldOperands;
+      yieldOperands.reserve(mutatedVars.size());
+      for (const clang::ValueDecl *vd : mutatedVars) {
+        mlir::Value value = bodyCtx.valueMap.lookup(vd);
+        if (!value)
+          value = ctx.valueMap.lookup(vd);
+        yieldOperands.push_back(value);
+      }
+      bodyCtx.builder.create<simt::dialect::YieldOp>(loc, yieldOperands);
     }
-    bodyCtx.builder.create<simt::dialect::YieldOp>(loc, yieldOperands);
   }
 
   return loopScope.close();
