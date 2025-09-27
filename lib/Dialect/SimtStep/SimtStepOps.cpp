@@ -62,6 +62,45 @@ mlir::LogicalResult CustomOp::verify() {
   return mlir::success();
 }
 
+void SwitchOp::build(mlir::OpBuilder &builder, mlir::OperationState &state,
+                     mlir::TypeRange resultTypes, mlir::Value selector,
+                     mlir::ValueRange initialValues,
+                     mlir::ArrayRef<int64_t> caseValues) {
+  state.addTypes(resultTypes);
+  state.addOperands(selector);
+  state.addOperands(initialValues);
+  state.addAttribute("case_values",
+                     builder.getDenseI64ArrayAttr(caseValues));
+
+  mlir::OpBuilder::InsertionGuard guard(builder);
+  auto *body = state.addRegion();
+  builder.createBlock(body);
+  if (!resultTypes.empty()) {
+    llvm::SmallVector<mlir::Location, 8> argLocs(resultTypes.size(),
+                                                 state.location);
+    body->front().addArguments(resultTypes, argLocs);
+  }
+}
+
+mlir::LogicalResult SwitchOp::verify() {
+  if (getInitialValues().size() != getNumResults())
+    return emitOpError(
+        "requires the number of initial values to match result count");
+
+  auto caseValues = getCaseValuesAttr();
+  if (!caseValues)
+    return emitOpError("requires 'case_values' attribute");
+
+  mlir::Block *entry = getBody();
+  if (!entry)
+    return emitOpError("requires a body region");
+  if (entry->getNumArguments() != getNumResults())
+    return emitOpError(
+        "body block must have an argument for each switch result");
+
+  return mlir::success();
+}
+
 void IfOp::build(mlir::OpBuilder &builder, mlir::OperationState &state,
                  mlir::TypeRange resultTypes, mlir::Value condition,
                  bool withElseRegion) {

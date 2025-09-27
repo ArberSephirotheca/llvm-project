@@ -18,6 +18,7 @@ class SourceManager;
 class Stmt;
 class ValueDecl;
 class SwitchCase;
+class ASTContext;
 } // namespace clang
 
 namespace simt_hlsl_import {
@@ -134,12 +135,14 @@ struct LoweringContext {
   llvm::SmallVector<LoopMetadata *, 4> loopMetadataStack;
   llvm::SmallVector<SwitchMetadata *, 4> switchMetadataStack;
   const clang::SourceManager *sourceManager = nullptr;
+  const clang::ASTContext *astContext = nullptr;
 
   LoweringContext(mlir::OpBuilder &builder, mlir::Location loc,
                   mlir::Type retType, std::string &error,
-                  const clang::SourceManager *sm = nullptr)
+                  const clang::SourceManager *sm = nullptr,
+                  const clang::ASTContext *ast = nullptr)
       : builder(builder), defaultLoc(loc), returnType(retType),
-        errorMessage(error), sourceManager(sm) {}
+        errorMessage(error), sourceManager(sm), astContext(ast) {}
 
   bool fail(llvm::StringRef msg) {
     if (!failed)

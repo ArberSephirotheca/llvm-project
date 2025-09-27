@@ -203,6 +203,8 @@ void cloneContextState(const LoweringContext &parent, LoweringContext &child) {
   child.controlStack = parent.controlStack;
   child.loopMetadataStack = parent.loopMetadataStack;
   child.switchMetadataStack = parent.switchMetadataStack;
+  child.sourceManager = parent.sourceManager;
+  child.astContext = parent.astContext;
 }
 
 SwitchFrame makeSwitchFrame(LoweringContext &ctx,
@@ -434,7 +436,7 @@ void LoopScopeState::setupPrepareContext() {
   prepareBuilder->setInsertionPointToStart(skeleton.prepareBlock);
   prepareCtx = std::make_unique<LoweringContext>(
       *prepareBuilder, loc, parent.returnType, parent.errorMessage,
-      parent.sourceManager);
+      parent.sourceManager, parent.astContext);
   copySharedState(*prepareCtx);
   setBlockArguments(*prepareCtx, skeleton.prepareBlock);
 }
@@ -444,7 +446,7 @@ void LoopScopeState::setupBodyContext() {
   bodyBuilder->setInsertionPointToStart(skeleton.bodyBlock);
   bodyCtx = std::make_unique<LoweringContext>(
       *bodyBuilder, loc, parent.returnType, parent.errorMessage,
-      parent.sourceManager);
+      parent.sourceManager, parent.astContext);
   copySharedState(*bodyCtx);
   setBlockArguments(*bodyCtx, skeleton.bodyBlock);
 }
@@ -624,7 +626,7 @@ void AnalysisLoopScope::setupPrepareContext() {
   prepareBuilder->setInsertionPointToStart(prepareBlock);
   prepareCtx = std::make_unique<LoweringContext>(
       *prepareBuilder, loc, parent.returnType, parent.errorMessage,
-      parent.sourceManager);
+      parent.sourceManager, parent.astContext);
   copySharedState(*prepareCtx);
   setBlockArguments(*prepareCtx, prepareBlock);
 }
@@ -634,7 +636,7 @@ void AnalysisLoopScope::setupBodyContext() {
   bodyBuilder->setInsertionPointToStart(bodyBlock);
   bodyCtx = std::make_unique<LoweringContext>(
       *bodyBuilder, loc, parent.returnType, parent.errorMessage,
-      parent.sourceManager);
+      parent.sourceManager, parent.astContext);
   copySharedState(*bodyCtx);
   setBlockArguments(*bodyCtx, bodyBlock);
 }

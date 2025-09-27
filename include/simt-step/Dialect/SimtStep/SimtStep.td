@@ -389,8 +389,34 @@ def SimtStep_BufferAtomicXorOp : Op<SimtStep_Dialect, "buffer.atomic_xor",
 
 // Control flow --------------------------------------------------------------
 
+def SimtStep_SwitchOp : Op<SimtStep_Dialect, "switch",
+    [SingleBlockImplicitTerminator<"YieldOp">, NoRegionArguments]> {
+  let summary = "Structured SIMT switch";
+  let description = [{
+    Structured container for lowering switch statements. The selector operand
+    chooses among cases enumerated in the `case_values` attribute. Each case
+    and the default branch end with `simt_step.yield`, forwarding the
+    switch-carried values.
+  }];
+
+  let arguments = (ins AnyType:$selector,
+                       Variadic<AnyType>:$initialValues,
+                       DenseI64ArrayAttr:$case_values);
+  let results = (outs Variadic<AnyType>:$results);
+  let regions = (region SizedRegion<1>:$caseBody);
+
+  let skipDefaultBuilders = 1;
+  let builders = [
+    OpBuilder<(ins "mlir::TypeRange":$resultTypes, "mlir::Value":$selector,
+                    "mlir::ValueRange":$initialValues,
+                    "mlir::ArrayRef<int64_t>":$caseValues)>
+  ];
+
+  let hasVerifier = 1;
+}
+
 def SimtStep_YieldOp : Op<SimtStep_Dialect, "yield",
-    [Terminator, ParentOneOf<["IfOp", "LoopOp"]>]> {
+    [Terminator, ParentOneOf<["IfOp", "LoopOp", "SwitchOp"]>]> {
   let summary = "Yield from a structured SIMT region";
   let arguments = (ins Variadic<AnyType>:$results);
   let builders = [OpBuilder<(ins), [{ /* nothing to do */ }]>];
