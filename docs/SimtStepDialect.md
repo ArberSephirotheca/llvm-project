@@ -49,6 +49,9 @@ Width must be non-zero. The type will be extended with mask-specific utilities a
 ### Extension hook
 - `simt_step.custom` – plugin-defined instruction. Requires an `instr` string attribute and optional `params` dictionary; operands/results are variadic and unconstrained.
 
+### Structured control flow
+- `simt_step.switch` – structured multi-way branch. Operands are the selector followed by the initial values for each carried result. The op yields the carried values plus three bookkeeping flags `(hasMatched, executing, completed)` that track fallthrough and termination state. The `case_values` dense array attribute records the integral selector values associated with each case; the final entry corresponds to the default arm. The body currently contains a single block, and lowering emits the legacy nested `simt_step.if` cascade inside that block. A future refactor will replace the inner cascade with one block per case so that the CFG is explicit in the switch op itself.
+
 ---
 
 This reference is a living document; update it when new ops/attributes/types land.
