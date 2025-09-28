@@ -74,11 +74,11 @@ void SwitchOp::build(mlir::OpBuilder &builder, mlir::OperationState &state,
 
   mlir::OpBuilder::InsertionGuard guard(builder);
   auto *body = state.addRegion();
-  builder.createBlock(body);
+  mlir::Block *entry = builder.createBlock(body);
   if (!resultTypes.empty()) {
     llvm::SmallVector<mlir::Location, 8> argLocs(resultTypes.size(),
                                                  state.location);
-    body->front().addArguments(resultTypes, argLocs);
+    entry->addArguments(resultTypes, argLocs);
   }
 }
 
@@ -91,12 +91,18 @@ mlir::LogicalResult SwitchOp::verify() {
   if (!caseValues)
     return emitOpError("requires 'case_values' attribute");
 
-  mlir::Block *entry = getBody();
-  if (!entry)
-    return emitOpError("requires a body region");
-  if (entry->getNumArguments() != getNumResults())
-    return emitOpError(
-        "body block must have an argument for each switch result");
+  mlir::Region &body = getCaseBody();
+  if (body.empty())
+    return emitOpError("requires a non-empty body region");
+
+  for (mlir::Block &block : body) {
+    if (block.getNumArguments() != getNumResults())
+      return emitOpError(
+          "each block in the body must have an argument for every result");
+    if (block.empty() || !llvm::isa<YieldOp>(block.back()))
+      return emitOpError(
+          "each block in the body must terminate with simt_step.yield");
+  }
 
   return mlir::success();
 }

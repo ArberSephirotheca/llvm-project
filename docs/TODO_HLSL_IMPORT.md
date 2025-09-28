@@ -31,6 +31,14 @@ plan and prioritize the work needed to bring the MLIR importer up to parity.
       their components rather than failing when unsupported constructs appear.
 - [ ] Add structured lowering patterns for short-circuit constructs beyond
       boolean scalars (e.g., vectors).
+- [ ] Rework `switch` lowering to build one block per case instead of the nested
+      `simt_step.if` cascade. The body should contain: (1) an entry block that
+      unpacks carried variables and dispatches to the first case/default, (2) a
+      block per explicit case label that lowers the associated statements and
+      ends with a `simt_step.yield` carrying the updated variables plus the
+      `(hasMatched, executing, completed)` flags, and (3) a single exit block.
+      Fallthrough uses the recorded metadata to branch to the next case or exit,
+      and the default block is only created when a `default` label exists.
 
 ## 5. Testing & Tooling
 - [ ] Build a comprehensive regression suite mirroring interpreter samples,

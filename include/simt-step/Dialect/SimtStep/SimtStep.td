@@ -389,8 +389,7 @@ def SimtStep_BufferAtomicXorOp : Op<SimtStep_Dialect, "buffer.atomic_xor",
 
 // Control flow --------------------------------------------------------------
 
-def SimtStep_SwitchOp : Op<SimtStep_Dialect, "switch",
-    [SingleBlockImplicitTerminator<"YieldOp">, NoRegionArguments]> {
+def SimtStep_SwitchOp : Op<SimtStep_Dialect, "switch", [NoRegionArguments]> {
   let summary = "Structured SIMT switch";
   let description = [{
     Structured container for lowering switch statements. The selector operand
