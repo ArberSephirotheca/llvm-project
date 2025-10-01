@@ -3348,6 +3348,8 @@ AnalysisInterpreter::LoopScope AnalysisInterpreter::beginLoop(
 template <typename Interp>
 static bool lowerStatement(const clang::Stmt *stmt, LoweringContext &ctx,
                            Interp &interp) {
+  using InterpValue = typename Interp::Value;
+
   if (ctx.failed)
     return false;
 
@@ -3494,8 +3496,8 @@ static bool lowerStatement(const clang::Stmt *stmt, LoweringContext &ctx,
   }
 
   if (const auto *ifStmt = llvm::dyn_cast<clang::IfStmt>(stmt)) {
-    mlir::Value cond = lowerExpr(ifStmt->getCond(), ctx);
-    if (!cond)
+    InterpValue cond = lowerExprInterp(ifStmt->getCond(), ctx, interp);
+    if (!cond && ctx.failed)
       return false;
 
     mlir::Location loc = ctx.defaultLoc;
@@ -3537,10 +3539,10 @@ static bool lowerStatement(const clang::Stmt *stmt, LoweringContext &ctx,
   }
 
   if (const auto *ret = llvm::dyn_cast<clang::ReturnStmt>(stmt)) {
-    std::optional<mlir::Value> retValue;
+    std::optional<InterpValue> retValue;
     if (const clang::Expr *retExpr = ret->getRetValue()) {
-      mlir::Value value = lowerExpr(retExpr, ctx);
-      if (!value)
+      InterpValue value = lowerExprInterp(retExpr, ctx, interp);
+      if (!value && ctx.failed)
         return false;
       retValue = value;
     }
@@ -3563,16 +3565,13 @@ static bool lowerStatement(const clang::Stmt *stmt, LoweringContext &ctx,
         return ctx.fail("unsupported variable type");
       mlir::Value initValue;
       if (const clang::Expr *init = var->getInit()) {
-        initValue = lowerExpr(init, ctx);
-        if (!initValue)
+        initValue = lowerExprInterp(init, ctx, interp);
+        if (!initValue && ctx.failed)
           return false;
       }
       if (initValue)
         interp.bindVariable(var, initValue);
-      if (isEmitContext(ctx))
-        ctx.symValueMap[var] = makeSymValue(var);
-      else
-        ctx.symValueMap[var] = makeSymValue(var);
+      ctx.symValueMap[var] = makeSymValue(var);
     }
     return true;
   }
@@ -3587,7 +3586,7 @@ static bool lowerStatement(const clang::Stmt *stmt, LoweringContext &ctx,
       }
     }
 
-    (void)lowerExpr(exprStmt, ctx);
+    (void)lowerExprInterp(exprStmt, ctx, interp);
     return !ctx.failed;
   }
 
