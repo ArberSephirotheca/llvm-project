@@ -2238,14 +2238,18 @@ lowerBufferAccessInterp(const clang::Expr *baseExpr,
 
   mlir::Type indexType = getValueType(index);
   if (!mlir::isa<mlir::IntegerType>(indexType)) {
-    ctx.fail("buffer subscript index must be integer");
+    ctx.diagnostics().report({indexExpr, getLocation(indexExpr, ctx)},
+                             "buffer subscript index must be integer");
+    ctx.failed = true;
     return std::nullopt;
   }
 
   auto resourceType =
       mlir::dyn_cast<simt::dialect::ResourceType>(getValueType(resource));
   if (!resourceType) {
-    ctx.fail("subscript base must be a buffer resource");
+    ctx.diagnostics().report({baseExpr, getLocation(baseExpr, ctx)},
+                             "subscript base must be a buffer resource");
+    ctx.failed = true;
     return std::nullopt;
   }
 
@@ -2339,26 +2343,26 @@ lowerAtomicCallInterp(const clang::CallExpr *call, LoweringContext &ctx,
   if (!kind)
     return std::nullopt;
 
+  mlir::Location loc = getLocation(call, ctx);
+
   unsigned numArgs = call->getNumArgs();
   unsigned valueOperandCount =
       *kind == simt_hlsl_import::BufferAtomicOp::CompareExchange ? 2U : 1U;
   unsigned baseArgCount = 1 + valueOperandCount;
   if (numArgs != baseArgCount && numArgs != baseArgCount + 1) {
-    ctx.fail("unexpected argument count for atomic call");
+    interp.reportError({call, loc}, "unexpected argument count for atomic call");
     return std::optional<ValueT>(ValueT());
   }
 
-  mlir::Location loc = getLocation(call, ctx);
-
   const clang::Expr *destArg = call->getArg(0);
   if (!destArg) {
-    ctx.fail("atomic call missing destination argument");
+    interp.reportError({call, loc}, "atomic call missing destination argument");
     return std::optional<ValueT>(ValueT());
   }
 
   auto destInfo = getBufferAccessInfoFromLValueInterp(destArg, ctx, interp);
   if (!destInfo) {
-    ctx.fail("atomic destination must be a buffer element");
+    interp.reportError({call, loc}, "atomic destination must be a buffer element");
     return std::optional<ValueT>(ValueT());
   }
   auto [resource, index, resourceType, decl] = *destInfo;
@@ -2390,7 +2394,7 @@ lowerAtomicCallInterp(const clang::CallExpr *call, LoweringContext &ctx,
     return std::optional<ValueT>(ValueT());
 
   if (decl)
-    ctx.mutatedVars.insert(decl);
+    interp.noteMutation(decl);
 
   if (outArg) {
     const clang::Expr *stripped = outArg->IgnoreParenImpCasts();
@@ -2402,7 +2406,8 @@ lowerAtomicCallInterp(const clang::CallExpr *call, LoweringContext &ctx,
             llvm::dyn_cast<clang::DeclRefExpr>(stripped))
       outDecl = declRef->getDecl();
     if (!outDecl) {
-      ctx.fail("atomic original value argument must reference a variable");
+      interp.reportError({call, loc},
+                         "atomic original value argument must reference a variable");
       return std::optional<ValueT>(ValueT());
     }
     if (mlir::Value oldMlir = unwrapValue(oldValue))
@@ -2444,9 +2449,11 @@ lowerAtomicMemberCallInterp(const clang::CXXMemberCallExpr *call,
   if (!kind)
     return std::nullopt;
 
+  mlir::Location loc = getLocation(call, ctx);
+
   const clang::Expr *objectExpr = call->getImplicitObjectArgument();
   if (!objectExpr) {
-    ctx.fail("atomic call requires an object expression");
+    interp.reportError({call, loc}, "atomic call requires an object expression");
     return std::optional<ValueT>(ValueT());
   }
 
@@ -2457,7 +2464,7 @@ lowerAtomicMemberCallInterp(const clang::CXXMemberCallExpr *call,
   auto resourceType =
       mlir::dyn_cast<simt::dialect::ResourceType>(getValueType(resource));
   if (!resourceType) {
-    ctx.fail("atomic call requires a buffer resource");
+    interp.reportError({call, loc}, "atomic call requires a buffer resource");
     return std::optional<ValueT>(ValueT());
   }
   (void)resourceType;
@@ -2467,11 +2474,9 @@ lowerAtomicMemberCallInterp(const clang::CXXMemberCallExpr *call,
       *kind == simt_hlsl_import::BufferAtomicOp::CompareExchange ? 2U : 1U;
   unsigned baseArgCount = 1 + valueOperandCount;
   if (numArgs != baseArgCount && numArgs != baseArgCount + 1) {
-    ctx.fail("unexpected argument count for atomic call");
+    interp.reportError({call, loc}, "unexpected argument count for atomic call");
     return std::optional<ValueT>(ValueT());
   }
-
-  mlir::Location loc = getLocation(call, ctx);
 
   unsigned argIndex = 0;
   ValueT indexValue = lowerExprInterp(call->getArg(argIndex++), ctx, interp);
@@ -2508,10 +2513,8 @@ lowerAtomicMemberCallInterp(const clang::CXXMemberCallExpr *call,
   if (!oldValue && ctx.failed)
     return std::optional<ValueT>(ValueT());
 
-  if (objectDecl) {
-    ctx.mutatedVars.insert(objectDecl);
-    ctx.symValueMap[objectDecl] = makeSymValue(objectDecl);
-  }
+  if (objectDecl)
+    interp.noteMutation(objectDecl);
 
   if (outArg) {
     const clang::Expr *stripped = outArg->IgnoreParenImpCasts();
@@ -2523,7 +2526,8 @@ lowerAtomicMemberCallInterp(const clang::CXXMemberCallExpr *call,
             llvm::dyn_cast<clang::DeclRefExpr>(stripped))
       outDecl = declRef->getDecl();
     if (!outDecl) {
-      ctx.fail("atomic original value argument must reference a variable");
+      interp.reportError({call, loc},
+                         "atomic original value argument must reference a variable");
       return std::optional<ValueT>(ValueT());
     }
     if (mlir::Value oldMlir = unwrapValue(oldValue))
@@ -2646,7 +2650,7 @@ static typename Interp::Value lowerExprInterp(const clang::Expr *expr,
 
   if (const auto *vecElem = llvm::dyn_cast<clang::ExtVectorElementExpr>(expr)) {
     if (vecElem->isArrow()) {
-      ctx.fail("pointer-based vector swizzles are unsupported");
+      interp.reportError({expr, loc}, "pointer-based vector swizzles are unsupported");
       return ValueT();
     }
 
@@ -2656,7 +2660,7 @@ static typename Interp::Value lowerExprInterp(const clang::Expr *expr,
 
     auto baseVecType = mlir::dyn_cast<mlir::VectorType>(getValueType(base));
     if (!baseVecType || baseVecType.getRank() != 1) {
-      ctx.fail("vector element access requires 1-D vector operand");
+      interp.reportError({expr, loc}, "vector element access requires 1-D vector operand");
       return ValueT();
     }
 
@@ -2666,19 +2670,19 @@ static typename Interp::Value lowerExprInterp(const clang::Expr *expr,
     elements.reserve(elementIndices32.size());
     for (uint32_t idx : elementIndices32) {
       if (idx >= baseVecType.getShape()[0]) {
-        ctx.fail("vector element index out of range");
+        interp.reportError({expr, loc}, "vector element index out of range");
         return ValueT();
       }
       elements.push_back(static_cast<int64_t>(idx));
     }
     if (elements.empty()) {
-      ctx.fail("vector element access with no components");
+      interp.reportError({expr, loc}, "vector element access with no components");
       return ValueT();
     }
 
     mlir::Value baseValue = unwrapValue(base);
     if (!baseValue) {
-      ctx.fail("vector element access requires materialized value");
+      interp.reportError({expr, loc}, "vector element access requires materialized value");
       return ValueT();
     }
 
@@ -3048,7 +3052,7 @@ lowerWaveIntrinsicCallInterp(const clang::CallExpr *call, LoweringContext &ctx,
     operands.reserve(indices.size());
     for (unsigned idx : indices) {
       if (idx >= call->getNumArgs()) {
-        ctx.fail("wave intrinsic argument index out of range");
+        interp.reportError({call, loc}, "wave intrinsic argument index out of range");
         return false;
       }
       auto operand = lowerExprInterp(call->getArg(idx), ctx, interp);
@@ -3074,28 +3078,28 @@ lowerWaveIntrinsicCallInterp(const clang::CallExpr *call, LoweringContext &ctx,
 
   if (name == "WaveActiveAllTrue") {
     if (call->getNumArgs() != 1) {
-      ctx.fail("WaveActiveAllTrue expects one argument");
+      interp.reportError({call, loc}, "WaveActiveAllTrue expects one argument");
       return std::optional<ValueT>(ValueT());
     }
     return dispatch(simt_hlsl_import::WaveIntrinsic::ActiveAllTrue, {0});
   }
   if (name == "WaveActiveAnyTrue") {
     if (call->getNumArgs() != 1) {
-      ctx.fail("WaveActiveAnyTrue expects one argument");
+      interp.reportError({call, loc}, "WaveActiveAnyTrue expects one argument");
       return std::optional<ValueT>(ValueT());
     }
     return dispatch(simt_hlsl_import::WaveIntrinsic::ActiveAnyTrue, {0});
   }
   if (name == "WaveActiveCountBits") {
     if (call->getNumArgs() != 1) {
-      ctx.fail("WaveActiveCountBits expects one argument");
+      interp.reportError({call, loc}, "WaveActiveCountBits expects one argument");
       return std::optional<ValueT>(ValueT());
     }
     return dispatch(simt_hlsl_import::WaveIntrinsic::ActiveCountBits, {0});
   }
   if (name == "WaveGetLaneIndex") {
     if (call->getNumArgs() != 0) {
-      ctx.fail("WaveGetLaneIndex expects no arguments");
+      interp.reportError({call, loc}, "WaveGetLaneIndex expects no arguments");
       return std::optional<ValueT>(ValueT());
     }
     return dispatch(simt_hlsl_import::WaveIntrinsic::GetLaneIndex, {});
