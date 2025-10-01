@@ -964,8 +964,10 @@ struct EmitInterpreter
       return {};
     if (propagateFailure(elseCtx))
       return {};
-    if (rhsVal.getType() != boolType)
-      return ctx.fail("logical or requires boolean operands"), mlir::Value();
+    if (rhsVal.getType() != boolType) {
+      reportError(loc, "logical or requires boolean operands");
+      return {};
+    }
 
     llvm::SmallVector<const clang::ValueDecl *, 8> mutatedVars(
         elseCtx.mutatedVars.begin(), elseCtx.mutatedVars.end());
@@ -980,8 +982,10 @@ struct EmitInterpreter
       auto it = elseCtx.valueMap.find(vd);
       if (it == elseCtx.valueMap.end())
         it = ctx.valueMap.find(vd);
-      if (it == ctx.valueMap.end())
-        return ctx.fail("logical or missing carried value"), mlir::Value();
+      if (it == ctx.valueMap.end()) {
+        reportError(loc, "logical or missing carried value");
+        return mlir::Value();
+      }
       resultTypes.push_back(it->second.getType());
     }
 
@@ -1014,7 +1018,7 @@ struct EmitInterpreter
           yield.getOperation()->setOperands(operands);
           return true;
         }
-        ctx.fail("unexpected terminator while lowering logical or");
+        reportError(loc, "unexpected terminator while lowering logical or");
         return false;
       }
       mlir::OpBuilder::atBlockEnd(&block).create<simt::dialect::YieldOp>(
@@ -1032,8 +1036,10 @@ struct EmitInterpreter
     thenOperands.push_back(trueConst);
     for (const clang::ValueDecl *vd : mutatedVars) {
       mlir::Value value = lookupValue(ctx, vd);
-      if (!value)
-        return ctx.fail("logical or missing carried value"), mlir::Value();
+      if (!value) {
+        reportError(loc, "logical or missing carried value");
+        return mlir::Value();
+      }
       thenOperands.push_back(value);
     }
     if (!ensureYield(thenRegion, thenOperands))
@@ -1047,8 +1053,10 @@ struct EmitInterpreter
       mlir::Value value = lookupValue(elseCtx, vd);
       if (!value)
         value = lookupValue(ctx, vd);
-      if (!value)
-        return ctx.fail("logical or missing carried value"), mlir::Value();
+      if (!value) {
+        reportError(loc, "logical or missing carried value");
+        return mlir::Value();
+      }
       elseOperands.push_back(value);
     }
     if (!ensureYield(finalElseRegion, elseOperands))
