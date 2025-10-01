@@ -228,6 +228,15 @@ struct EmitInterpreter
     return EmitInterpreter(childCtx, /*allowUnanchored=*/true);
   }
 
+  void reportError(simt_hlsl_import::SourceLoc loc, llvm::StringRef message) {
+    ctx.diagnostics().report(loc, message);
+  }
+
+  void reportError(llvm::StringRef message) {
+    simt_hlsl_import::SourceLoc loc{nullptr, ctx.defaultLoc};
+    reportError(loc, message);
+  }
+
   bool emitLoopBreak(LoopFrame &loopFrame, simt_hlsl_import::SourceLoc loc) {
     mlir::Location mlirLoc = resolveLoc(loc, ctx);
 
@@ -491,12 +500,12 @@ struct EmitInterpreter
     llvm::StringRef tagRef(tag ? tag : "");
     mlir::Type type = parseTypeTag(tagRef, ctx);
     if (!type) {
-      ctx.fail("unsupported integer constant tag");
+      reportError(loc, "unsupported integer constant tag");
       return {};
     }
     auto intType = llvm::dyn_cast<mlir::IntegerType>(type);
     if (!intType) {
-      ctx.fail("expected integer type tag for integer constant");
+      reportError(loc, "expected integer type tag for integer constant");
       return {};
     }
     auto attr = ctx.builder.getIntegerAttr(intType, value);
@@ -508,12 +517,12 @@ struct EmitInterpreter
     llvm::StringRef tagRef(tag ? tag : "");
     mlir::Type type = parseTypeTag(tagRef, ctx);
     if (!type) {
-      ctx.fail("unsupported float constant tag");
+      reportError(loc, "unsupported float constant tag");
       return {};
     }
     auto floatType = llvm::dyn_cast<mlir::FloatType>(type);
     if (!floatType) {
-      ctx.fail("expected float type tag for float constant");
+      reportError(loc, "expected float type tag for float constant");
       return {};
     }
     auto attr = ctx.builder.getFloatAttr(floatType, value);
@@ -587,7 +596,7 @@ struct EmitInterpreter
       }
     }
 
-    ctx.fail("unsupported arithmetic operation for type");
+    reportError(loc, "unsupported arithmetic operation for type");
     return {};
   }
   Value emitCompare(simt_hlsl_import::CmpOp op, Value lhs, Value rhs,
@@ -646,7 +655,7 @@ struct EmitInterpreter
           .getResult();
     }
 
-    ctx.fail("unsupported compare operands");
+    reportError(loc, "unsupported compare operands");
     return {};
   }
   Value emitSelect(Value cond, Value trueV, Value falseV,
@@ -697,7 +706,7 @@ struct EmitInterpreter
     }
 
     if (thenValue.getType() != elseValue.getType()) {
-      ctx.fail("conditional operator branch type mismatch");
+      reportError(loc, "conditional operator branch type mismatch");
       return {};
     }
     mlir::Type resultType = thenValue.getType();
@@ -729,7 +738,7 @@ struct EmitInterpreter
       if (!branchType)
         branchType = lookupType(elseCtx);
       if (!branchType) {
-        ctx.fail("conditional operator missing carried value");
+        reportError(loc, "conditional operator missing carried value");
         return {};
       }
       resultTypes.push_back(*branchType);
@@ -768,7 +777,7 @@ struct EmitInterpreter
       llvm::SmallVector<mlir::Value, 8> operands;
       operands.push_back(branchValue);
       if (!appendOperands(branchCtx, operands)) {
-        ctx.fail("conditional operator missing carried value");
+        reportError(loc, "conditional operator missing carried value");
         return false;
       }
       mlir::OpBuilder yieldBuilder(ctx.builder.getContext());
@@ -831,9 +840,10 @@ struct EmitInterpreter
         return {};
       if (propagateFailure(thenCtx))
         return {};
-      if (rhsVal.getType() != boolType)
-        return ctx.fail("logical and requires boolean operands"),
-               mlir::Value();
+      if (rhsVal.getType() != boolType) {
+        reportError(loc, "logical and requires boolean operands");
+        return {};
+      }
 
       llvm::SmallVector<const clang::ValueDecl *, 8> mutatedVars(
           thenCtx.mutatedVars.begin(), thenCtx.mutatedVars.end());
@@ -848,8 +858,10 @@ struct EmitInterpreter
         auto it = thenCtx.valueMap.find(vd);
         if (it == thenCtx.valueMap.end())
           it = ctx.valueMap.find(vd);
-        if (it == ctx.valueMap.end())
-          return ctx.fail("logical and missing carried value"), mlir::Value();
+        if (it == ctx.valueMap.end()) {
+          reportError(loc, "logical and missing carried value");
+          return mlir::Value();
+        }
         resultTypes.push_back(it->second.getType());
       }
 
@@ -883,7 +895,7 @@ struct EmitInterpreter
             yield.getOperation()->setOperands(operands);
             return true;
           }
-          ctx.fail("unexpected terminator while lowering logical and");
+          reportError(loc, "unexpected terminator while lowering logical and");
           return false;
         }
         mlir::OpBuilder::atBlockEnd(&block).create<simt::dialect::YieldOp>(
@@ -897,8 +909,10 @@ struct EmitInterpreter
         mlir::Value value = lookupValue(thenCtx, vd);
         if (!value)
           value = lookupValue(ctx, vd);
-        if (!value)
-          return ctx.fail("logical and missing carried value"), mlir::Value();
+        if (!value) {
+          reportError(loc, "logical and missing carried value");
+          return mlir::Value();
+        }
         thenOperands.push_back(value);
       }
       if (!ensureYield(ifOp.getThenRegion(), thenOperands))
@@ -915,8 +929,10 @@ struct EmitInterpreter
       elseOperands.push_back(falseConst);
       for (const clang::ValueDecl *vd : mutatedVars) {
         mlir::Value value = lookupValue(ctx, vd);
-        if (!value)
-          return ctx.fail("logical and missing carried value"), mlir::Value();
+        if (!value) {
+          reportError(loc, "logical and missing carried value");
+          return mlir::Value();
+        }
         elseOperands.push_back(value);
       }
       if (!ensureYield(elseRegion, elseOperands))
@@ -1055,8 +1071,10 @@ struct EmitInterpreter
     mlir::Location mlirLoc = resolveLoc(loc, ctx);
     auto resourceType =
         mlir::dyn_cast<simt::dialect::ResourceType>(resourceHandle.getType());
-    if (!resourceType)
-      return ctx.fail("buffer load requires resource handle"), mlir::Value();
+    if (!resourceType) {
+      reportError(loc, "buffer load requires resource handle");
+      return {};
+    }
 
     return ctx.builder
         .create<simt::dialect::BufferLoadOp>(mlirLoc, resourceHandle, index)
@@ -1070,20 +1088,18 @@ struct EmitInterpreter
     auto resourceType =
         mlir::dyn_cast<simt::dialect::ResourceType>(resourceHandle.getType());
     if (!resourceType) {
-      ctx.fail("buffer store requires resource handle");
+      reportError(loc, "buffer store requires resource handle");
       return;
     }
     if (storedValue.getType() != resourceType.getElementType()) {
-      ctx.fail("buffer store value must match element type");
+      reportError(loc, "buffer store value must match element type");
       return;
     }
 
     ctx.builder.create<simt::dialect::BufferStoreOp>(mlirLoc, resourceHandle,
                                                      index, storedValue);
-    if (resourceDecl) {
-      ctx.mutatedVars.insert(resourceDecl);
-      ctx.symValueMap[resourceDecl] = makeSymValue(resourceDecl);
-    }
+    if (resourceDecl)
+      noteMutation(resourceDecl);
   }
 
   Value emitAtomic(simt_hlsl_import::BufferAtomicOp op, Value resourceHandle,
@@ -1092,8 +1108,10 @@ struct EmitInterpreter
                    simt_hlsl_import::SourceLoc loc) {
     auto resourceType =
         mlir::dyn_cast<simt::dialect::ResourceType>(resourceHandle.getType());
-    if (!resourceType)
-      return ctx.fail("buffer atomic requires resource handle"), mlir::Value();
+    if (!resourceType) {
+      reportError(loc, "buffer atomic requires resource handle");
+      return {};
+    }
 
     auto elementType = resourceType.getElementType();
     auto checkElementType = [&](mlir::Value operand,
@@ -1102,7 +1120,7 @@ struct EmitInterpreter
         return true;
       if (operand.getType() == elementType)
         return true;
-      ctx.fail(message);
+      reportError(loc, message);
       return false;
     };
 
@@ -1110,7 +1128,7 @@ struct EmitInterpreter
         -> bool {
       if (operand)
         return true;
-      ctx.fail(message);
+      reportError(loc, message);
       return false;
     };
 
@@ -1205,7 +1223,7 @@ struct EmitInterpreter
     }
 
     if (resourceDecl)
-      ctx.symValueMap[resourceDecl] = makeSymValue(resourceDecl);
+      noteMutation(resourceDecl);
 
     return oldValue;
   }
@@ -1215,8 +1233,8 @@ struct EmitInterpreter
                           mlir::Type resultType,
                           simt_hlsl_import::SourceLoc loc) {
     mlir::Location mlirLoc = resolveLoc(loc, ctx);
-    auto fail = [&](llvm::StringRef message) {
-      ctx.fail(message);
+    auto fail = [&](llvm::StringRef message) -> mlir::Value {
+      reportError(loc, message);
       return mlir::Value();
     };
 
@@ -1348,6 +1366,15 @@ struct AnalysisInterpreter
 
   AnalysisInterpreter fork(LoweringContext &childCtx) {
     return AnalysisInterpreter(childCtx);
+  }
+
+  void reportError(simt_hlsl_import::SourceLoc loc, llvm::StringRef message) {
+    ctx.diagnostics().report(loc, message);
+  }
+
+  void reportError(llvm::StringRef message) {
+    simt_hlsl_import::SourceLoc loc{nullptr, ctx.defaultLoc};
+    reportError(loc, message);
   }
 
   bool emitLoopBreak(LoopFrame &loopFrame, simt_hlsl_import::SourceLoc) {
@@ -1850,10 +1877,8 @@ struct AnalysisInterpreter
   Value emitAtomic(simt_hlsl_import::BufferAtomicOp, Value, Value, Value, Value,
                    const clang::ValueDecl *resourceDecl,
                    simt_hlsl_import::SourceLoc) {
-    if (resourceDecl) {
-      ctx.mutatedVars.insert(resourceDecl);
-      ctx.symValueMap[resourceDecl] = makeSymValue(resourceDecl);
-    }
+    if (resourceDecl)
+      noteMutation(resourceDecl);
     return {};
   }
 

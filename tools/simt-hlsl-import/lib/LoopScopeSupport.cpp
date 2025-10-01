@@ -11,6 +11,20 @@
 
 namespace simt_hlsl_import {
 
+namespace {
+
+struct ContextDiagSink : DiagSink {
+  explicit ContextDiagSink(LoweringContext &ctx) : ctx(ctx) {}
+
+  void report(SourceLoc /*loc*/, llvm::StringRef message) override {
+    ctx.fail(message);
+  }
+
+  LoweringContext &ctx;
+};
+
+} // namespace
+
 bool isEmitContext(const LoweringContext &ctx) {
   mlir::Block *block = ctx.builder.getInsertionBlock();
   return block && block->getParentOp();
@@ -205,6 +219,8 @@ void cloneContextState(const LoweringContext &parent, LoweringContext &child) {
   child.switchMetadataStack = parent.switchMetadataStack;
   child.sourceManager = parent.sourceManager;
   child.astContext = parent.astContext;
+  child.diagSink = parent.diagSink;
+  child.ownedDiagSink.reset();
 }
 
 SwitchFrame makeSwitchFrame(LoweringContext &ctx,
@@ -619,6 +635,14 @@ void AnalysisLoopScope::collectBreakOperands(
 void AnalysisLoopScope::collectContinueOperands(
     LoweringContext &, llvm::SmallVectorImpl<mlir::Value> &ops) {
   ops.clear();
+}
+
+DiagSink &LoweringContext::diagnostics() {
+  if (diagSink)
+    return *diagSink;
+  ownedDiagSink = std::make_unique<ContextDiagSink>(*this);
+  diagSink = ownedDiagSink.get();
+  return *diagSink;
 }
 
 void AnalysisLoopScope::setupPrepareContext() {

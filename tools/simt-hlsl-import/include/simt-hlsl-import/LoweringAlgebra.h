@@ -8,6 +8,7 @@
 #include "mlir/IR/Types.h"
 #include "simt-hlsl-import/LoopScopeSupport.h"
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/StringRef.h"
 
 namespace clang {
 class Stmt;
@@ -103,11 +104,6 @@ private:
   std::optional<int64_t> intConstant;
   std::optional<double> floatConstant;
   mlir::Type recordedType;
-};
-
-struct SourceLoc {
-  const clang::Stmt *clangNode = nullptr;
-  mlir::Location mlirLoc;
 };
 
 enum class ValueClass { ScalarInt, ScalarFloat, Vector, Pointer, Unknown };
@@ -235,11 +231,6 @@ template <typename Self, typename ValueT> struct LoweringAlgebra {
 private:
   Self &self() { return *static_cast<Self *>(this); }
   const Self &self() const { return *static_cast<const Self *>(this); }
-};
-
-struct DiagSink {
-  virtual ~DiagSink() = default;
-  virtual void report(SourceLoc loc, const char *message) = 0;
 };
 
 } // namespace simt_hlsl_import

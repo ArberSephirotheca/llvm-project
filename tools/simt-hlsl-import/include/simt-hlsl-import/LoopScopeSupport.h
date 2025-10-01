@@ -23,7 +23,15 @@ class ASTContext;
 
 namespace simt_hlsl_import {
 
-struct SourceLoc;
+struct SourceLoc {
+  const clang::Stmt *clangNode = nullptr;
+  mlir::Location mlirLoc;
+};
+
+struct DiagSink {
+  virtual ~DiagSink() = default;
+  virtual void report(SourceLoc loc, llvm::StringRef message) = 0;
+};
 
 enum class SymKind { Unknown, ScalarInt, ScalarFloat, Vector, Pointer };
 
@@ -129,6 +137,8 @@ struct LoweringContext {
   bool emittedTerminator = false;
   std::string &errorMessage;
   bool failed = false;
+  std::unique_ptr<DiagSink> ownedDiagSink;
+  DiagSink *diagSink = nullptr;
   llvm::SmallVector<LoopFrame, 4> loopStack;
   llvm::SmallVector<SwitchFrame, 4> switchStack;
   llvm::SmallVector<ControlEntry, 8> controlStack;
@@ -150,6 +160,9 @@ struct LoweringContext {
     failed = true;
     return false;
   }
+
+  void setDiagSink(DiagSink *sink) { diagSink = sink; }
+  DiagSink &diagnostics();
 };
 
 bool isEmitContext(const LoweringContext &ctx);
