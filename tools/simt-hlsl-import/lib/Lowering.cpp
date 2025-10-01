@@ -180,6 +180,17 @@ static SymValue makeSymValueForType(mlir::Type type) {
   return sym;
 }
 
+static void signalError(LoweringContext &ctx, simt_hlsl_import::SourceLoc loc,
+                        llvm::StringRef message) {
+  ctx.diagnostics().report(loc, message);
+  ctx.failed = true;
+}
+
+static void signalError(LoweringContext &ctx, const clang::Stmt *stmt,
+                        llvm::StringRef message) {
+  signalError(ctx, makeSourceLoc(stmt, ctx), message);
+}
+
 template <typename Interp>
 static typename Interp::Value wrapMlirValue(Interp &, mlir::Value value) {
   if constexpr (std::is_same_v<typename Interp::Value, mlir::Value>) {
@@ -807,15 +818,16 @@ struct EmitInterpreter
                          simt_hlsl_import::SourceLoc loc) {
     auto *binOp = llvm::dyn_cast_or_null<clang::BinaryOperator>(loc.clangNode);
     if (!binOp) {
-      ctx.fail("short-circuit requires clang::BinaryOperator source");
+      signalError(ctx, loc.clangNode, "short-circuit requires clang::BinaryOperator source");
       return {};
     }
 
     mlir::Location mlirLoc = resolveLoc(loc, ctx);
     auto boolType = ctx.builder.getI1Type();
-    if (lhs.getType() != boolType)
-      return ctx.fail("logical operator requires boolean operands"),
-             mlir::Value();
+    if (lhs.getType() != boolType) {
+      signalError(ctx, loc.clangNode, "logical operator requires boolean operands");
+      return {};
+    }
 
     auto propagateFailure = [&](LoweringContext &branchCtx) {
       if (branchCtx.failed) {
@@ -1656,7 +1668,7 @@ struct AnalysisInterpreter
       }
     }
 
-    ctx.fail("unsupported arithmetic operation for type");
+    signalError(ctx, loc, "unsupported arithmetic operation for type");
     return {};
   }
   Value emitCompare(simt_hlsl_import::CmpOp op, Value lhs, Value rhs,
@@ -1716,7 +1728,7 @@ struct AnalysisInterpreter
           .getResult();
     }
 
-    ctx.fail("unsupported compare operands");
+    signalError(ctx, loc, "unsupported compare operands");
     return {};
   }
   Value emitSelect(Value cond, Value trueV, Value falseV,
@@ -1739,7 +1751,7 @@ struct AnalysisInterpreter
         type = boolType;
       }
       if (type != boolType) {
-        ctx.fail("logical operator requires boolean operands");
+        signalError(ctx, loc, "logical operator requires boolean operands");
         return false;
       }
       return true;
@@ -1949,17 +1961,17 @@ void EmitInterpreter::emitReturn(std::optional<mlir::Value> value,
 
   if (value) {
     if (!expectsValue) {
-      ctx.fail("unexpected return value in void function");
+      signalError(ctx, loc, "unexpected return value in void function");
       return;
     }
     if (value->getType() != ctx.returnType) {
-      ctx.fail("return type mismatch");
+      signalError(ctx, loc, "return type mismatch");
       return;
     }
     ctx.builder.create<mlir::func::ReturnOp>(mlirLoc, *value);
   } else {
     if (expectsValue) {
-      ctx.fail("missing return value");
+      signalError(ctx, loc, "missing return value");
       return;
     }
     ctx.builder.create<mlir::func::ReturnOp>(mlirLoc);
@@ -2001,7 +2013,7 @@ void EmitInterpreter::emitFence(simt_hlsl_import::BarrierKind kind,
   (void)kind;
   auto decoded = decodeMemorySpace(memSpace);
   if (!decoded) {
-    ctx.fail("unrecognised memory space for barrier");
+    signalError(ctx, loc, "unrecognised memory space for barrier");
     return;
   }
   ctx.builder.create<simt::dialect::FenceOp>(
@@ -2578,7 +2590,7 @@ static typename Interp::Value lowerExprInterp(const clang::Expr *expr,
 
   mlir::Type type = convertType(expr->getType(), ctx.builder);
   if (!type) {
-    ctx.fail("unsupported expression type");
+    signalError(ctx, expr, "unsupported expression type");
     return ValueT();
   }
 
@@ -4355,7 +4367,11 @@ static bool lowerSwitchStmt(const clang::SwitchStmt *switchStmt,
           if (!value && index < incomingValues.size())
             value = incomingValues[index];
           if (!value) {
-            caseCtx.fail("switch case missing value for variable");
+            const clang::Stmt *errorStmt = index < info.statements.size()
+                                              ? info.statements[index]
+                                              : info.label;
+            signalError(caseCtx, errorStmt,
+                        "switch case missing value for variable");
             return false;
           }
           yieldValues.push_back(value);
