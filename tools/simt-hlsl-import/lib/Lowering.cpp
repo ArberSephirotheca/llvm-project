@@ -228,6 +228,78 @@ struct EmitInterpreter
     return EmitInterpreter(childCtx, /*allowUnanchored=*/true);
   }
 
+  bool emitLoopBreak(LoopFrame &loopFrame, simt_hlsl_import::SourceLoc loc) {
+    mlir::Location mlirLoc = resolveLoc(loc, ctx);
+
+    llvm::SmallVector<mlir::Value, 8> operands;
+    collectLoopBreakOperands(ctx, loopFrame, operands);
+    ctx.builder.create<simt::dialect::BreakOp>(mlirLoc, operands);
+
+    for (const clang::ValueDecl *vd : loopFrame.carriedVars)
+      noteMutation(vd);
+
+    ctx.emittedTerminator = true;
+    return true;
+  }
+
+  bool emitLoopContinue(LoopFrame &loopFrame,
+                        simt_hlsl_import::SourceLoc loc) {
+    mlir::Location mlirLoc = resolveLoc(loc, ctx);
+
+    llvm::SmallVector<mlir::Value, 8> operands;
+    collectLoopContinueOperands(ctx, loopFrame, operands);
+    ctx.builder.create<simt::dialect::ContinueOp>(mlirLoc, operands);
+
+    for (const clang::ValueDecl *vd : loopFrame.carriedVars)
+      noteMutation(vd);
+
+    ctx.emittedTerminator = true;
+    return true;
+  }
+
+  bool emitSwitchBreak(SwitchFrame &switchFrame,
+                       simt_hlsl_import::SourceLoc loc) {
+    mlir::Location mlirLoc = resolveLoc(loc, ctx);
+
+    const auto &carriedVars =
+        switchFrame.metadata && !switchFrame.metadata->carriedVars.empty()
+            ? switchFrame.metadata->carriedVars
+            : switchFrame.carriedVars;
+
+    llvm::SmallVector<mlir::Value, 8> yieldOperands;
+    yieldOperands.reserve(carriedVars.size() + 3);
+
+    for (auto [index, vd] : llvm::enumerate(carriedVars)) {
+      mlir::Value value = ctx.valueMap.lookup(vd);
+      if (!value && index < switchFrame.initialValues.size())
+        value = switchFrame.initialValues[index];
+      if (!value) {
+        ctx.fail("switch break missing value for case variable");
+        return false;
+      }
+      yieldOperands.push_back(value);
+      noteMutation(vd);
+    }
+
+    auto ensureBool = [&](mlir::Value v, int constant) -> mlir::Value {
+      if (v)
+        return v;
+      return ctx.builder.create<mlir::arith::ConstantIntOp>(mlirLoc, constant,
+                                                            1);
+    };
+
+    yieldOperands.push_back(
+        ensureBool(switchFrame.breakHasMatchedValue, /*constant=*/1));
+    yieldOperands.push_back(
+        ensureBool(switchFrame.breakExecutingValue, /*constant=*/0));
+    yieldOperands.push_back(
+        ensureBool(switchFrame.breakCompletedValue, /*constant=*/1));
+
+    ctx.builder.create<simt::dialect::YieldOp>(mlirLoc, yieldOperands);
+    ctx.emittedTerminator = true;
+    return true;
+  }
+
   struct IfScope {
     IfScope(LoweringContext &parentCtx, simt::dialect::IfOp op,
             llvm::ArrayRef<const clang::ValueDecl *> carried, bool hasElse,
@@ -1278,6 +1350,45 @@ struct AnalysisInterpreter
     return AnalysisInterpreter(childCtx);
   }
 
+  bool emitLoopBreak(LoopFrame &loopFrame, simt_hlsl_import::SourceLoc) {
+    if (loopFrame.metadata) {
+      loopFrame.metadata->bodyHasBreak = true;
+      for (const clang::ValueDecl *vd : loopFrame.metadata->carriedVars)
+        loopFrame.metadata->mutationInfo[vd].mutatedOnBreak = true;
+    }
+
+    ctx.mutatedVars.insert(loopFrame.carriedVars.begin(),
+                           loopFrame.carriedVars.end());
+    for (const clang::ValueDecl *vd : loopFrame.carriedVars)
+      noteMutation(vd);
+    ctx.emittedTerminator = true;
+    return true;
+  }
+
+  bool emitLoopContinue(LoopFrame &loopFrame,
+                        simt_hlsl_import::SourceLoc) {
+    if (loopFrame.metadata) {
+      loopFrame.metadata->bodyHasContinue = true;
+      for (const clang::ValueDecl *vd : loopFrame.metadata->carriedVars)
+        loopFrame.metadata->mutationInfo[vd].mutatedOnContinue = true;
+    }
+
+    ctx.mutatedVars.insert(loopFrame.carriedVars.begin(),
+                           loopFrame.carriedVars.end());
+    for (const clang::ValueDecl *vd : loopFrame.carriedVars)
+      noteMutation(vd);
+    ctx.emittedTerminator = true;
+    return true;
+  }
+
+  bool emitSwitchBreak(SwitchFrame &switchFrame,
+                       simt_hlsl_import::SourceLoc) {
+    if (switchFrame.metadata && switchFrame.activeCase)
+      switchFrame.activeCase->hasBreak = true;
+    ctx.emittedTerminator = true;
+    return true;
+  }
+
   struct IfScope {
     IfScope(LoweringContext &parentCtx,
             llvm::ArrayRef<const clang::ValueDecl *> carriedVars,
@@ -1777,6 +1888,8 @@ struct AnalysisInterpreter
 
   void noteMutation(const clang::ValueDecl *decl) {
     ctx.mutatedVars.insert(decl);
+    if (decl && !ctx.symValueMap.count(decl))
+      ctx.symValueMap[decl] = makeSymValue(decl);
   }
 
   void emitReturn(std::optional<Value>, simt_hlsl_import::SourceLoc) {
@@ -3077,26 +3190,20 @@ lowerAssignmentInterp(const clang::BinaryOperator *binOp, LoweringContext &ctx,
   if (!rhs)
     return typename Interp::Value();
 
-  mlir::Value rhsValue = unwrapValue(rhs);
   mlir::Type rhsType = getValueType(rhs);
   mlir::Location loc = getLocation(binOp, ctx);
 
   const clang::Expr *lhsExpr = binOp->getLHS()->IgnoreParenImpCasts();
   if (const auto *lhsDeclRef = llvm::dyn_cast<clang::DeclRefExpr>(lhsExpr)) {
     const clang::ValueDecl *vd = lhsDeclRef->getDecl();
-    auto it = ctx.valueMap.find(vd);
-    if (it == ctx.valueMap.end()) {
+    auto existing = interp.lookupVariable(vd);
+    if (!existing && !ctx.valueMap.count(vd)) {
       ctx.fail("reference to unknown value");
       return typename Interp::Value();
     }
 
     interp.bindVariable(vd, rhs);
     interp.noteMutation(vd);
-
-    if (rhsValue)
-      it->second = rhsValue;
-    ctx.mutatedVars.insert(vd);
-    ctx.symValueMap[vd] = makeSymValue(vd);
     return rhs;
   }
 
@@ -3111,7 +3218,7 @@ lowerAssignmentInterp(const clang::BinaryOperator *binOp, LoweringContext &ctx,
 
     interp.emitBufferStore(resource, index, rhs, decl, {binOp, loc});
     if (decl)
-      ctx.mutatedVars.insert(decl);
+      interp.noteMutation(decl);
     return rhs;
   };
 
