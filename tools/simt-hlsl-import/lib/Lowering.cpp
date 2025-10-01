@@ -2213,6 +2213,30 @@ static mlir::Type convertType(const clang::QualType &qt,
   return {};
 }
 
+static mlir::Location getLocation(const clang::Stmt *stmt,
+                                  LoweringContext &ctx) {
+  if (!stmt || !ctx.sourceManager)
+    return ctx.defaultLoc;
+
+  const clang::SourceManager &sm = *ctx.sourceManager;
+  clang::SourceLocation loc = stmt->getBeginLoc();
+  if (loc.isInvalid())
+    loc = stmt->getEndLoc();
+  if (loc.isInvalid())
+    return ctx.defaultLoc;
+
+  loc = sm.getExpansionLoc(loc);
+  clang::PresumedLoc presumed = sm.getPresumedLoc(loc);
+  if (!presumed.isValid())
+    return ctx.defaultLoc;
+
+  mlir::MLIRContext *mlirCtx = ctx.builder.getContext();
+  mlir::StringAttr fileAttr =
+      mlir::StringAttr::get(mlirCtx, presumed.getFilename());
+  return mlir::FileLineColLoc::get(fileAttr, presumed.getLine(),
+                                   presumed.getColumn());
+}
+
 static mlir::Value buildZeroValue(LoweringContext &ctx, mlir::Type type);
 
 struct BufferAccessInfo {
@@ -3195,29 +3219,6 @@ buildDxilTripleForProfile(llvm::StringRef profile) {
       .str();
 }
 
-static mlir::Location getLocation(const clang::Stmt *stmt,
-                                  LoweringContext &ctx) {
-  if (!stmt || !ctx.sourceManager)
-    return ctx.defaultLoc;
-
-  const clang::SourceManager &sm = *ctx.sourceManager;
-  clang::SourceLocation loc = stmt->getBeginLoc();
-  if (loc.isInvalid())
-    loc = stmt->getEndLoc();
-  if (loc.isInvalid())
-    return ctx.defaultLoc;
-
-  loc = sm.getExpansionLoc(loc);
-  clang::PresumedLoc presumed = sm.getPresumedLoc(loc);
-  if (!presumed.isValid())
-    return ctx.defaultLoc;
-
-  mlir::MLIRContext *mlirCtx = ctx.builder.getContext();
-  mlir::StringAttr fileAttr =
-      mlir::StringAttr::get(mlirCtx, presumed.getFilename());
-  return mlir::FileLineColLoc::get(fileAttr, presumed.getLine(),
-                                   presumed.getColumn());
-}
 
 template <typename Interp>
 static typename Interp::Value
