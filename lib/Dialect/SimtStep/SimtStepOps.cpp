@@ -11,6 +11,77 @@
 
 namespace simt::dialect {
 
+mlir::ParseResult FenceOp::parse(mlir::OpAsmParser &parser,
+                                 mlir::OperationState &state) {
+  if (parser.parseOptionalAttrDict(state.attributes))
+    return mlir::failure();
+  return mlir::success();
+}
+
+void FenceOp::print(mlir::OpAsmPrinter &printer) {
+  auto &os = printer.getStream();
+  bool opened = false;
+  auto emitSep = [&]() {
+    if (!opened) {
+      os << " {";
+      opened = true;
+    } else {
+      os << ", ";
+    }
+  };
+
+  if (auto scope = getScope()) {
+    emitSep();
+    os << "scope = #simt_step.scope<" << stringifyScope(*scope) << ">";
+  }
+  if (auto memSem = getMemsem()) {
+    emitSep();
+    os << "memsem = #simt_step.memsem<" << stringifyMemorySemantics(*memSem)
+       << ">";
+  }
+  if (auto memSpace = getMemspace()) {
+    emitSep();
+    os << "memspace = #simt_step.memspace<" << stringifyMemorySpace(*memSpace)
+       << ">";
+  }
+
+  if (opened)
+    os << "}";
+}
+
+mlir::ParseResult BarrierOp::parse(mlir::OpAsmParser &parser,
+                                   mlir::OperationState &state) {
+  if (parser.parseOptionalAttrDict(state.attributes))
+    return mlir::failure();
+  return mlir::success();
+}
+
+void BarrierOp::print(mlir::OpAsmPrinter &printer) {
+  auto &os = printer.getStream();
+  bool opened = false;
+  auto emitSep = [&]() {
+    if (!opened) {
+      os << " {";
+      opened = true;
+    } else {
+      os << ", ";
+    }
+  };
+
+  if (auto scope = getScope()) {
+    emitSep();
+    os << "scope = #simt_step.scope<" << stringifyScope(*scope) << ">";
+  }
+  if (auto memSem = getMemsem()) {
+    emitSep();
+    os << "memsem = #simt_step.memsem<" << stringifyMemorySemantics(*memSem)
+       << ">";
+  }
+
+  if (opened)
+    os << "}";
+}
+
 static void addResultTypeFromResource(mlir::OpBuilder &builder,
                                       mlir::OperationState &state,
                                       mlir::Value resource) {

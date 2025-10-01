@@ -501,7 +501,7 @@ def SimtStep_BarrierOp : Op<SimtStep_Dialect, "barrier"> {
   let arguments = (ins OptionalAttr<SimtStep_ScopeEnumAttr>:$scope,
                        OptionalAttr<SimtStep_MemorySemanticsEnumAttr>:$memsem);
 
-  let assemblyFormat = "attr-dict";
+  let hasCustomAssemblyFormat = 1;
 }
 
 def SimtStep_FenceOp : Op<SimtStep_Dialect, "fence"> {
@@ -515,7 +515,7 @@ def SimtStep_FenceOp : Op<SimtStep_Dialect, "fence"> {
                        OptionalAttr<SimtStep_MemorySemanticsEnumAttr>:$memsem,
                        OptionalAttr<SimtStep_MemorySpaceEnumAttr>:$memspace);
 
-  let assemblyFormat = "attr-dict";
+  let hasCustomAssemblyFormat = 1;
 }
 
 def SimtStep_LaneIdOp : Op<SimtStep_Dialect, "lane_id"> {
