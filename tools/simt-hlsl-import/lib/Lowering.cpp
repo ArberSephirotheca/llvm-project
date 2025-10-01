@@ -3473,122 +3473,21 @@ static bool lowerStatement(const clang::Stmt *stmt, LoweringContext &ctx,
     if (!target)
       return true;
 
-    if (target.kind == ControlEntryKind::Loop && target.loop) {
-      if (target.loop->metadata && target.loop->analysisOnly) {
-        target.loop->metadata->bodyHasBreak = true;
-        bool anyMutated = false;
-        for (const clang::ValueDecl *vd : target.loop->metadata->carriedVars) {
-          if (ctx.mutatedVars.contains(vd)) {
-            target.loop->metadata->mutationInfo[vd].mutatedOnBreak = true;
-            anyMutated = true;
-          }
-        }
-        if (!anyMutated) {
-          for (const clang::ValueDecl *vd : target.loop->metadata->carriedVars)
-            target.loop->metadata->mutationInfo[vd].mutatedOnBreak = true;
-        }
-      }
+    simt_hlsl_import::SourceLoc src{stmt, getLocation(stmt, ctx)};
 
-      if (target.loop->analysisOnly) {
-        ctx.mutatedVars.insert(target.loop->carriedVars.begin(),
-                               target.loop->carriedVars.end());
-        for (const clang::ValueDecl *vd : target.loop->carriedVars)
-          interp.noteMutation(vd);
-        ctx.emittedTerminator = true;
-        return true;
-      }
-      llvm::SmallVector<mlir::Value, 8> operands;
-      collectLoopBreakOperands(ctx, *target.loop, operands);
-      ctx.builder.create<simt::dialect::BreakOp>(ctx.defaultLoc, operands);
-      ctx.mutatedVars.insert(target.loop->carriedVars.begin(),
-                             target.loop->carriedVars.end());
-      for (const clang::ValueDecl *vd : target.loop->carriedVars)
-        interp.noteMutation(vd);
-      ctx.emittedTerminator = true;
-      return true;
-    }
+    if (target.kind == ControlEntryKind::Loop && target.loop)
+      return interp.emitLoopBreak(*target.loop, src);
 
-    if (target.kind == ControlEntryKind::Switch && target.switchFrame) {
-      auto *switchFrame = target.switchFrame;
-      if (switchFrame->metadata && switchFrame->analysisOnly) {
-        if (switchFrame->activeCase)
-          switchFrame->activeCase->hasBreak = true;
-      }
+    if (target.kind == ControlEntryKind::Switch && target.switchFrame)
+      return interp.emitSwitchBreak(*target.switchFrame, src);
 
-      if (switchFrame->analysisOnly) {
-        ctx.emittedTerminator = true;
-        return true;
-      }
-
-      llvm::SmallVector<mlir::Value, 8> yieldOperands;
-      const auto &carriedVars =
-          switchFrame->metadata && !switchFrame->metadata->carriedVars.empty()
-              ? switchFrame->metadata->carriedVars
-              : switchFrame->carriedVars;
-      yieldOperands.reserve(carriedVars.size() + 3);
-      for (auto [index, vd] : llvm::enumerate(carriedVars)) {
-        mlir::Value value = ctx.valueMap.lookup(vd);
-        if (!value && index < switchFrame->initialValues.size())
-          value = switchFrame->initialValues[index];
-        if (!value) {
-          ctx.fail("switch break missing value for case variable");
-          return false;
-        }
-        yieldOperands.push_back(value);
-        ctx.mutatedVars.insert(vd);
-        interp.noteMutation(vd);
-      }
-
-      auto ensureBool = [&](mlir::Value v, int constant) -> mlir::Value {
-        if (v)
-          return v;
-        return ctx.builder.create<mlir::arith::ConstantIntOp>(ctx.defaultLoc,
-                                                              constant, 1);
-      };
-
-      yieldOperands.push_back(ensureBool(switchFrame->breakHasMatchedValue, 1));
-      yieldOperands.push_back(ensureBool(switchFrame->breakExecutingValue, 0));
-      yieldOperands.push_back(ensureBool(switchFrame->breakCompletedValue, 1));
-
-      ctx.builder.create<simt::dialect::YieldOp>(ctx.defaultLoc, yieldOperands);
-      ctx.emittedTerminator = true;
-    }
     return true;
   }
 
   if (llvm::isa<clang::ContinueStmt>(stmt)) {
     if (LoopFrame *loopFrame = getInnermostLoop(ctx)) {
-      if (loopFrame->metadata && loopFrame->analysisOnly) {
-        loopFrame->metadata->bodyHasContinue = true;
-        bool anyMutated = false;
-        for (const clang::ValueDecl *vd : loopFrame->metadata->carriedVars) {
-          if (ctx.mutatedVars.contains(vd)) {
-            loopFrame->metadata->mutationInfo[vd].mutatedOnContinue = true;
-            anyMutated = true;
-          }
-        }
-        if (!anyMutated) {
-          for (const clang::ValueDecl *vd : loopFrame->metadata->carriedVars)
-            loopFrame->metadata->mutationInfo[vd].mutatedOnContinue = true;
-        }
-      }
-
-      if (loopFrame->analysisOnly) {
-        ctx.mutatedVars.insert(loopFrame->carriedVars.begin(),
-                               loopFrame->carriedVars.end());
-        for (const clang::ValueDecl *vd : loopFrame->carriedVars)
-          interp.noteMutation(vd);
-        ctx.emittedTerminator = true;
-        return true;
-      }
-      llvm::SmallVector<mlir::Value, 8> operands;
-      collectLoopContinueOperands(ctx, *loopFrame, operands);
-      ctx.builder.create<simt::dialect::ContinueOp>(ctx.defaultLoc, operands);
-      ctx.mutatedVars.insert(loopFrame->carriedVars.begin(),
-                             loopFrame->carriedVars.end());
-      for (const clang::ValueDecl *vd : loopFrame->carriedVars)
-        interp.noteMutation(vd);
-      ctx.emittedTerminator = true;
+      simt_hlsl_import::SourceLoc src{stmt, getLocation(stmt, ctx)};
+      return interp.emitLoopContinue(*loopFrame, src);
     }
     return true;
   }
@@ -4422,7 +4321,7 @@ static bool lowerSwitchStmt(const clang::SwitchStmt *switchStmt,
             return false;
           }
           yieldValues.push_back(value);
-          caseCtx.mutatedVars.insert(vd);
+          caseInterp.noteMutation(vd);
         }
         mlir::Value updatedHasMatched =
             thenBuilder.create<mlir::arith::OrIOp>(loc, currentHasMatched,
@@ -4436,8 +4335,8 @@ static bool lowerSwitchStmt(const clang::SwitchStmt *switchStmt,
         thenBuilder.create<simt::dialect::YieldOp>(loc, yieldValues);
       }
 
-      ctx.mutatedVars.insert(caseCtx.mutatedVars.begin(),
-                             caseCtx.mutatedVars.end());
+      for (const clang::ValueDecl *vd : caseCtx.mutatedVars)
+        interp.noteMutation(vd);
 
       auto &elseBlock = ifOp.getElseRegion().front();
       elseBlock.clear();
@@ -4457,7 +4356,7 @@ static bool lowerSwitchStmt(const clang::SwitchStmt *switchStmt,
 
   for (auto [index, vd] : llvm::enumerate(mutatedVars)) {
     ctx.valueMap[vd] = switchOp.getResult(index);
-    ctx.mutatedVars.insert(vd);
+    interp.noteMutation(vd);
   }
 
   return true;
