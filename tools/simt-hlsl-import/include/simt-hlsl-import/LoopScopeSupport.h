@@ -23,10 +23,14 @@ class ASTContext;
 
 namespace simt_hlsl_import {
 
+struct LoweringContext;
+
 struct SourceLoc {
   const clang::Stmt *clangNode = nullptr;
   mlir::Location mlirLoc;
 };
+
+SourceLoc makeSourceLoc(const clang::Stmt *stmt, LoweringContext &ctx);
 
 struct DiagSink {
   virtual ~DiagSink() = default;
@@ -41,8 +45,6 @@ struct SymValue {
   unsigned elementCount = 1;
   bool isConst = false;
 };
-
-struct LoweringContext;
 
 struct LoopMutationSummary {
   bool mutatedInBody = false;

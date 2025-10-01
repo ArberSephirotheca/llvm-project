@@ -7,7 +7,9 @@
 
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/Decl.h"
+#include "clang/AST/Stmt.h"
 #include "clang/AST/Type.h"
+#include "clang/Basic/SourceManager.h"
 
 namespace simt_hlsl_import {
 
@@ -24,6 +26,34 @@ struct ContextDiagSink : DiagSink {
 };
 
 } // namespace
+
+SourceLoc makeSourceLoc(const clang::Stmt *stmt, LoweringContext &ctx) {
+  if (!stmt)
+    return SourceLoc{nullptr, ctx.defaultLoc};
+
+  if (!ctx.sourceManager)
+    return SourceLoc{stmt, ctx.defaultLoc};
+
+  const clang::SourceManager &sm = *ctx.sourceManager;
+  clang::SourceLocation loc = stmt->getBeginLoc();
+  if (loc.isInvalid())
+    loc = stmt->getEndLoc();
+  if (loc.isInvalid())
+    return SourceLoc{stmt, ctx.defaultLoc};
+
+  loc = sm.getExpansionLoc(loc);
+  clang::PresumedLoc presumed = sm.getPresumedLoc(loc);
+  if (!presumed.isValid())
+    return SourceLoc{stmt, ctx.defaultLoc};
+
+  mlir::MLIRContext *mlirCtx = ctx.builder.getContext();
+  mlir::StringAttr fileAttr =
+      mlir::StringAttr::get(mlirCtx, presumed.getFilename());
+  mlir::Location mlirLoc =
+      mlir::FileLineColLoc::get(fileAttr, presumed.getLine(),
+                                presumed.getColumn());
+  return SourceLoc{stmt, mlirLoc};
+}
 
 bool isEmitContext(const LoweringContext &ctx) {
   mlir::Block *block = ctx.builder.getInsertionBlock();

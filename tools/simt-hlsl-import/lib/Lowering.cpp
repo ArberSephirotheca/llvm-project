@@ -2262,7 +2262,7 @@ lowerBufferAccessInterp(const clang::Expr *baseExpr,
 
   mlir::Type indexType = getValueType(index);
   if (!mlir::isa<mlir::IntegerType>(indexType)) {
-    ctx.diagnostics().report({indexExpr, getLocation(indexExpr, ctx)},
+    ctx.diagnostics().report(makeSourceLoc(indexExpr, ctx),
                              "buffer subscript index must be integer");
     ctx.failed = true;
     return std::nullopt;
@@ -2271,7 +2271,7 @@ lowerBufferAccessInterp(const clang::Expr *baseExpr,
   auto resourceType =
       mlir::dyn_cast<simt::dialect::ResourceType>(getValueType(resource));
   if (!resourceType) {
-    ctx.diagnostics().report({baseExpr, getLocation(baseExpr, ctx)},
+    ctx.diagnostics().report(makeSourceLoc(baseExpr, ctx),
                              "subscript base must be a buffer resource");
     ctx.failed = true;
     return std::nullopt;
@@ -2285,9 +2285,6 @@ lowerBufferAccessInterp(const clang::Expr *baseExpr,
 
   return std::make_optional(std::make_tuple(resource, index, resourceType, decl));
 }
-
-static mlir::Location getLocation(const clang::Stmt *stmt,
-                                  LoweringContext &ctx);
 
 template <typename Interp>
 static typename Interp::Value lowerExprInterp(const clang::Expr *expr,
@@ -2368,25 +2365,26 @@ lowerAtomicCallInterp(const clang::CallExpr *call, LoweringContext &ctx,
     return std::nullopt;
 
   mlir::Location loc = getLocation(call, ctx);
+  auto diagLoc = makeSourceLoc(call, ctx);
 
   unsigned numArgs = call->getNumArgs();
   unsigned valueOperandCount =
       *kind == simt_hlsl_import::BufferAtomicOp::CompareExchange ? 2U : 1U;
   unsigned baseArgCount = 1 + valueOperandCount;
   if (numArgs != baseArgCount && numArgs != baseArgCount + 1) {
-    interp.reportError({call, loc}, "unexpected argument count for atomic call");
+    interp.reportError(diagLoc, "unexpected argument count for atomic call");
     return std::optional<ValueT>(ValueT());
   }
 
   const clang::Expr *destArg = call->getArg(0);
   if (!destArg) {
-    interp.reportError({call, loc}, "atomic call missing destination argument");
+    interp.reportError(diagLoc, "atomic call missing destination argument");
     return std::optional<ValueT>(ValueT());
   }
 
   auto destInfo = getBufferAccessInfoFromLValueInterp(destArg, ctx, interp);
   if (!destInfo) {
-    interp.reportError({call, loc}, "atomic destination must be a buffer element");
+    interp.reportError(diagLoc, "atomic destination must be a buffer element");
     return std::optional<ValueT>(ValueT());
   }
   auto [resource, index, resourceType, decl] = *destInfo;
@@ -2430,7 +2428,7 @@ lowerAtomicCallInterp(const clang::CallExpr *call, LoweringContext &ctx,
             llvm::dyn_cast<clang::DeclRefExpr>(stripped))
       outDecl = declRef->getDecl();
     if (!outDecl) {
-      interp.reportError({call, loc},
+      interp.reportError(diagLoc,
                          "atomic original value argument must reference a variable");
       return std::optional<ValueT>(ValueT());
     }
@@ -2476,8 +2474,9 @@ lowerAtomicMemberCallInterp(const clang::CXXMemberCallExpr *call,
   mlir::Location loc = getLocation(call, ctx);
 
   const clang::Expr *objectExpr = call->getImplicitObjectArgument();
+  auto diagLoc = makeSourceLoc(call, ctx);
   if (!objectExpr) {
-    interp.reportError({call, loc}, "atomic call requires an object expression");
+    interp.reportError(diagLoc, "atomic call requires an object expression");
     return std::optional<ValueT>(ValueT());
   }
 
@@ -2488,7 +2487,7 @@ lowerAtomicMemberCallInterp(const clang::CXXMemberCallExpr *call,
   auto resourceType =
       mlir::dyn_cast<simt::dialect::ResourceType>(getValueType(resource));
   if (!resourceType) {
-    interp.reportError({call, loc}, "atomic call requires a buffer resource");
+    interp.reportError(diagLoc, "atomic call requires a buffer resource");
     return std::optional<ValueT>(ValueT());
   }
   (void)resourceType;
@@ -2498,7 +2497,7 @@ lowerAtomicMemberCallInterp(const clang::CXXMemberCallExpr *call,
       *kind == simt_hlsl_import::BufferAtomicOp::CompareExchange ? 2U : 1U;
   unsigned baseArgCount = 1 + valueOperandCount;
   if (numArgs != baseArgCount && numArgs != baseArgCount + 1) {
-    interp.reportError({call, loc}, "unexpected argument count for atomic call");
+    interp.reportError(diagLoc, "unexpected argument count for atomic call");
     return std::optional<ValueT>(ValueT());
   }
 
@@ -2550,7 +2549,7 @@ lowerAtomicMemberCallInterp(const clang::CXXMemberCallExpr *call,
             llvm::dyn_cast<clang::DeclRefExpr>(stripped))
       outDecl = declRef->getDecl();
     if (!outDecl) {
-      interp.reportError({call, loc},
+      interp.reportError(diagLoc,
                          "atomic original value argument must reference a variable");
       return std::optional<ValueT>(ValueT());
     }
@@ -2592,7 +2591,7 @@ static typename Interp::Value lowerExprInterp(const clang::Expr *expr,
     }
     auto intType = mlir::cast<mlir::IntegerType>(type);
     std::string tag = buildIntegerTag(intType);
-    simt_hlsl_import::SourceLoc src{expr, loc};
+    auto src = makeSourceLoc(expr, ctx);
     auto result = interp.emitConstantInt(intLit->getValue().getSExtValue(),
                                          tag.c_str(), src);
     if constexpr (!std::is_same_v<typename Interp::Value, mlir::Value>) {
@@ -2613,7 +2612,7 @@ static typename Interp::Value lowerExprInterp(const clang::Expr *expr,
     }
     auto floatType = mlir::cast<mlir::FloatType>(type);
     std::string tag = buildFloatTag(floatType);
-    simt_hlsl_import::SourceLoc src{expr, loc};
+    auto src = makeSourceLoc(expr, ctx);
     llvm::APFloat apValue = floatLit->getValue();
     double value = apValue.convertToDouble();
     auto result = interp.emitConstantFloat(value, tag.c_str(), src);
@@ -2673,8 +2672,9 @@ static typename Interp::Value lowerExprInterp(const clang::Expr *expr,
   }
 
   if (const auto *vecElem = llvm::dyn_cast<clang::ExtVectorElementExpr>(expr)) {
+    auto diagLoc = makeSourceLoc(expr, ctx);
     if (vecElem->isArrow()) {
-      interp.reportError({expr, loc}, "pointer-based vector swizzles are unsupported");
+      interp.reportError(diagLoc, "pointer-based vector swizzles are unsupported");
       return ValueT();
     }
 
@@ -2684,7 +2684,7 @@ static typename Interp::Value lowerExprInterp(const clang::Expr *expr,
 
     auto baseVecType = mlir::dyn_cast<mlir::VectorType>(getValueType(base));
     if (!baseVecType || baseVecType.getRank() != 1) {
-      interp.reportError({expr, loc}, "vector element access requires 1-D vector operand");
+      interp.reportError(diagLoc, "vector element access requires 1-D vector operand");
       return ValueT();
     }
 
@@ -2694,19 +2694,19 @@ static typename Interp::Value lowerExprInterp(const clang::Expr *expr,
     elements.reserve(elementIndices32.size());
     for (uint32_t idx : elementIndices32) {
       if (idx >= baseVecType.getShape()[0]) {
-        interp.reportError({expr, loc}, "vector element index out of range");
+        interp.reportError(diagLoc, "vector element index out of range");
         return ValueT();
       }
       elements.push_back(static_cast<int64_t>(idx));
     }
     if (elements.empty()) {
-      interp.reportError({expr, loc}, "vector element access with no components");
+      interp.reportError(diagLoc, "vector element access with no components");
       return ValueT();
     }
 
     mlir::Value baseValue = unwrapValue(base);
     if (!baseValue) {
-      interp.reportError({expr, loc}, "vector element access requires materialized value");
+      interp.reportError(diagLoc, "vector element access requires materialized value");
       return ValueT();
     }
 
@@ -2745,7 +2745,7 @@ static typename Interp::Value lowerExprInterp(const clang::Expr *expr,
     if (!operand)
       return typename Interp::Value();
 
-    simt_hlsl_import::SourceLoc src{unOp, loc};
+    auto src = makeSourceLoc(unOp, ctx);
 
     switch (unOp->getOpcode()) {
     case clang::UnaryOperatorKind::UO_Plus:
@@ -2859,7 +2859,7 @@ static typename Interp::Value lowerExprInterp(const clang::Expr *expr,
       return lowerExprInterp(subExpr, ctx, interp);
     };
 
-    simt_hlsl_import::SourceLoc src{binOp, loc};
+    auto src = makeSourceLoc(binOp, ctx);
 
     auto requireOperands = [&](typename Interp::Value &lhs,
                                typename Interp::Value &rhs) -> bool {
@@ -3041,8 +3041,8 @@ static typename Interp::Value lowerExprInterp(const clang::Expr *expr,
     auto thenBuilder = makeBranchBuilder(condOp->getTrueExpr());
     auto elseBuilder = makeBranchBuilder(condOp->getFalseExpr());
 
-    simt_hlsl_import::SourceLoc src{condOp, loc};
-    return interp.emitConditional(condValue, thenBuilder, elseBuilder, src);
+    return interp.emitConditional(condValue, thenBuilder, elseBuilder,
+                                  makeSourceLoc(condOp, ctx));
   }
 
   ctx.fail("unsupported expression lowering");
@@ -3076,7 +3076,7 @@ lowerWaveIntrinsicCallInterp(const clang::CallExpr *call, LoweringContext &ctx,
     operands.reserve(indices.size());
     for (unsigned idx : indices) {
       if (idx >= call->getNumArgs()) {
-        interp.reportError({call, loc}, "wave intrinsic argument index out of range");
+        interp.reportError(diagLoc, "wave intrinsic argument index out of range");
         return false;
       }
       auto operand = lowerExprInterp(call->getArg(idx), ctx, interp);
@@ -3102,28 +3102,28 @@ lowerWaveIntrinsicCallInterp(const clang::CallExpr *call, LoweringContext &ctx,
 
   if (name == "WaveActiveAllTrue") {
     if (call->getNumArgs() != 1) {
-      interp.reportError({call, loc}, "WaveActiveAllTrue expects one argument");
+      interp.reportError(diagLoc, "WaveActiveAllTrue expects one argument");
       return std::optional<ValueT>(ValueT());
     }
     return dispatch(simt_hlsl_import::WaveIntrinsic::ActiveAllTrue, {0});
   }
   if (name == "WaveActiveAnyTrue") {
     if (call->getNumArgs() != 1) {
-      interp.reportError({call, loc}, "WaveActiveAnyTrue expects one argument");
+      interp.reportError(diagLoc, "WaveActiveAnyTrue expects one argument");
       return std::optional<ValueT>(ValueT());
     }
     return dispatch(simt_hlsl_import::WaveIntrinsic::ActiveAnyTrue, {0});
   }
   if (name == "WaveActiveCountBits") {
     if (call->getNumArgs() != 1) {
-      interp.reportError({call, loc}, "WaveActiveCountBits expects one argument");
+      interp.reportError(diagLoc, "WaveActiveCountBits expects one argument");
       return std::optional<ValueT>(ValueT());
     }
     return dispatch(simt_hlsl_import::WaveIntrinsic::ActiveCountBits, {0});
   }
   if (name == "WaveGetLaneIndex") {
     if (call->getNumArgs() != 0) {
-      interp.reportError({call, loc}, "WaveGetLaneIndex expects no arguments");
+      interp.reportError(diagLoc, "WaveGetLaneIndex expects no arguments");
       return std::optional<ValueT>(ValueT());
     }
     return dispatch(simt_hlsl_import::WaveIntrinsic::GetLaneIndex, {});
@@ -3163,10 +3163,12 @@ static bool lowerBarrierWithInterpreter(const clang::CallExpr *call,
     return false;
   }
 
-  if (call->getNumArgs() != 0)
-    return ctx.fail("memory barrier utilities do not take arguments"), false;
+  auto src = makeSourceLoc(call, ctx);
 
-  simt_hlsl_import::SourceLoc src{call, getLocation(call, ctx)};
+  if (call->getNumArgs() != 0) {
+    interp.reportError(src, "memory barrier utilities do not take arguments");
+    return false;
+  }
 
   interp.emitFence(simt_hlsl_import::BarrierKind::Workgroup, memSpace, src);
   if (emitGroupSync)
@@ -3511,7 +3513,7 @@ static bool lowerStatement(const clang::Stmt *stmt, LoweringContext &ctx,
     if (!target)
       return true;
 
-    simt_hlsl_import::SourceLoc src{stmt, getLocation(stmt, ctx)};
+    auto src = makeSourceLoc(stmt, ctx);
 
     if (target.kind == ControlEntryKind::Loop && target.loop)
       return interp.emitLoopBreak(*target.loop, src);
@@ -3523,10 +3525,8 @@ static bool lowerStatement(const clang::Stmt *stmt, LoweringContext &ctx,
   }
 
   if (llvm::isa<clang::ContinueStmt>(stmt)) {
-    if (LoopFrame *loopFrame = getInnermostLoop(ctx)) {
-      simt_hlsl_import::SourceLoc src{stmt, getLocation(stmt, ctx)};
-      return interp.emitLoopContinue(*loopFrame, src);
-    }
+    if (LoopFrame *loopFrame = getInnermostLoop(ctx))
+      return interp.emitLoopContinue(*loopFrame, makeSourceLoc(stmt, ctx));
     return true;
   }
 
@@ -3586,8 +3586,7 @@ static bool lowerStatement(const clang::Stmt *stmt, LoweringContext &ctx,
       if (frame.analysisOnly && frame.metadata && frame.activeCase)
         frame.activeCase->hasReturn = true;
     }
-    simt_hlsl_import::SourceLoc src{ret, getLocation(ret, ctx)};
-    interp.emitReturn(retValue, src);
+    interp.emitReturn(retValue, makeSourceLoc(ret, ctx));
     return !ctx.failed;
   }
 
