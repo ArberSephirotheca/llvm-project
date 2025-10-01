@@ -2875,16 +2875,6 @@ static typename Interp::Value lowerExprInterp(const clang::Expr *expr,
   return typename Interp::Value();
 }
 
-static mlir::Value lowerExpr(const clang::Expr *expr, LoweringContext &ctx) {
-  if (isEmitContext(ctx)) {
-    EmitInterpreter interp(ctx);
-    return lowerExprInterp(expr, ctx, interp);
-  }
-  AnalysisInterpreter interp(ctx);
-  auto result = lowerExprInterp(expr, ctx, interp);
-  return result.getValueOrNull();
-}
-
 template <typename Interp>
 static std::optional<typename Interp::Value>
 lowerWaveIntrinsicCallInterp(const clang::CallExpr *call, LoweringContext &ctx,
@@ -3254,7 +3244,8 @@ static bool collectLoopMutations(
   });
 
   if (body) {
-    if (!lowerStatement(body, analysisCtx) || analysisCtx.failed)
+    AnalysisInterpreter bodyInterp(analysisCtx);
+    if (!lowerStatement(body, analysisCtx, bodyInterp) || analysisCtx.failed)
       return false;
   }
 
@@ -3612,7 +3603,7 @@ static bool lowerForStmt(const clang::ForStmt *forStmt, LoweringContext &ctx,
       if (!lowerStatement(init, ctx, interp) || ctx.failed)
         return false;
     } else if (const auto *initExpr = llvm::dyn_cast<clang::Expr>(init)) {
-      (void)lowerExpr(initExpr, ctx);
+      (void)lowerExprInterp(initExpr, ctx, interp);
       if (ctx.failed)
         return false;
     } else {
@@ -3626,10 +3617,13 @@ static bool lowerForStmt(const clang::ForStmt *forStmt, LoweringContext &ctx,
     if (!incStmt)
       return true;
     if (const auto *incExpr = llvm::dyn_cast<clang::Expr>(incStmt)) {
-      (void)lowerExpr(incExpr, analysisCtx);
+      AnalysisInterpreter incInterp(analysisCtx);
+      (void)lowerExprInterp(incExpr, analysisCtx, incInterp);
       return !analysisCtx.failed;
     }
-    if (!lowerStatement(incStmt, analysisCtx) || analysisCtx.failed)
+    AnalysisInterpreter incInterp(analysisCtx);
+    if (!lowerStatement(incStmt, analysisCtx, incInterp) ||
+        analysisCtx.failed)
       return false;
     return true;
   };
@@ -3654,8 +3648,12 @@ static bool lowerForStmt(const clang::ForStmt *forStmt, LoweringContext &ctx,
 
   mlir::Value condValue;
   if (const clang::Expr *condExpr = forStmt->getCond()) {
-    condValue = lowerExpr(condExpr, prepareCtx);
-    if (!condValue || prepareCtx.failed)
+    auto condInterp = interp.fork(prepareCtx);
+    auto condResult = lowerExprInterp(condExpr, prepareCtx, condInterp);
+    if (prepareCtx.failed)
+      return false;
+    condValue = unwrapValue(condResult);
+    if (isEmitContext(prepareCtx) && !condValue)
       return false;
   } else {
     condValue = prepBuilder.create<mlir::arith::ConstantIntOp>(loc, 1, 1);
@@ -3683,7 +3681,7 @@ static bool lowerForStmt(const clang::ForStmt *forStmt, LoweringContext &ctx,
   if (!bodyCtx.emittedTerminator) {
     if (const auto *incExpr =
             llvm::dyn_cast_or_null<clang::Expr>(forStmt->getInc())) {
-      (void)lowerExpr(incExpr, bodyCtx);
+      (void)lowerExprInterp(incExpr, bodyCtx, bodyInterp);
       if (bodyCtx.failed)
         return false;
     } else if (const clang::Stmt *inc = forStmt->getInc()) {
@@ -3717,7 +3715,8 @@ static bool lowerWhileStmt(const clang::WhileStmt *whileStmt,
   auto analyzeCond = [&](LoweringContext &analysisCtx) -> bool {
     if (!condExpr)
       return true;
-    (void)lowerExpr(condExpr, analysisCtx);
+    AnalysisInterpreter condInterp(analysisCtx);
+    (void)lowerExprInterp(condExpr, analysisCtx, condInterp);
     return !analysisCtx.failed;
   };
   if (!collectLoopMutations(ctx, whileStmt->getBody(), analyzeCond, loopMeta))
@@ -3740,8 +3739,12 @@ static bool lowerWhileStmt(const clang::WhileStmt *whileStmt,
 
   mlir::Value condValue;
   if (condExpr) {
-    condValue = lowerExpr(condExpr, prepareCtx);
-    if (!condValue || prepareCtx.failed)
+    auto condInterp = interp.fork(prepareCtx);
+    auto condResult = lowerExprInterp(condExpr, prepareCtx, condInterp);
+    if (prepareCtx.failed)
+      return false;
+    condValue = unwrapValue(condResult);
+    if (!loopScope.isAnalysisOnly() && !condValue)
       return false;
   } else {
     condValue = prepBuilder.create<mlir::arith::ConstantIntOp>(loc, 1, 1);
@@ -3797,7 +3800,8 @@ static bool lowerDoStmt(const clang::DoStmt *doStmt, LoweringContext &ctx,
   auto analyzeCond = [&](LoweringContext &analysisCtx) -> bool {
     if (!condExpr)
       return true;
-    (void)lowerExpr(condExpr, analysisCtx);
+    AnalysisInterpreter condInterp(analysisCtx);
+    (void)lowerExprInterp(condExpr, analysisCtx, condInterp);
     return !analysisCtx.failed;
   };
   if (!collectLoopMutations(ctx, doStmt->getBody(), analyzeCond, loopMeta))
@@ -3868,8 +3872,13 @@ static bool lowerDoStmt(const clang::DoStmt *doStmt, LoweringContext &ctx,
 
       mlir::Value evaluated;
       if (condExpr) {
-        evaluated = lowerExpr(condExpr, condCtx);
-        if (!evaluated || condCtx.failed)
+        auto condInterp = interp.fork(condCtx);
+        auto evaluatedResult =
+            lowerExprInterp(condExpr, condCtx, condInterp);
+        if (condCtx.failed)
+          return false;
+        evaluated = unwrapValue(evaluatedResult);
+        if (isEmitContext(condCtx) && !evaluated)
           return false;
       } else {
         evaluated = elseBuilder.create<mlir::arith::ConstantIntOp>(loc, 1, 1);
@@ -3892,8 +3901,12 @@ static bool lowerDoStmt(const clang::DoStmt *doStmt, LoweringContext &ctx,
       prepareCtx.valueMap[vd] = condIf.getResult(index + 1);
   } else {
     if (condExpr) {
-      condValue = lowerExpr(condExpr, prepareCtx);
-      if (!condValue || prepareCtx.failed)
+      auto condInterp = interp.fork(prepareCtx);
+      auto condResult = lowerExprInterp(condExpr, prepareCtx, condInterp);
+      if (prepareCtx.failed)
+        return false;
+      condValue = unwrapValue(condResult);
+      if (isEmitContext(prepareCtx) && !condValue)
         return false;
     } else {
       condValue = prepBuilder.create<mlir::arith::ConstantIntOp>(loc, 1, 1);
@@ -4019,8 +4032,11 @@ static bool lowerSwitchStmt(const clang::SwitchStmt *switchStmt,
     }
   }
 
-  mlir::Value selector = lowerExpr(switchStmt->getCond(), ctx);
-  if (!selector)
+  auto selectorValue = lowerExprInterp(switchStmt->getCond(), ctx, interp);
+  if (ctx.failed)
+    return false;
+  mlir::Value selector = unwrapValue(selectorValue);
+  if (isEmitContext(ctx) && !selector)
     return false;
 
   SwitchMetadata switchMeta;
@@ -4053,8 +4069,10 @@ static bool lowerSwitchStmt(const clang::SwitchStmt *switchStmt,
     analysisGuard.frame().activeCase = &caseMeta;
     analysisGuard.frame().caseIndex = caseIndex;
 
+    AnalysisInterpreter caseInterp(analysisCtx);
     for (const clang::Stmt *caseStmt : info.statements) {
-      if (!lowerStatement(caseStmt, analysisCtx) || analysisCtx.failed)
+      if (!lowerStatement(caseStmt, analysisCtx, caseInterp) ||
+          analysisCtx.failed)
         return false;
       if (analysisCtx.emittedTerminator)
         break;
@@ -4224,7 +4242,12 @@ static bool lowerSwitchStmt(const clang::SwitchStmt *switchStmt,
         LoweringContext matchCtx(caseBuilder, loc, ctx.returnType,
                                  ctx.errorMessage, ctx.sourceManager);
         cloneContextState(ctx, matchCtx);
-        mlir::Value caseValue = lowerExpr(caseStmt->getLHS(), matchCtx);
+        auto matchInterp = interp.fork(matchCtx);
+        auto caseValueResult =
+            lowerExprInterp(caseStmt->getLHS(), matchCtx, matchInterp);
+        if (matchCtx.failed)
+          return false;
+        mlir::Value caseValue = unwrapValue(caseValueResult);
         if (!caseValue)
           return false;
         mlir::Value valueEquals = caseBuilder.create<mlir::arith::CmpIOp>(
