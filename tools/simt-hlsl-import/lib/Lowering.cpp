@@ -191,6 +191,10 @@ static void signalError(LoweringContext &ctx, const clang::Stmt *stmt,
   signalError(ctx, makeSourceLoc(stmt, ctx), message);
 }
 
+static simt_hlsl_import::SourceLoc defaultSourceLoc(LoweringContext &ctx) {
+  return {nullptr, ctx.defaultLoc};
+}
+
 template <typename Interp>
 static typename Interp::Value wrapMlirValue(Interp &, mlir::Value value) {
   if constexpr (std::is_same_v<typename Interp::Value, mlir::Value>) {
@@ -294,7 +298,7 @@ struct EmitInterpreter
       if (!value && index < switchFrame.initialValues.size())
         value = switchFrame.initialValues[index];
       if (!value) {
-        ctx.fail("switch break missing value for case variable");
+        signalError(ctx, loc, "switch break missing value for case variable");
         return false;
       }
       yieldOperands.push_back(value);
@@ -2598,7 +2602,7 @@ static typename Interp::Value lowerExprInterp(const clang::Expr *expr,
 
   if (const auto *intLit = llvm::dyn_cast<clang::IntegerLiteral>(expr)) {
     if (!mlir::isa<mlir::IntegerType>(type)) {
-      ctx.fail("integer literal expects integer type");
+      signalError(ctx, expr, "integer literal expects integer type");
       return ValueT();
     }
     auto intType = mlir::cast<mlir::IntegerType>(type);
@@ -2619,7 +2623,7 @@ static typename Interp::Value lowerExprInterp(const clang::Expr *expr,
 
   if (const auto *floatLit = llvm::dyn_cast<clang::FloatingLiteral>(expr)) {
     if (!mlir::isa<mlir::FloatType>(type)) {
-      ctx.fail("floating literal expects floating type");
+      signalError(ctx, expr, "floating literal expects floating type");
       return ValueT();
     }
     auto floatType = mlir::cast<mlir::FloatType>(type);
@@ -2652,7 +2656,7 @@ static typename Interp::Value lowerExprInterp(const clang::Expr *expr,
     const clang::ValueDecl *vd = declRef->getDecl();
     auto it = ctx.valueMap.find(vd);
     if (it == ctx.valueMap.end()) {
-      ctx.fail("reference to unknown value");
+      signalError(ctx, expr, "reference to unknown value");
       return ValueT();
     }
     auto result = wrapMlirValue(interp, it->second);
@@ -2791,13 +2795,13 @@ static typename Interp::Value lowerExprInterp(const clang::Expr *expr,
         return interp.emitCompare(simt_hlsl_import::CmpOp::EQ, operand, zero,
                                   src);
       }
-      ctx.fail("logical not requires scalar operand");
+      signalError(ctx, unOp, "logical not requires scalar operand");
       return typename Interp::Value();
     }
     case clang::UnaryOperatorKind::UO_Not: {
       auto intType = mlir::dyn_cast<mlir::IntegerType>(getValueType(operand));
       if (!intType) {
-        ctx.fail("bitwise not requires integer operand");
+        signalError(ctx, unOp, "bitwise not requires integer operand");
         return typename Interp::Value();
       }
       std::string tag = buildIntegerTag(intType);
@@ -2819,7 +2823,7 @@ static typename Interp::Value lowerExprInterp(const clang::Expr *expr,
 
       const clang::ValueDecl *target = getMutableDeclRef(unOp->getSubExpr());
       if (!target) {
-        ctx.fail("increment/decrement requires simple variable");
+        signalError(ctx, unOp, "increment/decrement requires simple variable");
         return typename Interp::Value();
       }
 
@@ -2839,7 +2843,7 @@ static typename Interp::Value lowerExprInterp(const clang::Expr *expr,
         std::string tag = buildFloatTag(floatType);
         one = interp.emitConstantFloat(1.0, tag.c_str(), src);
       } else {
-        ctx.fail("increment/decrement requires numeric operand");
+        signalError(ctx, unOp, "increment/decrement requires numeric operand");
         return typename Interp::Value();
       }
 
@@ -2962,7 +2966,7 @@ static typename Interp::Value lowerExprInterp(const clang::Expr *expr,
 
       mlir::Type boolType = ctx.builder.getI1Type();
       if (getValueType(lhs) != boolType) {
-        ctx.fail("logical operator requires boolean operands");
+        signalError(ctx, binOp, "logical operator requires boolean operands");
         return typename Interp::Value();
       }
 
@@ -2985,7 +2989,7 @@ static typename Interp::Value lowerExprInterp(const clang::Expr *expr,
         return typename Interp::Value();
 
       if (!mlir::isa<mlir::IntegerType>(getValueType(lhs))) {
-        ctx.fail("bitwise operator requires integer operands");
+        signalError(ctx, binOp, "bitwise operator requires integer operands");
         return typename Interp::Value();
       }
 
@@ -3031,7 +3035,7 @@ static typename Interp::Value lowerExprInterp(const clang::Expr *expr,
       return typename Interp::Value();
 
     if (getValueType(condValue) != ctx.builder.getI1Type()) {
-      ctx.fail("conditional operator requires boolean condition");
+      signalError(ctx, condOp, "conditional operator requires boolean condition");
       return typename Interp::Value();
     }
 
@@ -3043,7 +3047,8 @@ static typename Interp::Value lowerExprInterp(const clang::Expr *expr,
         if (!branchValue)
           return typename Interp::Value();
         if (getValueType(branchValue) != type) {
-          branchCtx.fail("conditional operator branch type mismatch");
+          signalError(branchCtx, branchExpr,
+                      "conditional operator branch type mismatch");
           return typename Interp::Value();
         }
         return branchValue;
@@ -3057,7 +3062,7 @@ static typename Interp::Value lowerExprInterp(const clang::Expr *expr,
                                   makeSourceLoc(condOp, ctx));
   }
 
-  ctx.fail("unsupported expression lowering");
+  signalError(ctx, expr, "unsupported expression lowering");
   return typename Interp::Value();
 }
 
@@ -3251,7 +3256,7 @@ lowerAssignmentInterp(const clang::BinaryOperator *binOp, LoweringContext &ctx,
     const clang::ValueDecl *vd = lhsDeclRef->getDecl();
     auto existing = interp.lookupVariable(vd);
     if (!existing && !ctx.valueMap.count(vd)) {
-      ctx.fail("reference to unknown value");
+      signalError(ctx, lhsDeclRef, "reference to unknown value");
       return typename Interp::Value();
     }
 
@@ -3265,7 +3270,8 @@ lowerAssignmentInterp(const clang::BinaryOperator *binOp, LoweringContext &ctx,
                              simt::dialect::ResourceType resourceType,
                              const clang::ValueDecl *decl) -> typename Interp::Value {
     if (rhsType != resourceType.getElementType()) {
-      ctx.fail("assignment value must match buffer element type");
+      signalError(ctx, binOp,
+                  "assignment value must match buffer element type");
       return typename Interp::Value();
     }
 
@@ -3304,7 +3310,7 @@ lowerAssignmentInterp(const clang::BinaryOperator *binOp, LoweringContext &ctx,
     return emitBufferStore(resource, index, resourceType, decl);
   }
 
-  ctx.fail("unsupported assignment target");
+  signalError(ctx, binOp, "unsupported assignment target");
   return typename Interp::Value();
 }
 
@@ -3328,13 +3334,15 @@ static mlir::Value buildZeroValue(LoweringContext &ctx, mlir::Type type) {
     else if (auto floatType = mlir::dyn_cast<mlir::FloatType>(elementType))
       elementAttr = ctx.builder.getFloatAttr(floatType, 0.0);
     else
-      return ctx.fail("unable to build default value for return type"),
+      return signalError(ctx, defaultSourceLoc(ctx),
+                         "unable to build default value for return type"),
              mlir::Value();
 
     auto zeroAttr = mlir::DenseElementsAttr::get(vectorType, elementAttr);
     return ctx.builder.create<mlir::arith::ConstantOp>(loc, zeroAttr);
   }
-  ctx.fail("unable to build default value for return type");
+  signalError(ctx, defaultSourceLoc(ctx),
+              "unable to build default value for return type");
   return {};
 }
 
@@ -3609,7 +3617,7 @@ static bool lowerStatement(const clang::Stmt *stmt, LoweringContext &ctx,
       if (!var)
         continue;
       if (!convertType(var->getType(), ctx.builder))
-        return ctx.fail("unsupported variable type");
+        return signalError(ctx, declStmt, "unsupported variable type"), false;
       mlir::Value initValue;
       if (const clang::Expr *init = var->getInit()) {
         initValue = lowerExprInterp(init, ctx, interp);
@@ -3628,7 +3636,8 @@ static bool lowerStatement(const clang::Stmt *stmt, LoweringContext &ctx,
     if (const auto *call = llvm::dyn_cast<clang::CallExpr>(stripped)) {
       if (lowerBarrierUtilityCall(call, ctx, interp)) {
         if (!call->getType()->isVoidType())
-          return ctx.fail("barrier call must return void");
+          return signalError(ctx, call, "barrier call must return void"),
+                 false;
         return true;
       }
     }
@@ -3637,7 +3646,8 @@ static bool lowerStatement(const clang::Stmt *stmt, LoweringContext &ctx,
     return !ctx.failed;
   }
 
-  return ctx.fail("unsupported statement");
+  signalError(ctx, stmt, "unsupported statement");
+  return false;
 }
 
 static bool lowerStatement(const clang::Stmt *stmt, LoweringContext &ctx) {
@@ -3663,7 +3673,8 @@ static bool lowerForStmt(const clang::ForStmt *forStmt, LoweringContext &ctx,
       if (ctx.failed)
         return false;
     } else {
-      return ctx.fail("unsupported for-loop initializer");
+      signalError(ctx, init, "unsupported for-loop initializer");
+      return false;
     }
   }
 
@@ -4032,8 +4043,11 @@ static bool lowerSwitchStmt(const clang::SwitchStmt *switchStmt,
       return false;
   }
 
-  if (switchStmt->getConditionVariable())
-    return ctx.fail("switch condition variables are not supported");
+  if (switchStmt->getConditionVariable()) {
+    signalError(ctx, switchStmt,
+                "switch condition variables are not supported");
+    return false;
+  }
 
   struct CaseInfo {
     const clang::SwitchCase *label = nullptr;
@@ -4050,9 +4064,11 @@ static bool lowerSwitchStmt(const clang::SwitchStmt *switchStmt,
       return true;
     if (const auto *attr = llvm::dyn_cast<clang::AttributedStmt>(stmt))
       return addStatement(current, attr->getSubStmt());
-    if (!current)
-      return ctx.fail("statement outside of switch cases is not supported"),
-             false;
+    if (!current) {
+      signalError(ctx, stmt,
+                  "statement outside of switch cases is not supported");
+      return false;
+    }
     current->statements.push_back(stmt);
     return true;
   };
@@ -4178,7 +4194,9 @@ static bool lowerSwitchStmt(const clang::SwitchStmt *switchStmt,
   for (const clang::ValueDecl *vd : mutatedVars) {
     mlir::Value initial = ctx.valueMap.lookup(vd);
     if (!initial)
-      return ctx.fail("reference to unknown switch variable");
+      return signalError(ctx, switchStmt,
+                         "reference to unknown switch variable"),
+             false;
     initialCarried.push_back(initial);
   }
 

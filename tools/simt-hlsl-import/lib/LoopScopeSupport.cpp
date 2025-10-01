@@ -19,11 +19,19 @@ struct ContextDiagSink : DiagSink {
   explicit ContextDiagSink(LoweringContext &ctx) : ctx(ctx) {}
 
   void report(SourceLoc /*loc*/, llvm::StringRef message) override {
-    ctx.fail(message);
+    if (!ctx.failed)
+      ctx.errorMessage = message.str();
+    ctx.failed = true;
   }
 
   LoweringContext &ctx;
 };
+
+bool reportContextError(LoweringContext &ctx, llvm::StringRef message) {
+  ctx.diagnostics().report({nullptr, ctx.defaultLoc}, message);
+  ctx.failed = true;
+  return false;
+}
 
 } // namespace
 
@@ -290,7 +298,7 @@ bool buildLoopSkeleton(LoweringContext &ctx,
   for (const clang::ValueDecl *vd : mutatedVars) {
     mlir::Value initial = getLoopCarriedValue(ctx, vd);
     if (!initial)
-      return ctx.fail("reference to unknown loop variable");
+      return reportContextError(ctx, "reference to unknown loop variable");
     resultTypes.push_back(initial.getType());
     initValues.push_back(initial);
   }
