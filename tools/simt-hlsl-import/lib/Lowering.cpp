@@ -3064,6 +3064,7 @@ lowerWaveIntrinsicCallInterp(const clang::CallExpr *call, LoweringContext &ctx,
 
   llvm::StringRef name = callee->getName();
   mlir::Location loc = getLocation(call, ctx);
+  auto diagLoc = makeSourceLoc(call, ctx);
 
   mlir::Type resultType = convertType(call->getType(), ctx.builder);
   if (!resultType)
