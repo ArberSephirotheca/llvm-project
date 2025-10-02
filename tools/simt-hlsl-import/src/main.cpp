@@ -116,6 +116,6 @@ int main(int argc, char **argv) {
   }
 
   result.value()->print(llvm::outs());
-  llvm::outs() << '\n';
+  llvm::outs() << "\n";
   return 0;
 }

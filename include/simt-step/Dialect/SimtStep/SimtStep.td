@@ -456,8 +456,6 @@ def SimtStep_ConditionOp : Op<SimtStep_Dialect, "condition",
 
   let arguments = (ins I1:$condition, Variadic<AnyType>:$forwarded);
 
-  let assemblyFormat =
-      [{ `(` $condition `)` attr-dict ($forwarded^ `:` type($forwarded))? }];
 }
 
 def SimtStep_LoopOp : Op<SimtStep_Dialect, "loop",
