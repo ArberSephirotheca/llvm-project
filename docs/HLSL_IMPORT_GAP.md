@@ -32,8 +32,11 @@ built-in handling.
     `convertOperatorCall` (covering `[]`), and `convertConditionalOperator`.
 
 - **Intrinsics and built-ins**
-  - Importer has no modelling for HLSL thread IDs, buffers, wave intrinsics, or
-    barriers, and therefore cannot lower such calls today.
+  - Importer now materialises thread identifier intrinsics: parameters tagged
+    with `SV_DispatchThreadID`, `SV_GroupThreadID`, `SV_GroupID`, or
+    `SV_GroupIndex` lower to the corresponding `simt_step.dispatch_thread_id`,
+    `.group_thread_id`, `.group_id`, and `.group_index` ops. Other system values
+    (e.g., subgroup size) remain unsupported.
   - Compatibility wrappers cover the initial wave suite and count helper:
     `WaveActiveAllTrue`, `WaveActiveAnyTrue`, `WaveActiveCountBits`, and
     `WaveGetLaneIndex` now lower to the corresponding `simt_step.wave_*`,

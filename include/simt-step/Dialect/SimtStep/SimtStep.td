@@ -532,6 +532,43 @@ def SimtStep_DispatchThreadIdOp : Op<SimtStep_Dialect, "dispatch_thread_id",
   let hasCustomAssemblyFormat = 1;
 }
 
+def SimtStep_GroupThreadIdOp : Op<SimtStep_Dialect, "group_thread_id",
+                                  [Pure]> {
+  let summary = "Query workgroup-local thread identifier";
+  let description = [{
+    Returns the per-thread identifier within the current workgroup. The result
+    type mirrors the builtin usage (scalar or vector).
+  }];
+
+  let results = (outs AnyType:$id);
+
+  let hasCustomAssemblyFormat = 1;
+}
+
+def SimtStep_GroupIdOp : Op<SimtStep_Dialect, "group_id", [Pure]> {
+  let summary = "Query workgroup identifier";
+  let description = [{
+    Returns the workgroup identifier within the dispatch grid. The result type
+    matches the consuming builtin (usually a 3-component vector).
+  }];
+
+  let results = (outs AnyType:$id);
+
+  let hasCustomAssemblyFormat = 1;
+}
+
+def SimtStep_GroupIndexOp : Op<SimtStep_Dialect, "group_index", [Pure]> {
+  let summary = "Query flattened workgroup index";
+  let description = [{
+    Returns the linearized index of the current thread within its workgroup.
+    The result type matches the builtin usage (scalar integer).
+  }];
+
+  let results = (outs AnyType:$index);
+
+  let hasCustomAssemblyFormat = 1;
+}
+
 def SimtStep_LaneIdOp : Op<SimtStep_Dialect, "lane_id"> {
   let summary = "Query the current lane identifier";
   let description = [{

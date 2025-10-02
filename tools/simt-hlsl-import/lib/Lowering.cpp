@@ -4494,16 +4494,31 @@ public:
 
     llvm::SmallVector<mlir::Type> argTypes;
     argTypes.reserve(decl->getNumParams() + resourceDecls.size());
-    llvm::SmallVector<bool, 4> paramIsDispatchThreadID;
-    paramIsDispatchThreadID.reserve(decl->getNumParams());
+    enum class ThreadIdBuiltin {
+      None,
+      DispatchThreadID,
+      GroupThreadID,
+      GroupID,
+      GroupIndex,
+    };
+    llvm::SmallVector<ThreadIdBuiltin, 4> paramBuiltinKinds;
+    paramBuiltinKinds.reserve(decl->getNumParams());
     for (const clang::ParmVarDecl *param : decl->parameters()) {
       mlir::Type type = convertType(param->getType(), moduleBuilder);
       if (!type || mlir::isa<mlir::NoneType>(type)) {
         recordError("unsupported parameter type in function '" + name + "'");
         return false;
       }
-      bool isDispatch = param->hasAttr<clang::HLSLSV_DispatchThreadIDAttr>();
-      paramIsDispatchThreadID.push_back(isDispatch);
+      ThreadIdBuiltin builtinKind = ThreadIdBuiltin::None;
+      if (param->hasAttr<clang::HLSLSV_DispatchThreadIDAttr>())
+        builtinKind = ThreadIdBuiltin::DispatchThreadID;
+      else if (param->hasAttr<clang::HLSLSV_GroupThreadIDAttr>())
+        builtinKind = ThreadIdBuiltin::GroupThreadID;
+      else if (param->hasAttr<clang::HLSLSV_GroupIDAttr>())
+        builtinKind = ThreadIdBuiltin::GroupID;
+      else if (param->hasAttr<clang::HLSLSV_GroupIndexAttr>())
+        builtinKind = ThreadIdBuiltin::GroupIndex;
+      paramBuiltinKinds.push_back(builtinKind);
       argTypes.push_back(type);
     }
 
@@ -4554,13 +4569,35 @@ public:
       const clang::ParmVarDecl *param = decl->getParamDecl(index);
       mlir::Value arg = entryArgs[index];
       ctx.valueMap[param] = arg;
-      if (paramIsDispatchThreadID[index]) {
-        SourceLoc src = makeSourceLoc(param, ctx);
-        mlir::Value builtin = funcBuilder.create<simt::dialect::DispatchThreadIdOp>(
-            resolveLoc(src, ctx), arg.getType());
-        ctx.valueMap[param] = builtin;
-        ctx.symValueMap[param] = makeSymValue(param);
+      ThreadIdBuiltin kind = paramBuiltinKinds[index];
+      if (kind == ThreadIdBuiltin::None)
+        continue;
+
+      SourceLoc src = makeSourceLoc(param, ctx);
+      mlir::Location loc = resolveLoc(src, ctx);
+      mlir::Value builtin;
+      switch (kind) {
+      case ThreadIdBuiltin::DispatchThreadID:
+        builtin = funcBuilder.create<simt::dialect::DispatchThreadIdOp>(loc,
+                                                                        arg.getType());
+        break;
+      case ThreadIdBuiltin::GroupThreadID:
+        builtin = funcBuilder.create<simt::dialect::GroupThreadIdOp>(loc,
+                                                                     arg.getType());
+        break;
+      case ThreadIdBuiltin::GroupID:
+        builtin = funcBuilder.create<simt::dialect::GroupIdOp>(loc,
+                                                               arg.getType());
+        break;
+      case ThreadIdBuiltin::GroupIndex:
+        builtin = funcBuilder.create<simt::dialect::GroupIndexOp>(loc,
+                                                                  arg.getType());
+        break;
+      case ThreadIdBuiltin::None:
+        llvm_unreachable("handled above");
       }
+      ctx.valueMap[param] = builtin;
+      ctx.symValueMap[param] = makeSymValue(param);
     }
     for (auto [resourceDecl, arg] :
          llvm::zip(resourceDecls, entryArgs.drop_front(paramCount)))

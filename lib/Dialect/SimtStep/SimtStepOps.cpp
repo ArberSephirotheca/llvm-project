@@ -82,8 +82,8 @@ void BarrierOp::print(mlir::OpAsmPrinter &printer) {
     os << "}";
 }
 
-mlir::ParseResult DispatchThreadIdOp::parse(mlir::OpAsmParser &parser,
-                                            mlir::OperationState &state) {
+static mlir::ParseResult parseStateQueryOp(mlir::OpAsmParser &parser,
+                                          mlir::OperationState &state) {
   if (parser.parseOptionalAttrDict(state.attributes))
     return mlir::failure();
   mlir::Type resultType;
@@ -93,12 +93,13 @@ mlir::ParseResult DispatchThreadIdOp::parse(mlir::OpAsmParser &parser,
   return mlir::success();
 }
 
-void DispatchThreadIdOp::print(mlir::OpAsmPrinter &printer) {
-  if (!(*this)->getAttrs().empty()) {
+static void printStateQueryOp(mlir::Operation *op,
+                              mlir::OpAsmPrinter &printer) {
+  if (!op->getAttrs().empty()) {
     auto &os = printer.getStream();
     os << " {";
     bool first = true;
-    for (auto attr : (*this)->getAttrs()) {
+    for (auto attr : op->getAttrs()) {
       if (!first)
         os << ", ";
       first = false;
@@ -107,7 +108,43 @@ void DispatchThreadIdOp::print(mlir::OpAsmPrinter &printer) {
     }
     os << "}";
   }
-  printer.getStream() << " : " << getType();
+  printer.getStream() << " : " << op->getResult(0).getType();
+}
+
+mlir::ParseResult DispatchThreadIdOp::parse(mlir::OpAsmParser &parser,
+                                            mlir::OperationState &state) {
+  return parseStateQueryOp(parser, state);
+}
+
+void DispatchThreadIdOp::print(mlir::OpAsmPrinter &printer) {
+  printStateQueryOp(getOperation(), printer);
+}
+
+mlir::ParseResult GroupThreadIdOp::parse(mlir::OpAsmParser &parser,
+                                         mlir::OperationState &state) {
+  return parseStateQueryOp(parser, state);
+}
+
+void GroupThreadIdOp::print(mlir::OpAsmPrinter &printer) {
+  printStateQueryOp(getOperation(), printer);
+}
+
+mlir::ParseResult GroupIdOp::parse(mlir::OpAsmParser &parser,
+                                   mlir::OperationState &state) {
+  return parseStateQueryOp(parser, state);
+}
+
+void GroupIdOp::print(mlir::OpAsmPrinter &printer) {
+  printStateQueryOp(getOperation(), printer);
+}
+
+mlir::ParseResult GroupIndexOp::parse(mlir::OpAsmParser &parser,
+                                      mlir::OperationState &state) {
+  return parseStateQueryOp(parser, state);
+}
+
+void GroupIndexOp::print(mlir::OpAsmPrinter &printer) {
+  printStateQueryOp(getOperation(), printer);
 }
 
 static void addResultTypeFromResource(mlir::OpBuilder &builder,

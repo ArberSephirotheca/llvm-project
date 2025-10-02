@@ -35,6 +35,11 @@ Width must be non-zero. The type will be extended with mask-specific utilities a
 - `simt_step.fence` – memory-ordering fence (attributes optional for now).
 - `simt_step.dispatch_thread_id` – yields the dispatch-space thread id; the result
   type matches the builtin usage (scalar or vector).
+- `simt_step.group_thread_id` – yields the workgroup-local thread id in the form
+  requested by the builtin (scalar or vector).
+- `simt_step.group_id` – returns the workgroup identifier within the dispatch
+  grid (typically a three-component vector).
+- `simt_step.group_index` – returns the flattened workgroup index (scalar).
 - `simt_step.lane_id` – yields the current lane identifier as `index`.
 - `simt_step.active_mask` – exposes the current active mask as `i64` (will become `simt_step.mask`).
 

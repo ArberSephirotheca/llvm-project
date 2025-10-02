@@ -20,7 +20,8 @@ plan and prioritize the work needed to bring the MLIR importer up to parity.
 - [ ] Compound assignments and full set of binary arithmetic/bitwise ops.
 
 ## 3. Intrinsics & Built-ins
-- [ ] Model thread and dispatch IDs (`SV_DispatchThreadID`, etc.).
+- [x] Model thread and dispatch IDs (`SV_DispatchThreadID`, `SV_GroupThreadID`,
+      `SV_GroupID`, `SV_GroupIndex`).
 - [ ] Lower wave intrinsics (`WaveActiveSum`, `WaveActiveMin`, …) to SimtStep
       operations or placeholders.
 - [ ] Represent resource accesses (SRV/UAV) and memory operations.
