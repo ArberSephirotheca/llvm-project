@@ -77,42 +77,27 @@ def SimtStruct_BlockOp : Op<SimtStruct_Dialect, "block",
 // Terminators ---------------------------------------------------------------
 
 def SimtStruct_BranchOp : Op<SimtStruct_Dialect, "branch",
-    [Terminator, HasParent<"BlockOp">, BranchOpInterface]> {
+    [Terminator, HasParent<"BlockOp">]> {
   let summary = "Unconditional branch with mask";
   let arguments = (ins MaskLikeType:$mask,
+                       FlatSymbolRefAttr:$target,
                        Variadic<AnyType>:$dest_operands);
-  let successors = (successor AnySuccessor:$dest);
-
-  let extraClassDeclaration = [{
-    ::mlir::SuccessorOperands getSuccessorOperands(unsigned index);
-    ::std::optional<::mlir::BlockArgument> getSuccessorBlockArgument(unsigned operandIndex);
-    ::mlir::Block *getSuccessorForOperands(::llvm::ArrayRef<::mlir::Attribute> operands);
-    bool areTypesCompatible(::mlir::Type lhs, ::mlir::Type rhs);
-  }];
 }
 
 def SimtStruct_CondBranchOp : Op<SimtStruct_Dialect, "cond_branch",
-    [Terminator, HasParent<"BlockOp">, BranchOpInterface,
-     AttrSizedOperandSegments]> {
+    [Terminator, HasParent<"BlockOp">, AttrSizedOperandSegments]> {
   let summary = "Conditional branch with explicit masks";
   let arguments = (ins I1:$condition,
                        MaskLikeType:$true_mask,
                        MaskLikeType:$false_mask,
+                       FlatSymbolRefAttr:$true_target,
+                       FlatSymbolRefAttr:$false_target,
                        Variadic<AnyType>:$true_operands,
                        Variadic<AnyType>:$false_operands,
                        OptionalAttr<FlatSymbolRefAttr>:$merge_target,
                        OptionalAttr<SimtStruct_ReconvergencePolicyAttr>:$policy);
-  let successors = (successor AnySuccessor:$trueDest,
-                    AnySuccessor:$falseDest);
 
   let hasVerifier = 1;
-
-  let extraClassDeclaration = [{
-    ::mlir::SuccessorOperands getSuccessorOperands(unsigned index);
-    ::std::optional<::mlir::BlockArgument> getSuccessorBlockArgument(unsigned operandIndex);
-    ::mlir::Block *getSuccessorForOperands(::llvm::ArrayRef<::mlir::Attribute> operands);
-    bool areTypesCompatible(::mlir::Type lhs, ::mlir::Type rhs);
-  }];
 }
 
 def SimtStruct_ReturnOp : Op<SimtStruct_Dialect, "return",

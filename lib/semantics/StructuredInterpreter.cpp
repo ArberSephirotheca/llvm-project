@@ -85,20 +85,23 @@ StructuredInterpreter::handleBranch(structured::BranchOp op) {
         return maskOrErr.takeError();
     state_.setActiveMask(*maskOrErr);
 
-    auto *destBlock = op.getDest();
-    if (!destBlock) {
+    auto targetAttr = op.getTargetAttr();
+    if (!targetAttr)
         return llvm::make_error<llvm::StringError>(
-            "branch missing destination block",
+            "branch missing destination symbol",
             llvm::inconvertibleErrorCode());
-    }
-    auto parent = destBlock->getParentOp();
-    auto blockOp = llvm::dyn_cast_or_null<structured::BlockOp>(parent);
-    if (!blockOp) {
+
+    if (!program_)
         return llvm::make_error<llvm::StringError>(
-            "branch destination is not a structured block",
+            "structured program metadata absent during branch interpretation",
             llvm::inconvertibleErrorCode());
-    }
-    return blockOp;
+
+    if (auto *info = program_->lookupBlock(targetAttr.getValue()))
+        return info->block;
+
+    return llvm::make_error<llvm::StringError>(
+        "branch references unknown structured block",
+        llvm::inconvertibleErrorCode());
 }
 
 llvm::Expected<BranchDecision>
@@ -114,12 +117,16 @@ StructuredInterpreter::handleCondBranch(structured::CondBranchOp op) {
     decision.trueMask = *trueMaskOrErr;
     decision.falseMask = *falseMaskOrErr;
 
-    auto *trueBlock = op.getTrueDest();
-    auto *falseBlock = op.getFalseDest();
-    if (trueBlock)
-        decision.trueTarget = llvm::dyn_cast<structured::BlockOp>(trueBlock->getParentOp());
-    if (falseBlock)
-        decision.falseTarget = llvm::dyn_cast<structured::BlockOp>(falseBlock->getParentOp());
+    if (auto trueAttr = op.getTrueTargetAttr()) {
+        if (program_)
+            if (auto *info = program_->lookupBlock(trueAttr.getValue()))
+                decision.trueTarget = info->block;
+    }
+    if (auto falseAttr = op.getFalseTargetAttr()) {
+        if (program_)
+            if (auto *info = program_->lookupBlock(falseAttr.getValue()))
+                decision.falseTarget = info->block;
+    }
 
     if (decision.trueMask)
         state_.setActiveMask(decision.trueMask);

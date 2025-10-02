@@ -138,11 +138,11 @@ struct SimtStepToStructuredPass
         Value mask =
             getOrCreateMask(origBlock, structuredBlock, terminator->getLoc());
 
-        Block &structuredDest =
-            blockMapping[branch.getDest()].getBody().front();
-        bodyBuilder.create<simt::structured::BranchOp>(termLoc, mask,
-                                                       destOperands,
-                                                       &structuredDest);
+        simt::structured::BlockOp destBlockOp = blockMapping[branch.getDest()];
+        auto targetAttr = FlatSymbolRefAttr::get(destBlockOp.getContext(), destBlockOp.getSymName());
+
+        bodyBuilder.create<simt::structured::BranchOp>(termLoc, mask, targetAttr,
+                                                       destOperands);
       } else if (auto cond = dyn_cast<cf::CondBranchOp>(terminator)) {
         SmallVector<Value> trueOperands;
         SmallVector<Value> falseOperands;
@@ -156,15 +156,16 @@ struct SimtStepToStructuredPass
         Value mask =
             getOrCreateMask(origBlock, structuredBlock, terminator->getLoc());
 
-        Block &structuredTrue =
-            blockMapping[cond.getTrueDest()].getBody().front();
-        Block &structuredFalse =
-            blockMapping[cond.getFalseDest()].getBody().front();
+        simt::structured::BlockOp trueBlockOp = blockMapping[cond.getTrueDest()];
+        simt::structured::BlockOp falseBlockOp = blockMapping[cond.getFalseDest()];
+
+        auto trueTarget = FlatSymbolRefAttr::get(trueBlockOp.getContext(), trueBlockOp.getSymName());
+        auto falseTarget = FlatSymbolRefAttr::get(falseBlockOp.getContext(), falseBlockOp.getSymName());
 
         bodyBuilder.create<simt::structured::CondBranchOp>(
-            termLoc, condition, mask, mask, trueOperands, falseOperands,
-            FlatSymbolRefAttr(), simt::structured::ReconvergencePolicyAttr(),
-            &structuredTrue, &structuredFalse);
+            termLoc, condition, mask, mask, trueTarget, falseTarget, trueOperands,
+            falseOperands, FlatSymbolRefAttr(),
+            simt::structured::ReconvergencePolicyAttr());
       } else if (auto ret = dyn_cast<func::ReturnOp>(terminator)) {
         SmallVector<Value> returnValues;
         if (!mapValues(ret.getOperands(), returnValues)) {

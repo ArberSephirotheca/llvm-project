@@ -74,80 +74,9 @@ bool BlockOp::areTypesCompatible(::mlir::Type lhs, ::mlir::Type rhs) {
     return areMaskTypesCompatible(lhs, rhs);
 }
 
-mlir::SuccessorOperands BranchOp::getSuccessorOperands(unsigned index) {
-    assert(index == 0 && "branch has one successor");
-    return mlir::SuccessorOperands(getDestOperandsMutable());
-}
-
-std::optional<mlir::BlockArgument> BranchOp::getSuccessorBlockArgument(unsigned operandIndex) {
-    mlir::Block *destBlock = getDest();
-    if (!destBlock || destBlock->getNumArguments() <= operandIndex)
-        return std::nullopt;
-
-    return destBlock->getArgument(operandIndex);
-}
-
-mlir::Block *BranchOp::getSuccessorForOperands(::llvm::ArrayRef<::mlir::Attribute>) {
-    return getDest();
-}
-
-bool BranchOp::areTypesCompatible(::mlir::Type lhs, ::mlir::Type rhs) {
-    return areMaskTypesCompatible(lhs, rhs);
-}
-
-mlir::SuccessorOperands CondBranchOp::getSuccessorOperands(unsigned index) {
-    assert(index < 2 && "cond branch has two successors");
-    if (index == 0)
-        return mlir::SuccessorOperands(getTrueOperandsMutable());
-    return mlir::SuccessorOperands(getFalseOperandsMutable());
-}
-
-std::optional<mlir::BlockArgument> CondBranchOp::getSuccessorBlockArgument(unsigned operandIndex) {
-    if (operandIndex < getTrueOperands().size()) {
-        mlir::Block *trueDest = getTrueDest();
-        if (trueDest && trueDest->getNumArguments() > operandIndex)
-            return trueDest->getArgument(operandIndex);
-        return std::nullopt;
-    }
-
-    unsigned falseIndex = operandIndex - getTrueOperands().size();
-    mlir::Block *falseDest = getFalseDest();
-    if (falseDest && falseDest->getNumArguments() > falseIndex)
-        return falseDest->getArgument(falseIndex);
-    return std::nullopt;
-}
-
-mlir::Block *CondBranchOp::getSuccessorForOperands(::llvm::ArrayRef<::mlir::Attribute> operands) {
-    if (operands.empty())
-        return nullptr;
-    mlir::Attribute condAttr = operands.front();
-    if (auto boolAttr = mlir::dyn_cast<mlir::BoolAttr>(condAttr))
-        return boolAttr.getValue() ? getTrueDest() : getFalseDest();
-    if (auto intAttr = mlir::dyn_cast<mlir::IntegerAttr>(condAttr)) {
-        auto value = intAttr.getValue();
-        if (value == 1)
-            return getTrueDest();
-        if (value == 0)
-            return getFalseDest();
-    }
-    return nullptr;
-}
-
-bool CondBranchOp::areTypesCompatible(::mlir::Type lhs, ::mlir::Type rhs) {
-    return areMaskTypesCompatible(lhs, rhs);
-}
-
 mlir::LogicalResult CondBranchOp::verify() {
     if (getTrueMask().getType() != getFalseMask().getType())
         return emitOpError("true/false masks must have matching types");
-
-    if (auto *trueDest = getTrueDest())
-        if (trueDest->getNumArguments() != getTrueOperands().size())
-            return emitOpError("number of true operands must match destination arguments");
-
-    if (auto *falseDest = getFalseDest())
-        if (falseDest->getNumArguments() != getFalseOperands().size())
-            return emitOpError("number of false operands must match destination arguments");
 
     return mlir::success();
 }
