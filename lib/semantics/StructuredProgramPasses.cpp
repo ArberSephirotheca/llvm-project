@@ -4,6 +4,7 @@
 
 #include <mlir/IR/BuiltinOps.h>
 #include <mlir/Pass/Pass.h>
+#include <mlir/Pass/PassRegistry.h>
 
 namespace simt::semantics {
 
@@ -45,6 +46,8 @@ struct DumpStructuredProgramPass
 
 } // namespace
 
-void registerDumpStructuredProgramPass() {}
+void registerDumpStructuredProgramPass() {
+    static mlir::PassRegistration<DumpStructuredProgramPass> pass;
+}
 
 } // namespace simt::semantics
