@@ -1,5 +1,6 @@
 // MLIR-LABEL: "builtin.module"()
 // MLIR: "func.func"() <{function_type = (i32) -> (), sym_name = "main"}> ({
+// MLIR:   %{{.*}} = "simt_step.dispatch_thread_id"() : () -> i32
 // MLIR:   %[[SWITCH:.*]]:4 = "simt_step.switch"(%[[SELECT:.*]], %[[VAL0:.*]], %[[HAS0:.*]], %[[EXEC0:.*]], %[[DONE0:.*]]) ({
 // MLIR-COUNT: 3 "simt_step.if"
 // MLIR:     ^bb0(%[[CASE0_VAL:.*]]: i32, %[[CASE0_HAS:.*]]: i1, %[[CASE0_EXEC:.*]]: i1, %[[CASE0_DONE:.*]]: i1):

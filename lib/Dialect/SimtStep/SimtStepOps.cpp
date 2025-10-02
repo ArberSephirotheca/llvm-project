@@ -82,6 +82,34 @@ void BarrierOp::print(mlir::OpAsmPrinter &printer) {
     os << "}";
 }
 
+mlir::ParseResult DispatchThreadIdOp::parse(mlir::OpAsmParser &parser,
+                                            mlir::OperationState &state) {
+  if (parser.parseOptionalAttrDict(state.attributes))
+    return mlir::failure();
+  mlir::Type resultType;
+  if (parser.parseColonType(resultType))
+    return mlir::failure();
+  state.addTypes(resultType);
+  return mlir::success();
+}
+
+void DispatchThreadIdOp::print(mlir::OpAsmPrinter &printer) {
+  if (!(*this)->getAttrs().empty()) {
+    auto &os = printer.getStream();
+    os << " {";
+    bool first = true;
+    for (auto attr : (*this)->getAttrs()) {
+      if (!first)
+        os << ", ";
+      first = false;
+      os << attr.getName().str() << " = ";
+      attr.getValue().print(os);
+    }
+    os << "}";
+  }
+  printer.getStream() << " : " << getType();
+}
+
 static void addResultTypeFromResource(mlir::OpBuilder &builder,
                                       mlir::OperationState &state,
                                       mlir::Value resource) {

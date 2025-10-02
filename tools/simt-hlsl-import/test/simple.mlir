@@ -1,7 +1,6 @@
 // MLIR-LABEL: func.func @main(
-// MLIR-SAME: %[[TID:arg0]]: i32)
 // MLIR: attributes {simt.num_threads = array<i64: 8, 4, 1>}
-// MLIR: %[[MASK:.*]] = "simt_step.active_mask"() : () -> i64
+// MLIR: %[[TID:.*]] = simt_step.dispatch_thread_id : i32
 // MLIR: %[[CONST_A:.*]] = arith.constant 42 : i32
 // MLIR: %[[CONST_B:.*]] = arith.constant 13 : i32
 // MLIR: %[[CONST_C:.*]] = arith.constant 2 : i32

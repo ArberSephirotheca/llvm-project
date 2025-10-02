@@ -1,5 +1,5 @@
 // MLIR-LABEL: func.func @main(
-// MLIR-SAME: %[[TID:arg0]]: vector<3xi32>
+// MLIR: %[[TID:.*]] = simt_step.dispatch_thread_id : vector<3xi32>
 // MLIR: %[[EX0:.*]] = vector.extract %[[TID]][0] : i32 from vector<3xi32>
 // MLIR: %[[ZERO:.*]] = arith.constant dense<0> : vector<2xi32>
 // MLIR: %[[EX1:.*]] = vector.extract %[[TID]][1] : i32 from vector<3xi32>

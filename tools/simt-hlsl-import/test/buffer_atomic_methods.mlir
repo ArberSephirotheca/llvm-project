@@ -1,6 +1,7 @@
 // MLIR-LABEL: func.func @main(
-// MLIR-SAME: %[[TID:arg0]]: i32, %[[BUF:arg1]]: !simt_step.resource<Global, i32>
+// MLIR-SAME: %[[BUF:arg1]]: !simt_step.resource<Global, i32>
 // MLIR: %[[MASK:.*]] = "simt_step.active_mask"() : () -> i64
+// MLIR: %[[TID:.*]] = simt_step.dispatch_thread_id : i32
 // MLIR: %c2_i32 = arith.constant 2 : i32
 // MLIR: %[[EXCH:.*]] = "simt_step.buffer.atomic_exchange"(%[[BUF]], %[[TID]], %c2_i32) : (!simt_step.resource<Global, i32>, i32, i32) -> i32
 // MLIR: %c3_i32 = arith.constant 3 : i32

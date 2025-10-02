@@ -1,4 +1,5 @@
 // MLIR-LABEL: func.func @main(
+// MLIR: %[[DISPATCH:.*]] = simt_step.dispatch_thread_id : i32
 // MLIR: %[[ADD:.*]] = arith.addi %{{.*}}, %{{.*}} : i32
 // MLIR: %[[SUB:.*]] = arith.subi %[[ADD]], %{{.*}} : i32
 // MLIR: %[[NEG:.*]] = arith.subi %{{.*}}, %[[SUB]] : i32

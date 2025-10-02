@@ -63,6 +63,32 @@ SourceLoc makeSourceLoc(const clang::Stmt *stmt, LoweringContext &ctx) {
   return SourceLoc{stmt, mlirLoc};
 }
 
+SourceLoc makeSourceLoc(const clang::Decl *decl, LoweringContext &ctx) {
+  if (!decl)
+    return SourceLoc{nullptr, ctx.defaultLoc};
+
+  if (!ctx.sourceManager)
+    return SourceLoc{nullptr, ctx.defaultLoc};
+
+  const clang::SourceManager &sm = *ctx.sourceManager;
+  clang::SourceLocation loc = decl->getLocation();
+  if (loc.isInvalid())
+    return SourceLoc{nullptr, ctx.defaultLoc};
+
+  loc = sm.getExpansionLoc(loc);
+  clang::PresumedLoc presumed = sm.getPresumedLoc(loc);
+  if (!presumed.isValid())
+    return SourceLoc{nullptr, ctx.defaultLoc};
+
+  mlir::MLIRContext *mlirCtx = ctx.builder.getContext();
+  mlir::StringAttr fileAttr =
+      mlir::StringAttr::get(mlirCtx, presumed.getFilename());
+  mlir::Location mlirLoc =
+      mlir::FileLineColLoc::get(fileAttr, presumed.getLine(),
+                                presumed.getColumn());
+  return SourceLoc{nullptr, mlirLoc};
+}
+
 bool isEmitContext(const LoweringContext &ctx) {
   mlir::Block *block = ctx.builder.getInsertionBlock();
   return block && block->getParentOp();

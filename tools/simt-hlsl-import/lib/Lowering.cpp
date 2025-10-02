@@ -4494,12 +4494,16 @@ public:
 
     llvm::SmallVector<mlir::Type> argTypes;
     argTypes.reserve(decl->getNumParams() + resourceDecls.size());
+    llvm::SmallVector<bool, 4> paramIsDispatchThreadID;
+    paramIsDispatchThreadID.reserve(decl->getNumParams());
     for (const clang::ParmVarDecl *param : decl->parameters()) {
       mlir::Type type = convertType(param->getType(), moduleBuilder);
       if (!type || mlir::isa<mlir::NoneType>(type)) {
         recordError("unsupported parameter type in function '" + name + "'");
         return false;
       }
+      bool isDispatch = param->hasAttr<clang::HLSLSV_DispatchThreadIDAttr>();
+      paramIsDispatchThreadID.push_back(isDispatch);
       argTypes.push_back(type);
     }
 
@@ -4546,8 +4550,18 @@ public:
                         errorMessage, &sourceManager, &astContext);
     auto entryArgs = entry->getArguments();
     size_t paramCount = decl->getNumParams();
-    for (size_t index = 0; index < paramCount; ++index)
-      ctx.valueMap[decl->getParamDecl(index)] = entryArgs[index];
+    for (size_t index = 0; index < paramCount; ++index) {
+      const clang::ParmVarDecl *param = decl->getParamDecl(index);
+      mlir::Value arg = entryArgs[index];
+      ctx.valueMap[param] = arg;
+      if (paramIsDispatchThreadID[index]) {
+        SourceLoc src = makeSourceLoc(param, ctx);
+        mlir::Value builtin = funcBuilder.create<simt::dialect::DispatchThreadIdOp>(
+            resolveLoc(src, ctx), arg.getType());
+        ctx.valueMap[param] = builtin;
+        ctx.symValueMap[param] = makeSymValue(param);
+      }
+    }
     for (auto [resourceDecl, arg] :
          llvm::zip(resourceDecls, entryArgs.drop_front(paramCount)))
       ctx.valueMap[resourceDecl] = arg;

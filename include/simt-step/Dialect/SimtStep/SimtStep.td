@@ -518,6 +518,20 @@ def SimtStep_FenceOp : Op<SimtStep_Dialect, "fence"> {
   let hasCustomAssemblyFormat = 1;
 }
 
+def SimtStep_DispatchThreadIdOp : Op<SimtStep_Dialect, "dispatch_thread_id",
+                                    [Pure]> {
+  let summary = "Query dispatch thread identifier";
+  let description = [{
+    Returns the dispatch-space thread identifier provided by the execution
+    environment. The result type matches the HLSL builtin usage (scalar or
+    vector).
+  }];
+
+  let results = (outs AnyType:$id);
+
+  let hasCustomAssemblyFormat = 1;
+}
+
 def SimtStep_LaneIdOp : Op<SimtStep_Dialect, "lane_id"> {
   let summary = "Query the current lane identifier";
   let description = [{

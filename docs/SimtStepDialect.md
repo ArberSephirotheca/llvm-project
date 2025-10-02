@@ -33,6 +33,8 @@ Width must be non-zero. The type will be extended with mask-specific utilities a
 ### Synchronization & state
 - `simt_step.barrier` – synchronization barrier with optional `scope` / `memsem` enums.
 - `simt_step.fence` – memory-ordering fence (attributes optional for now).
+- `simt_step.dispatch_thread_id` – yields the dispatch-space thread id; the result
+  type matches the builtin usage (scalar or vector).
 - `simt_step.lane_id` – yields the current lane identifier as `index`.
 - `simt_step.active_mask` – exposes the current active mask as `i64` (will become `simt_step.mask`).
 

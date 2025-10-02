@@ -15,6 +15,7 @@
 
 namespace clang {
 class SourceManager;
+class Decl;
 class Stmt;
 class ValueDecl;
 class SwitchCase;
@@ -31,6 +32,7 @@ struct SourceLoc {
 };
 
 SourceLoc makeSourceLoc(const clang::Stmt *stmt, LoweringContext &ctx);
+SourceLoc makeSourceLoc(const clang::Decl *decl, LoweringContext &ctx);
 
 struct DiagSink {
   virtual ~DiagSink() = default;
