@@ -4,6 +4,7 @@
 #include "simt-step/Dialect/SimtStep/SimtStepDialect.h"
 
 #include <mlir/Dialect/Func/IR/FuncOps.h>
+#include <mlir/Dialect/ControlFlow/IR/ControlFlowOps.h>
 #include <mlir/IR/Block.h>
 #include <mlir/IR/Builders.h>
 #include <mlir/IR/IRMapping.h>
@@ -38,80 +39,179 @@ struct SimtStepToStructuredPass
     if (func.getBody().empty())
       return;
 
-    if (!llvm::hasSingleElement(func.getBlocks())) {
-      func.emitError()
-          << "SimtStepToStructured currently supports single-block functions";
-      signalPassFailure();
-      return;
-    }
-
     Block &entryBlock = func.front();
 
-    if (!func.getFunctionType().getResults().empty()) {
-      func.emitError()
-          << "SimtStepToStructured currently supports only void functions";
-      signalPassFailure();
-      return;
+    SmallVector<Block *> originalBlocks;
+    DenseMap<Block *, SmallVector<Operation *>> blockOriginalOps;
+    for (Block &block : func) {
+      originalBlocks.push_back(&block);
+      for (Operation &op : block)
+        blockOriginalOps[&block].push_back(&op);
     }
-
-    SmallVector<Operation *> originalOps;
-    originalOps.reserve(entryBlock.getOperations().size());
-    for (Operation &op : entryBlock)
-      originalOps.push_back(&op);
 
     OpBuilder topBuilder(&entryBlock, entryBlock.begin());
     auto loc = func.getLoc();
-    auto blockOp = topBuilder.create<simt::structured::BlockOp>(
-        loc, topBuilder.getStringAttr("entry"), FlatSymbolRefAttr(),
-        FlatSymbolRefAttr(),
-        simt::structured::ReconvergencePolicyAttr());
 
-    mlir::Region &structuredRegion = blockOp.getBody();
-    if (structuredRegion.empty())
-        structuredRegion.emplaceBlock();
-    Block &structuredEntry = structuredRegion.front();
     IRMapping mapper;
+    DenseMap<Block *, simt::structured::BlockOp> blockMapping;
+    DenseMap<Block *, mlir::Value> blockActiveMask;
 
-    for (BlockArgument arg : entryBlock.getArguments()) {
-      auto newArg = structuredEntry.addArgument(arg.getType(), arg.getLoc());
-      mapper.map(arg, newArg);
+    for (auto [index, block] : llvm::enumerate(originalBlocks)) {
+      std::string name = (index == 0) ? std::string("entry")
+                                      : ("block" + std::to_string(index));
+      auto symName = topBuilder.getStringAttr(name);
+      auto blockOp = topBuilder.create<simt::structured::BlockOp>(
+          loc, symName, FlatSymbolRefAttr(), FlatSymbolRefAttr(),
+          simt::structured::ReconvergencePolicyAttr());
+      topBuilder.setInsertionPointAfter(blockOp);
+
+      mlir::Region &region = blockOp.getBody();
+      if (region.empty())
+        region.emplaceBlock();
+      Block &structuredBlock = region.front();
+      for (BlockArgument arg : block->getArguments()) {
+        auto newArg = structuredBlock.addArgument(arg.getType(), arg.getLoc());
+        mapper.map(arg, newArg);
+      }
+
+      blockMapping[block] = blockOp;
     }
 
-    OpBuilder bodyBuilder(&structuredEntry, structuredEntry.begin());
-    bool insertedStructuredReturn = false;
+    auto getOrCreateMask = [&](Block *origBlock, Block &structuredBlock,
+                               mlir::Location loc) -> mlir::Value {
+      auto it = blockActiveMask.find(origBlock);
+      if (it != blockActiveMask.end())
+        return it->second;
 
-    for (Operation *op : originalOps) {
-      if (isa<simt::structured::BlockOp>(op))
-        continue;
+      OpBuilder maskBuilder = OpBuilder::atBlockBegin(&structuredBlock);
+      auto mask = maskBuilder
+                      .create<simt::dialect::ActiveMaskOp>(loc,
+                                                          maskBuilder.getI64Type())
+                      .getResult();
+      blockActiveMask[origBlock] = mask;
+      return mask;
+    };
 
-      if (auto ret = dyn_cast<func::ReturnOp>(op)) {
-        if (!ret.getOperands().empty()) {
-          ret.emitError() << "expected void return";
+    SmallVector<Value> functionReturnValues;
+    bool hasFunctionReturn = false;
+
+    for (Block *origBlock : originalBlocks) {
+      Block &structuredBlock = blockMapping[origBlock].getBody().front();
+      OpBuilder bodyBuilder(&structuredBlock, structuredBlock.begin());
+
+      for (Operation *op : blockOriginalOps[origBlock]) {
+        if (isa<cf::BranchOp, cf::CondBranchOp, func::ReturnOp>(op))
+          continue;
+
+        Operation *cloned = bodyBuilder.clone(*op, mapper);
+        for (auto [index, result] : llvm::enumerate(op->getResults()))
+          mapper.map(result, cloned->getResult(index));
+
+        if (auto maskOp = dyn_cast<simt::dialect::ActiveMaskOp>(op))
+          blockActiveMask[origBlock] = cloned->getResult(0);
+      }
+
+      Operation *terminator = origBlock->getTerminator();
+      Location termLoc = terminator->getLoc();
+
+      auto mapValues = [&](ValueRange operands,
+                           SmallVectorImpl<Value> &mapped) -> bool {
+        for (Value operand : operands) {
+          Value mappedValue = mapper.lookupOrNull(operand);
+          if (!mappedValue) {
+            terminator->emitError()
+                << "unmapped operand during SimtStepToStructured lowering";
+            return false;
+          }
+          mapped.push_back(mappedValue);
+        }
+        return true;
+      };
+
+      if (auto branch = dyn_cast<cf::BranchOp>(terminator)) {
+        SmallVector<Value> destOperands;
+        if (!mapValues(branch.getDestOperands(), destOperands)) {
           signalPassFailure();
           return;
         }
-        bodyBuilder.create<simt::structured::ReturnOp>(ret.getLoc(), mlir::ValueRange{});
-        insertedStructuredReturn = true;
-        continue;
-      }
 
-      Operation *cloned = bodyBuilder.clone(*op, mapper);
-      for (auto [index, result] : llvm::enumerate(op->getResults()))
-        mapper.map(result, cloned->getResult(index));
+        Value mask =
+            getOrCreateMask(origBlock, structuredBlock, terminator->getLoc());
+
+        Block &structuredDest =
+            blockMapping[branch.getDest()].getBody().front();
+        bodyBuilder.create<simt::structured::BranchOp>(termLoc, mask,
+                                                       destOperands,
+                                                       &structuredDest);
+      } else if (auto cond = dyn_cast<cf::CondBranchOp>(terminator)) {
+        SmallVector<Value> trueOperands;
+        SmallVector<Value> falseOperands;
+        if (!mapValues(cond.getTrueDestOperands(), trueOperands) ||
+            !mapValues(cond.getFalseDestOperands(), falseOperands)) {
+          signalPassFailure();
+          return;
+        }
+
+        Value condition = mapper.lookup(cond.getCondition());
+        Value mask =
+            getOrCreateMask(origBlock, structuredBlock, terminator->getLoc());
+
+        Block &structuredTrue =
+            blockMapping[cond.getTrueDest()].getBody().front();
+        Block &structuredFalse =
+            blockMapping[cond.getFalseDest()].getBody().front();
+
+        bodyBuilder.create<simt::structured::CondBranchOp>(
+            termLoc, condition, mask, mask, trueOperands, falseOperands,
+            FlatSymbolRefAttr(), simt::structured::ReconvergencePolicyAttr(),
+            &structuredTrue, &structuredFalse);
+      } else if (auto ret = dyn_cast<func::ReturnOp>(terminator)) {
+        SmallVector<Value> returnValues;
+        if (!mapValues(ret.getOperands(), returnValues)) {
+          signalPassFailure();
+          return;
+        }
+        bodyBuilder.create<simt::structured::ReturnOp>(termLoc, returnValues);
+
+        if (!hasFunctionReturn) {
+          functionReturnValues = returnValues;
+          hasFunctionReturn = true;
+        } else {
+          if (functionReturnValues.size() != returnValues.size()) {
+            ret.emitError()
+                << "mismatched return arity across SimtStepToStructured lowering";
+            signalPassFailure();
+            return;
+          }
+          for (auto [expected, current] : llvm::zip(functionReturnValues, returnValues)) {
+            if (expected.getType() != current.getType()) {
+              ret.emitError()
+                  << "mismatched return type across SimtStepToStructured lowering";
+              signalPassFailure();
+              return;
+            }
+          }
+        }
+      } else {
+        terminator->emitError()
+            << "unsupported terminator in SimtStepToStructured lowering";
+        signalPassFailure();
+        return;
+      }
     }
 
-    if (!insertedStructuredReturn)
-      bodyBuilder.create<simt::structured::ReturnOp>(loc, mlir::ValueRange{});
+    for (Block *origBlock : originalBlocks) {
+      for (Operation *op : blockOriginalOps[origBlock])
+        op->erase();
+      if (origBlock != &entryBlock)
+        origBlock->erase();
+    }
 
-    // Remove the original operations now that the structured form exists.
-    for (Operation *op : originalOps)
-      op->erase();
-
-    // Recreate a func.return to keep the function well-formed.
-    Block *parentBlock = blockOp.getOperation()->getBlock();
-    OpBuilder retBuilder(parentBlock,
-                         std::next(Block::iterator(blockOp.getOperation())));
-    retBuilder.create<func::ReturnOp>(loc);
+    OpBuilder retBuilder(&entryBlock, entryBlock.end());
+    if (hasFunctionReturn)
+      retBuilder.create<func::ReturnOp>(loc, functionReturnValues);
+    else
+      retBuilder.create<func::ReturnOp>(loc);
   }
 };
 

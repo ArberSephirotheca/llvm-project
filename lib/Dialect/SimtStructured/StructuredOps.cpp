@@ -76,10 +76,7 @@ bool BlockOp::areTypesCompatible(::mlir::Type lhs, ::mlir::Type rhs) {
 
 mlir::SuccessorOperands BranchOp::getSuccessorOperands(unsigned index) {
     assert(index == 0 && "branch has one successor");
-    unsigned numOperands = getOperation()->getNumOperands();
-    unsigned numCarried = numOperands > 1 ? numOperands - 1 : 0;
-    return mlir::SuccessorOperands(
-        mlir::MutableOperandRange(getOperation(), numCarried ? 1 : 1, numCarried));
+    return mlir::SuccessorOperands(getDestOperandsMutable());
 }
 
 std::optional<mlir::BlockArgument> BranchOp::getSuccessorBlockArgument(unsigned operandIndex) {

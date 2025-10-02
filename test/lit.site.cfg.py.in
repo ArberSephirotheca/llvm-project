@@ -1,0 +1,8 @@
+@LIT_SITE_CFG_IN_HEADER@
+
+import os
+
+lit_config.load_config(config, os.path.join(os.path.dirname(__file__), 'lit.cfg.py'))
+
+config.simt_opt_executable = '@SIMT_OPT_EXECUTABLE@'
+config.mlir_file_check = '@MLIR_FILE_CHECK@'
