@@ -282,6 +282,8 @@ static LogicalResult lowerSwitchToCFG(simt::dialect::SwitchOp switchOp) {
   for (Block *caseBlock : caseBlocks) {
     auto &info = blockControlInfo[caseBlock];
     info.popMask = true;
+    info.pushMask = true;
+    info.mergeTarget = exitBlock;
   }
 
   eraseTerminatorIfPresent(parentBlock);
