@@ -12,6 +12,7 @@
 #include <mlir/IR/Operation.h>
 #include <mlir/Pass/Pass.h>
 
+#include <llvm/ADT/DenseSet.h>
 #include <llvm/ADT/STLExtras.h>
 
 using namespace mlir;
@@ -311,6 +312,18 @@ struct SimtStepToStructuredPass
     DenseMap<Block *, simt::structured::BlockOp> blockMapping;
     DenseMap<Block *, mlir::Value> blockActiveMask;
 
+    llvm::DenseSet<Block *> maskMergeBlocks;
+    for (const auto &entry : blockControlInfo) {
+      const BlockControlInfo &info = entry.second;
+      if (!info.popMask)
+        continue;
+
+      if (info.mergeTarget)
+        maskMergeBlocks.insert(info.mergeTarget);
+      if (info.continueTarget)
+        maskMergeBlocks.insert(info.continueTarget);
+    }
+
     for (auto [index, block] : llvm::enumerate(originalBlocks)) {
       std::string name = (index == 0) ? std::string("entry")
                                       : ("block" + std::to_string(index));
@@ -330,22 +343,8 @@ struct SimtStepToStructuredPass
       }
 
       blockMapping[block] = blockOp;
+      blockActiveMask[block] = blockOp.getMaskArgument();
     }
-
-    auto getOrCreateMask = [&](Block *origBlock, Block &structuredBlock,
-                               mlir::Location loc) -> mlir::Value {
-      auto it = blockActiveMask.find(origBlock);
-      if (it != blockActiveMask.end())
-        return it->second;
-
-      OpBuilder maskBuilder = OpBuilder::atBlockBegin(&structuredBlock);
-      auto mask = maskBuilder
-                      .create<simt::dialect::ActiveMaskOp>(loc,
-                                                          maskBuilder.getI64Type())
-                      .getResult();
-      blockActiveMask[origBlock] = mask;
-      return mask;
-    };
 
     SmallVector<Value> functionReturnValues;
     bool hasFunctionReturn = false;
@@ -382,9 +381,26 @@ struct SimtStepToStructuredPass
       else
         blockOp->removeAttr(blockOp.getContinueTargetAttrName());
 
-      Value blockMask = getOrCreateMask(origBlock, structuredBlock, loc);
+      Value blockMask = blockActiveMask.lookup(origBlock);
+      if (!blockMask)
+        blockMask = blockOp.getMaskArgument();
 
       Operation *lastInserted = nullptr;
+
+      if (maskMergeBlocks.contains(origBlock)) {
+        OpBuilder mergeBuilder(&structuredBlock, structuredBlock.begin());
+        auto maskType = blockMask.getType();
+        auto popOp = mergeBuilder.create<simt::structured::MaskPopOp>(loc, maskType);
+        auto mergeOp = mergeBuilder.create<simt::structured::MaskMergeOp>(
+            loc, maskType, blockOp.getMaskArgument());
+        blockMask = mergeOp.getResult();
+        blockActiveMask[origBlock] = blockMask;
+        blockOp.getMaskArgument().replaceAllUsesExcept(blockMask,
+                                                       mergeOp.getOperation());
+        lastInserted = mergeOp.getOperation();
+        (void)popOp;
+      }
+
       if (hasMeta && meta.pushMask) {
         Operation *maskDef = blockMask.getDefiningOp();
         OpBuilder pushBuilder(&structuredBlock, structuredBlock.begin());
@@ -408,12 +424,14 @@ struct SimtStepToStructuredPass
         if (isa<cf::BranchOp, cf::CondBranchOp, func::ReturnOp>(op))
           continue;
 
+        if (auto active = dyn_cast<simt::dialect::ActiveMaskOp>(op)) {
+          mapper.map(active.getResult(), blockActiveMask.lookup(origBlock));
+          continue;
+        }
+
         Operation *cloned = cloneBuilder.clone(*op, mapper);
         for (auto [index, result] : llvm::enumerate(op->getResults()))
           mapper.map(result, cloned->getResult(index));
-
-        if (auto maskOp = dyn_cast<simt::dialect::ActiveMaskOp>(op))
-          blockActiveMask[origBlock] = cloned->getResult(0);
       }
 
       Operation *terminator = origBlock->getTerminator();
@@ -433,12 +451,6 @@ struct SimtStepToStructuredPass
         return true;
       };
 
-      auto emitMaskPop = [&](OpBuilder &builder) {
-        if (hasMeta && meta.popMask)
-          (void)builder.create<simt::structured::MaskPopOp>(termLoc,
-                                                           blockMask.getType());
-      };
-
       if (auto branch = dyn_cast<cf::BranchOp>(terminator)) {
         SmallVector<Value> destOperands;
         if (!mapValues(branch.getDestOperands(), destOperands)) {
@@ -451,7 +463,7 @@ struct SimtStepToStructuredPass
                                                  destBlockOp.getSymName());
 
         OpBuilder termBuilder(&structuredBlock, structuredBlock.end());
-        emitMaskPop(termBuilder);
+        blockMask = blockActiveMask.lookup(origBlock);
         termBuilder.create<simt::structured::BranchOp>(termLoc, blockMask,
                                                        targetAttr, destOperands);
       } else if (auto cond = dyn_cast<cf::CondBranchOp>(terminator)) {
@@ -474,7 +486,7 @@ struct SimtStepToStructuredPass
                                                   falseBlockOp.getSymName());
 
         OpBuilder termBuilder(&structuredBlock, structuredBlock.end());
-        emitMaskPop(termBuilder);
+        blockMask = blockActiveMask.lookup(origBlock);
         termBuilder.create<simt::structured::CondBranchOp>(
             termLoc, condition, blockMask, blockMask, trueTarget, falseTarget,
             trueOperands, falseOperands, FlatSymbolRefAttr(),
@@ -486,7 +498,7 @@ struct SimtStepToStructuredPass
           return;
         }
         OpBuilder termBuilder(&structuredBlock, structuredBlock.end());
-        emitMaskPop(termBuilder);
+        blockMask = blockActiveMask.lookup(origBlock);
         termBuilder.create<simt::structured::ReturnOp>(termLoc, returnValues);
 
         if (!hasFunctionReturn) {

@@ -24,16 +24,28 @@ builtin.module {
 
 // CHECK-LABEL: func.func @loop
 // CHECK: "simt_struct.block"() ({
-// CHECK:   "simt_struct.branch"
+// CHECK:   ^bb0(%[[ENTRY_MASK:.*]]: i64, %[[ENTRY_VAL:.*]]: i32):
+// CHECK:     "simt_struct.branch"(%[[ENTRY_MASK]], %[[ENTRY_VAL]], %{{.*}}) {target = @block1}
+// CHECK: }) {sym_name = "entry"}
 // CHECK: "simt_struct.block"() ({
-// CHECK:   "simt_struct.mask_push"(%{{.*}}) {continue_target = @block1, merge_target = @block3}
-// CHECK:   %{{.*}} = arith.cmpi
-// CHECK:   "simt_struct.mask_pop"
-// CHECK:   "simt_struct.cond_branch"(%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}) {false_target = @block3, operandSegmentSizes = array<i32: 1, 1, 1, 2, 2>, true_target = @block2}
+// CHECK:   ^bb0(%[[HDR_MASK:.*]]: i64, %[[ITER:.*]]: i32, %[[ACC:.*]]: i32):
+// CHECK:     %[[POP_HDR:.*]] = "simt_struct.mask_pop"() : () -> i64
+// CHECK:     %[[MERGE_HDR:.*]] = "simt_struct.mask_merge"(%[[HDR_MASK]]) : (i64) -> i64
+// CHECK:     "simt_struct.mask_push"(%[[MERGE_HDR]]) {continue_target = @block1, merge_target = @block3}
+// CHECK:     %[[CMP:.*]] = arith.cmpi
+// CHECK:     "simt_struct.cond_branch"(%[[CMP]], %[[MERGE_HDR]], %[[MERGE_HDR]], %[[ITER]], %[[ACC]], %[[ITER]], %[[ACC]]) {false_target = @block3
+// CHECK-SAME: operandSegmentSizes = array<i32: 1, 1, 1, 2, 2>, true_target = @block2}
+// CHECK: }) {continue_target = @block1, merge_target = @block3, sym_name = "block1"}
 // CHECK: "simt_struct.block"() ({
-// CHECK:   "simt_struct.mask_push"(%{{.*}}) {continue_target = @block1}
-// CHECK:   %{{.*}} = arith.addi
-// CHECK:   "simt_struct.mask_pop"
-// CHECK:   "simt_struct.branch"(%{{.*}}, %{{.*}}, %{{.*}}) {target = @block1}
+// CHECK:   ^bb0(%[[BODY_MASK:.*]]: i64, %[[BODY_ITER:.*]]: i32, %[[BODY_ACC:.*]]: i32):
+// CHECK:     "simt_struct.mask_push"(%[[BODY_MASK]]) {continue_target = @block1}
+// CHECK:     %[[NEW_ACC:.*]] = arith.addi %[[BODY_ACC]], %[[BODY_ITER]] : i32
+// CHECK:     %[[NEXT:.*]] = arith.addi %[[BODY_ITER]], %{{.*}} : i32
+// CHECK:     "simt_struct.branch"(%[[BODY_MASK]], %[[NEXT]], %[[NEW_ACC]]) {target = @block1}
+// CHECK: }) {continue_target = @block1, sym_name = "block2"}
 // CHECK: "simt_struct.block"() ({
-// CHECK:   "simt_struct.return"
+// CHECK:   ^bb0(%[[EXIT_MASK:.*]]: i64, %[[EXIT_ITER:.*]]: i32, %[[EXIT_ACC:.*]]: i32):
+// CHECK:     %[[POP_EXIT:.*]] = "simt_struct.mask_pop"() : () -> i64
+// CHECK:     %[[MERGE_EXIT:.*]] = "simt_struct.mask_merge"(%[[EXIT_MASK]]) : (i64) -> i64
+// CHECK:     "simt_struct.return"() : () -> ()
+// CHECK: }) {sym_name = "block3"}

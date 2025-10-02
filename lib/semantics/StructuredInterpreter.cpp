@@ -75,6 +75,7 @@ llvm::Expected<std::uint64_t> StructuredInterpreter::handleMaskMerge(
         return incomingOrErr.takeError();
     auto merged = state_.mergeMask(*incomingOrErr);
     bindMaskValue(op.getResult(), merged);
+    bindMaskValue(op.getIncoming(), merged);
     return merged;
 }
 
@@ -96,8 +97,12 @@ StructuredInterpreter::handleBranch(structured::BranchOp op) {
             "structured program metadata absent during branch interpretation",
             llvm::inconvertibleErrorCode());
 
-    if (auto *info = program_->lookupBlock(targetAttr.getValue()))
-        return info->block;
+    if (auto *info = program_->lookupBlock(targetAttr.getValue())) {
+        auto block = info->block;
+        if (auto maskArg = block.getMaskArgument())
+            bindMaskValue(maskArg, *maskOrErr);
+        return block;
+    }
 
     return llvm::make_error<llvm::StringError>(
         "branch references unknown structured block",
@@ -119,13 +124,19 @@ StructuredInterpreter::handleCondBranch(structured::CondBranchOp op) {
 
     if (auto trueAttr = op.getTrueTargetAttr()) {
         if (program_)
-            if (auto *info = program_->lookupBlock(trueAttr.getValue()))
+            if (auto *info = program_->lookupBlock(trueAttr.getValue())) {
                 decision.trueTarget = info->block;
+                if (auto maskArg = decision.trueTarget.getMaskArgument())
+                    bindMaskValue(maskArg, decision.trueMask);
+            }
     }
     if (auto falseAttr = op.getFalseTargetAttr()) {
         if (program_)
-            if (auto *info = program_->lookupBlock(falseAttr.getValue()))
+            if (auto *info = program_->lookupBlock(falseAttr.getValue())) {
                 decision.falseTarget = info->block;
+                if (auto maskArg = decision.falseTarget.getMaskArgument())
+                    bindMaskValue(maskArg, decision.falseMask);
+            }
     }
 
     if (decision.trueMask)

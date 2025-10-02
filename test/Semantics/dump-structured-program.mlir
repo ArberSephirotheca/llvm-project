@@ -10,5 +10,5 @@ builtin.module {
 // RUN: %simt-opt --simt-step-to-structured --simt-dump-structured-program %s | %mlir-file-check %s
 
 // CHECK: entry: entry
-// CHECK: block entry args=1
-// CHECK: block block1 args=0
+// CHECK: block entry args=2
+// CHECK: block block1 args=1
