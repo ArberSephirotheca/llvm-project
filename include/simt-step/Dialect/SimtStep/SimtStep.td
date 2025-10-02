@@ -479,14 +479,12 @@ def SimtStep_BreakOp : Op<SimtStep_Dialect, "break",
     [Terminator, HasParent<"LoopOp">]> {
   let summary = "Structured break from simt.loop";
   let arguments = (ins Variadic<AnyType>:$results);
-  let assemblyFormat = [{ attr-dict ($results^ `:` type($results))? }];
 }
 
 def SimtStep_ContinueOp : Op<SimtStep_Dialect, "continue",
     [Terminator, HasParent<"LoopOp">]> {
   let summary = "Structured continue within simt.loop";
   let arguments = (ins Variadic<AnyType>:$results);
-  let assemblyFormat = [{ attr-dict ($results^ `:` type($results))? }];
 }
 
 def SimtStep_BarrierOp : Op<SimtStep_Dialect, "barrier"> {

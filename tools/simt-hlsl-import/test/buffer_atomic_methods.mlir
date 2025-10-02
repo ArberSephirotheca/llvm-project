@@ -1,4 +1,5 @@
-// MLIR-LABEL: func.func @main(
+// MLIR-LABEL: module {
+// MLIR: func.func @main(
 // MLIR-SAME: %[[BUF:arg1]]: !simt_step.resource<Global, i32>
 // MLIR: %[[MASK:.*]] = "simt_step.active_mask"() : () -> i64
 // MLIR: %[[TID:.*]] = simt_step.dispatch_thread_id : i32

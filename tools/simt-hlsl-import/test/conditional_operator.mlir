@@ -1,4 +1,5 @@
-// MLIR-LABEL: func.func @main(
+// MLIR-LABEL: module {
+// MLIR: func.func @main(
 // MLIR: %[[DISPATCH:.*]] = simt_step.dispatch_thread_id : i32
 // MLIR: %[[COND:.*]] = arith.cmpi eq, %{{.*}}, %{{.*}} : i32
 // MLIR: %[[RESULT:.*]]:2 = "simt_step.if"(%[[COND]]) ({

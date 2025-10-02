@@ -1,10 +1,11 @@
-// MLIR-LABEL: "func.func"() <{function_type = (i32) -> (), sym_name = "main"}>
-// MLIR: %[[MASK:.*]] = "simt_step.active_mask"() : () -> i64
-// MLIR: %{{.*}} = "simt_step.dispatch_thread_id"() : () -> i32
-// MLIR: %[[INIT0:.*]] = "arith.constant"() <{value = 0 : i32}> : () -> i32
-// MLIR: %[[INIT1:.*]] = "arith.constant"() <{value = 0 : i32}> : () -> i32
-// MLIR: %[[FLAG_INIT:.*]] = "arith.constant"() <{value = true}> : () -> i1
-// MLIR: %[[LOOP:.*]]:3 = "simt_step.loop"(%[[INIT0]], %[[INIT1]], %[[FLAG_INIT]]) ({
+// MLIR-LABEL: "builtin.module"()
+// MLIR:   "func.func"() <{function_type = (i32) -> (), sym_name = "main"}>
+// MLIR:     %[[MASK:.*]] = "simt_step.active_mask"() : () -> i64
+// MLIR:     %{{.*}} = "simt_step.dispatch_thread_id"() : () -> i32
+// MLIR:     %[[INIT0:.*]] = "arith.constant"() <{value = 0 : i32}> : () -> i32
+// MLIR:     %[[INIT1:.*]] = "arith.constant"() <{value = 0 : i32}> : () -> i32
+// MLIR:     %[[FLAG_INIT:.*]] = "arith.constant"() <{value = true}> : () -> i1
+// MLIR:     %[[LOOP:.*]]:3 = "simt_step.loop"(%[[INIT0]], %[[INIT1]], %[[FLAG_INIT]]) ({
 // MLIR:   ^bb0(%[[PH0:.*]]: i32, %[[PH1:.*]]: i32, %[[PHFLAG:.*]]: i1):
 // MLIR:     %[[COND_IF:.*]]:3 = "simt_step.if"(%[[PHFLAG]]) ({
 // MLIR:       %[[TRUE:.*]] = "arith.constant"() <{value = true}> : () -> i1
@@ -39,5 +40,5 @@
 // MLIR:     %[[INC_MAIN:.*]] = "arith.constant"() <{value = 1 : i32}> : () -> i32
 // MLIR:     %[[I_NEXT:.*]] = "arith.addi"(%[[AFTER_BREAK]]#0, %[[INC_MAIN]]) {{.*}}
 // MLIR:     "simt_step.yield"(%[[I_NEXT]], %[[ACC_NEXT]], %[[FALSE2]]) : (i32, i32, i1) -> ()
-// MLIR: }) : (i32, i32, i1) -> (i32, i32, i1)
-// MLIR: "func.return"() : () -> ()
+// MLIR:     }) : (i32, i32, i1) -> (i32, i32, i1)
+// MLIR:     "func.return"() : () -> ()
