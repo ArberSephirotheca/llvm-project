@@ -14,6 +14,12 @@ include "mlir/IR/SymbolInterfaces.td"
 include "mlir/IR/RegionKindInterface.td"
 include "mlir/Interfaces/ControlFlowInterfaces.td"
 
+// Type constraints -----------------------------------------------------------------
+
+def MaskLikeType : TypeConstraint<
+    CPred<"::simt::structured::isMaskLikeType($_self)">,
+    "mask-like type (simt_step.mask or signless integer)">;
+
 // Dialect -------------------------------------------------------------------
 
 def SimtStruct_Dialect : Dialect {
@@ -73,7 +79,7 @@ def SimtStruct_BlockOp : Op<SimtStruct_Dialect, "block",
 def SimtStruct_BranchOp : Op<SimtStruct_Dialect, "branch",
     [Terminator, HasParent<"BlockOp">, BranchOpInterface]> {
   let summary = "Unconditional branch with mask";
-  let arguments = (ins I64:$mask);
+  let arguments = (ins MaskLikeType:$mask);
   let successors = (successor AnySuccessor:$dest);
 
   let extraClassDeclaration = [{
@@ -88,8 +94,8 @@ def SimtStruct_CondBranchOp : Op<SimtStruct_Dialect, "cond_branch",
     [Terminator, HasParent<"BlockOp">, BranchOpInterface]> {
   let summary = "Conditional branch with explicit masks";
   let arguments = (ins I1:$condition,
-                       I64:$true_mask,
-                       I64:$false_mask,
+                       MaskLikeType:$true_mask,
+                       MaskLikeType:$false_mask,
                        OptionalAttr<FlatSymbolRefAttr>:$merge_target,
                        OptionalAttr<SimtStruct_ReconvergencePolicyAttr>:$policy);
   let successors = (successor AnySuccessor:$trueDest,
@@ -115,7 +121,7 @@ def SimtStruct_ReturnOp : Op<SimtStruct_Dialect, "return",
 def SimtStruct_MaskPushOp : Op<SimtStruct_Dialect, "mask_push",
     [HasParent<"BlockOp">]> {
   let summary = "Push a mask and continuation target";
-  let arguments = (ins I64:$mask,
+  let arguments = (ins MaskLikeType:$mask,
                        OptionalAttr<FlatSymbolRefAttr>:$merge_target,
     OptionalAttr<FlatSymbolRefAttr>:$continue_target,
     OptionalAttr<I64Attr>:$loop_mask);
@@ -124,14 +130,14 @@ def SimtStruct_MaskPushOp : Op<SimtStruct_Dialect, "mask_push",
 def SimtStruct_MaskPopOp : Op<SimtStruct_Dialect, "mask_pop",
     [HasParent<"BlockOp">]> {
   let summary = "Pop the next mask from the merge stack";
-  let results = (outs I64:$mask);
+  let results = (outs MaskLikeType:$mask);
 }
 
 def SimtStruct_MaskMergeOp : Op<SimtStruct_Dialect, "mask_merge",
     [HasParent<"BlockOp">]> {
   let summary = "Merge an incoming mask with the active mask";
-  let arguments = (ins I64:$incoming);
-  let results = (outs I64:$merged);
+  let arguments = (ins MaskLikeType:$incoming);
+  let results = (outs MaskLikeType:$merged);
 
   let hasVerifier = 1;
 }

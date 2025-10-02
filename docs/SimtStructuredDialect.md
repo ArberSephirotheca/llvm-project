@@ -45,6 +45,26 @@ analyses can operate on them.
 These operations correspond to the merge-stack management performed by the HLSL
 interpreter.
 
+### Example lowering (work-in-progress)
+
+```
+// Input (simt_step excerpt)
+%mask = simt_step.active_mask : i64
+%tid = simt_step.dispatch_thread_id : i32
+simt_step.return
+
+// After running the `simt-step-to-structured` pass (current prototype)
+simt_struct.block @entry {
+  %mask = simt_step.active_mask : i64
+  %tid = simt_step.dispatch_thread_id : i32
+  simt_struct.return
+}
+```
+
+The pass currently handles straight-line, void functions and preserves the
+original `simt_step` operations inside a single structured block. Divergent
+control flow and value-returning functions remain to be lowered.
+
 ---
 
 This dialect is the staging ground for the interpreter and the entry point for

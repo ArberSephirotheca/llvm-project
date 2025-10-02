@@ -23,7 +23,7 @@
 - [x] Provide mask/mask-stack ops to align with the HLSL interpreter model.
 
 ## Lowering Passes
-- [ ] Implement `SimtToStructuredPass` converting `simt_step` regions into `simt_struct` blocks (identify merges, maintain mask info, map to block attributes).
+- [ ] Implement `SimtToStructuredPass` converting `simt_step` regions into `simt_struct` blocks (basic straight-line lowering exists; extend to divergent control flow, carried values, and loop/switch metadata).
 - [ ] Implement `StructuredToDynamicPass` that materializes dynamic block frames/mask stack used by interpreter.
 - [ ] Provide canonicalization and optimization passes on both dialects (fold redundant mask ops, dead blocks, constant propagation with masks).
 - [ ] Create pass pipelines (e.g., `simt-interpreter-init`, `simt-llvm-lowering`).

@@ -37,6 +37,14 @@ bool areMaskTypesCompatible(mlir::Type lhs, mlir::Type rhs) {
 
 } // namespace
 
+bool isMaskLikeType(mlir::Type type) {
+    if (mlir::isa<simt::dialect::MaskType>(type))
+        return true;
+    if (auto intTy = mlir::dyn_cast<mlir::IntegerType>(type))
+        return intTy.isSignless();
+    return false;
+}
+
 void BlockOp::getEntrySuccessorRegions(::llvm::ArrayRef<::mlir::Attribute>,
                                        ::llvm::SmallVectorImpl<::mlir::RegionSuccessor> &regions) {
     regions.emplace_back(&getBody());

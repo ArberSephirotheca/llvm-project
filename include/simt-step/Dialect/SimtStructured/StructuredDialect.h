@@ -16,6 +16,10 @@ namespace simt::structured {
 /// Register the structured SIMT dialect with a dialect registry.
 void registerSimtStructuredDialect(::mlir::DialectRegistry &registry);
 
+/// Predicate used by TableGen to identify mask-like types (simt mask or
+/// signless integer).
+bool isMaskLikeType(::mlir::Type type);
+
 } // namespace simt::structured
 
 // Generated declarations.
