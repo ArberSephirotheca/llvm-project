@@ -402,7 +402,7 @@ def SimtStep_SwitchOp : Op<SimtStep_Dialect, "switch"> {
                        Variadic<AnyType>:$initialValues,
                        DenseI64ArrayAttr:$case_values);
   let results = (outs Variadic<AnyType>:$results);
-  let regions = (region SizedRegion<1>:$caseBody);
+  let regions = (region AnyRegion:$caseBody);
 
   let skipDefaultBuilders = 1;
   let builders = [
