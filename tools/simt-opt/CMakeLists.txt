@@ -8,6 +8,8 @@ target_link_libraries(simt-opt
     PRIVATE
         simt-step
         SimtStepToStructuredPass
+        MLIRGPUToLLVMSPV
+        MLIRGPUToSPIRV
         MLIRIR
         MLIRSupport
         MLIRParser
