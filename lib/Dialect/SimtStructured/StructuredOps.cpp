@@ -74,6 +74,57 @@ bool BlockOp::areTypesCompatible(::mlir::Type lhs, ::mlir::Type rhs) {
     return areMaskTypesCompatible(lhs, rhs);
 }
 
+void BlockOp::build(::mlir::OpBuilder &builder, ::mlir::OperationState &state,
+                    ::mlir::StringAttr symName, ::mlir::Value mask,
+                    ::mlir::FlatSymbolRefAttr mergeTarget,
+                    ::mlir::FlatSymbolRefAttr continueTarget,
+                    ::simt::structured::ReconvergencePolicyAttr policy) {
+    state.addAttribute(BlockOp::getSymNameAttrName(state.name), symName);
+    if (mergeTarget)
+        state.addAttribute(BlockOp::getMergeTargetAttrName(state.name), mergeTarget);
+    if (continueTarget)
+        state.addAttribute(BlockOp::getContinueTargetAttrName(state.name), continueTarget);
+    if (policy)
+        state.addAttribute(BlockOp::getPolicyAttrName(state.name), policy);
+
+    auto *region = state.addRegion();
+    mlir::Block &block = region->emplaceBlock();
+    mlir::Location loc = mask ? mask.getLoc() : builder.getUnknownLoc();
+    mlir::Type maskType = mask ? mask.getType() : builder.getI64Type();
+    block.addArgument(maskType, loc);
+}
+
+void BlockOp::build(::mlir::OpBuilder &builder, ::mlir::OperationState &state,
+                    ::mlir::StringAttr symName, ::mlir::Value mask) {
+    build(builder, state, symName, mask, nullptr, nullptr, nullptr);
+}
+
+::mlir::BlockArgument BlockOp::getMaskArgument() {
+    if (getBody().empty())
+        return {};
+    auto &bodyBlock = getBody().front();
+    if (bodyBlock.getNumArguments() == 0)
+        return {};
+    return bodyBlock.getArgument(0);
+}
+
+mlir::LogicalResult BlockOp::verify() {
+    if (getBody().empty())
+        return emitOpError("requires a body block");
+    if (!getBody().hasOneBlock())
+        return emitOpError("body must contain exactly one block");
+
+    auto &bodyBlock = getBody().front();
+    if (bodyBlock.getNumArguments() == 0)
+        return emitOpError("body block must start with a mask argument");
+
+    mlir::BlockArgument maskArg = bodyBlock.getArgument(0);
+    if (!isMaskLikeType(maskArg.getType()))
+        return emitOpError("mask argument must be mask-like type");
+
+    return mlir::success();
+}
+
 mlir::LogicalResult CondBranchOp::verify() {
     if (getTrueMask().getType() != getFalseMask().getType())
         return emitOpError("true/false masks must have matching types");

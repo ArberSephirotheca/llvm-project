@@ -316,7 +316,7 @@ struct SimtStepToStructuredPass
                                       : ("block" + std::to_string(index));
       auto symName = topBuilder.getStringAttr(name);
       auto blockOp = topBuilder.create<simt::structured::BlockOp>(
-          loc, symName, FlatSymbolRefAttr(), FlatSymbolRefAttr(),
+          loc, symName, mlir::Value(), FlatSymbolRefAttr(), FlatSymbolRefAttr(),
           simt::structured::ReconvergencePolicyAttr());
       topBuilder.setInsertionPointAfter(blockOp);
 

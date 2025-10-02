@@ -63,6 +63,15 @@ def SimtStruct_BlockOp : Op<SimtStruct_Dialect, "block",
                        OptionalAttr<FlatSymbolRefAttr>:$continue_target,
                        OptionalAttr<SimtStruct_ReconvergencePolicyAttr>:$policy);
   let regions = (region AnyRegion:$body);
+  let skipDefaultBuilders = 1;
+  let hasVerifier = 1;
+  let builders = [
+    OpBuilder<(ins "mlir::StringAttr":$symName, "mlir::Value":$mask,
+                    "mlir::FlatSymbolRefAttr":$mergeTarget,
+                    "mlir::FlatSymbolRefAttr":$continueTarget,
+                    "::simt::structured::ReconvergencePolicyAttr":$policy)>,
+    OpBuilder<(ins "mlir::StringAttr":$symName, "mlir::Value":$mask)>
+  ];
 
   let extraClassDeclaration = [{
     void getEntrySuccessorRegions(::llvm::ArrayRef<::mlir::Attribute> operands,
@@ -70,6 +79,7 @@ def SimtStruct_BlockOp : Op<SimtStruct_Dialect, "block",
     void getSuccessorRegions(::mlir::RegionBranchPoint point,
                              ::llvm::SmallVectorImpl<::mlir::RegionSuccessor> &regions);
     bool areTypesCompatible(::mlir::Type lhs, ::mlir::Type rhs);
+    ::mlir::BlockArgument getMaskArgument();
   }];
 
 }
