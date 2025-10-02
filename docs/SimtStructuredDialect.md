@@ -79,3 +79,24 @@ interpreter.
 
 This dialect is the staging ground for the interpreter and the entry point for
 backend lowering pipelines.
+
+## Switch Lowering Blueprint
+
+When lowering `simt_step.switch`, create one `simt_struct.block` per case (plus
+optional default) and a shared exit block. The header block computes per-case
+masks and branches to the first matching case while pushing the mask stack with
+`merge_target = @exit`. Each case block then:
+
+- begins with `mask_pop` followed immediately by `mask_merge` using its incoming
+  mask argument, recovering the active lanes for that case;
+- executes the case body; any `break` emits a `simt_struct.branch` to the exit
+  block carrying the current mask;
+- if fallthrough is required, pushes the mask again (preserving merge/continue
+  metadata) and branches to the next case block using the case mask argument so
+  only surviving lanes proceed.
+
+The exit block mirrors loop reconvergence: `mask_pop`, `mask_merge`, and then
+`simt_struct.return` or the next enclosing block. Because each branch forwards
+its mask operand, the interpreter binds the destination block’s leading mask
+argument to the correct participant set (including lanes that fell through from
+previous cases).
