@@ -5,6 +5,7 @@
 
 #include <mlir/Dialect/Func/IR/FuncOps.h>
 #include <mlir/Dialect/ControlFlow/IR/ControlFlowOps.h>
+#include <mlir/Dialect/Arith/IR/Arith.h>
 #include <mlir/IR/Block.h>
 #include <mlir/IR/Builders.h>
 #include <mlir/IR/IRMapping.h>
@@ -244,6 +245,116 @@ static LogicalResult lowerLoopToCFG(simt::dialect::LoopOp loopOp) {
   loopOp.erase();
   return success();
 }
+static LogicalResult lowerSwitchToCFG(simt::dialect::SwitchOp switchOp) {
+  Location loc = switchOp.getLoc();
+  Block *parentBlock = switchOp->getBlock();
+
+  Block *afterBlock = parentBlock->splitBlock(switchOp);
+  SmallVector<Location> resultLocs(switchOp.getNumResults(), loc);
+  afterBlock->addArguments(switchOp.getResultTypes(), resultLocs);
+
+  Region &parentRegion = *parentBlock->getParent();
+  Block *headerBlock = new Block();
+  parentRegion.getBlocks().insert(afterBlock->getIterator(), headerBlock);
+  headerBlock->addArguments(switchOp.getResultTypes(), resultLocs);
+
+  Block *exitBlock = new Block();
+  parentRegion.getBlocks().insert(afterBlock->getIterator(), exitBlock);
+  exitBlock->addArguments(switchOp.getResultTypes(), resultLocs);
+
+  SmallVector<Block *, 4> caseBlocks;
+  Region &cases = switchOp.getCaseBody();
+  for (Block &origCaseInit : cases) {
+    (void)origCaseInit;
+    Block *caseBlock = new Block();
+    parentRegion.getBlocks().insert(exitBlock->getIterator(), caseBlock);
+    caseBlock->addArguments(switchOp.getResultTypes(), resultLocs);
+    caseBlocks.push_back(caseBlock);
+  }
+
+  auto &headerInfo = blockControlInfo[headerBlock];
+  headerInfo.mergeTarget = exitBlock;
+  headerInfo.pushMask = true;
+
+  auto &exitInfo = blockControlInfo[exitBlock];
+  exitInfo.popMask = true;
+
+  for (Block *caseBlock : caseBlocks) {
+    auto &info = blockControlInfo[caseBlock];
+    info.popMask = true;
+  }
+
+  eraseTerminatorIfPresent(parentBlock);
+  OpBuilder entryBuilder(parentBlock, parentBlock->end());
+  entryBuilder.create<cf::BranchOp>(loc, headerBlock, switchOp.getInitialValues());
+
+  OpBuilder headerBuilder(headerBlock, headerBlock->begin());
+  if (caseBlocks.empty()) {
+    headerBuilder.create<cf::BranchOp>(loc, exitBlock, headerBlock->getArguments());
+  } else {
+    headerBuilder.create<cf::BranchOp>(loc, caseBlocks.front(), headerBlock->getArguments());
+  }
+
+  OpBuilder exitBuilder(exitBlock, exitBlock->begin());
+  exitBuilder.create<cf::BranchOp>(loc, afterBlock, exitBlock->getArguments());
+
+  if (!caseBlocks.empty()) {
+    unsigned numResults = switchOp.getNumResults();
+    unsigned payloadCount = numResults >= 3 ? numResults - 3 : 0;
+
+    auto cloneCase = [&](Block &origCase, Block *newCase, Block *nextCase) {
+      IRMapping mapping;
+      for (auto [origArg, newArg] : llvm::zip(origCase.getArguments(),
+                                              newCase->getArguments()))
+        mapping.map(origArg, newArg);
+
+      OpBuilder caseBuilder(newCase, newCase->begin());
+      for (Operation &op : origCase.without_terminator()) {
+        Operation *cloned = caseBuilder.clone(op, mapping);
+        for (auto [origRes, newRes] : llvm::zip(op.getResults(), cloned->getResults()))
+          mapping.map(origRes, newRes);
+      }
+
+      auto yieldOp = cast<simt::dialect::YieldOp>(origCase.getTerminator());
+      SmallVector<Value> yieldValues;
+      yieldValues.reserve(numResults);
+      for (Value operand : yieldOp.getResults())
+        yieldValues.push_back(mapping.lookup(operand));
+
+      Value fallthrough = numResults > payloadCount + 1 ? yieldValues[payloadCount + 1]
+                                                        : Value();
+      Value switchDone = numResults > payloadCount + 2 ? yieldValues[payloadCount + 2]
+                                                       : Value();
+
+      OpBuilder termBuilder(newCase, newCase->end());
+      Value constFalse = termBuilder.create<mlir::arith::ConstantIntOp>(loc, 0, 1);
+      Value fallthroughCond = constFalse;
+      if (fallthrough && switchDone && nextCase != exitBlock) {
+        Value notDone = termBuilder.create<mlir::arith::CmpIOp>(
+            loc, mlir::arith::CmpIPredicate::eq, switchDone, constFalse);
+        fallthroughCond = termBuilder.create<mlir::arith::AndIOp>(loc, fallthrough, notDone);
+      }
+
+      SmallVector<Value, 8> branchOperands(yieldValues.begin(), yieldValues.end());
+      if (nextCase == exitBlock)
+        fallthroughCond = constFalse;
+
+      createCondBranch(termBuilder, loc, fallthroughCond, nextCase, branchOperands,
+                       exitBlock, branchOperands);
+    };
+
+    for (auto [index, origCase] : llvm::enumerate(cases)) {
+      Block *nextCase = (index + 1 < caseBlocks.size()) ? caseBlocks[index + 1]
+                                                        : exitBlock;
+      cloneCase(origCase, caseBlocks[index], nextCase);
+    }
+  }
+
+  switchOp.replaceAllUsesWith(afterBlock->getArguments());
+  switchOp.erase();
+  return success();
+}
+
 
 static LogicalResult lowerStructuredControlToCFG(func::FuncOp func) {
   blockControlInfo.clear();
@@ -263,6 +374,14 @@ static LogicalResult lowerStructuredControlToCFG(func::FuncOp func) {
     func.walk([&](simt::dialect::LoopOp loopOp) { loopOps.push_back(loopOp); });
     for (auto loopOp : llvm::reverse(loopOps)) {
       if (failed(lowerLoopToCFG(loopOp)))
+        return failure();
+      progress = true;
+    }
+
+    SmallVector<simt::dialect::SwitchOp, 8> switchOps;
+    func.walk([&](simt::dialect::SwitchOp switchOp) { switchOps.push_back(switchOp); });
+    for (auto switchOp : llvm::reverse(switchOps)) {
+      if (failed(lowerSwitchToCFG(switchOp)))
         return failure();
       progress = true;
     }
@@ -318,6 +437,7 @@ struct SimtStepToStructuredPass
       if (!info.popMask)
         continue;
 
+      maskMergeBlocks.insert(entry.first);
       if (info.mergeTarget)
         maskMergeBlocks.insert(info.mergeTarget);
       if (info.continueTarget)
