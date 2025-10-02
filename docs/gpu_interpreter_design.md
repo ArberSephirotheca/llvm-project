@@ -51,7 +51,7 @@ Barrier semantics, reconvergence, and subgroup scheduling policies are all natur
 
 1. **Structured IR**
    - Basic blocks and operations (`Arith`, `Cmp`, `If`, `Loop`, `Barrier`, `Shuffle`, `Vote`).
-   - Active mask to track participating lanes.
+   - Each `simt_struct.block` region begins with a mask block argument that carries the active lanes; subsequent block arguments represent carried SSA values. Lowering injects `mask_pop`/`mask_merge` at reconvergence so every block sees the authoritative mask without re-emitting `simt_step.active_mask`.
 
 2. **Semantics Concept**
    ```cpp
@@ -94,6 +94,16 @@ Barrier semantics, reconvergence, and subgroup scheduling policies are all natur
 - Represent continuations as `std::function<Step()>` or coroutines.
 - Write handlers as composable functors (`SubgroupBarrierHandler`, `ModelCheckerHandler`).
 - Test with random programs, compare traces under different semantics.
+
+## Mask Threading Contract
+- Structured lowering threads masks explicitly through block arguments. Branches
+  forward the current mask operand, and reconvergence points insert
+  `mask_pop`/`mask_merge` before any user-level operations execute.
+- The interpreter binds each block’s leading mask argument when a branch target
+  is chosen, so `lookupMaskValue` on that argument returns the active lane set
+  without re-reading hardware state.
+- Debug tooling (`simt-dump-structured-program`) reports both mask and carried
+  argument counts, reflecting the shape the interpreter consumes.
 
 ---
 
@@ -173,13 +183,15 @@ This design gives flexibility, clarity, and extensibility — ideal for research
 
 ### Phase 1 – Structured Program View
 - Extend the structured metadata cache into a `StructuredProgram` façade: `(ModuleOp module, DenseMap<SymbolRef, BlockOp>, entry symbol)`.
-- Add `BlockInfo` records (merge/continue targets, operand types) materialised at creation time.
+- Add `BlockInfo` records (mask + carried argument types, merge/continue targets)
+  materialised at creation time.
 - Unit test by parsing a tiny MLIR module and verifying block lookup + attribute capture.
 
 ### Phase 2 – Value Representation
 - Introduce `ValueStore` (bool/int/float plus future vector support) with SoA layout for per-lane data.
 - Provide `ValueTraits<WaveWidth>` templates; use `consteval` helpers to precompute shuffle/vote look-up tables.
-- Add type mapping utilities from MLIR types → runtime slots; cover with focused tests.
+- Add type mapping utilities from MLIR types → runtime slots (including mask
+  operands for block arguments); cover with focused tests.
 
 ### Phase 3 – Lane/Wave State
 - Define `LaneState` (current block symbol, op index, SSA environment id, active-bit).

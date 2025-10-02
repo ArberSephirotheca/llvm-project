@@ -23,8 +23,12 @@ Represents a structured SIMT block. Attributes:
 - `merge_target` (optional) – explicit reconvergence block.
 - `continue_target` (optional) – loop continue block.
 - `reconvergence` (optional) – overrides block-level policy.
-The block owns a region whose terminator must be one of the structured
-terminators below.
+The block owns a region whose entry block always begins with a **mask block
+argument** followed by any carried SSA values. The mask argument is the
+canonical representation of the active lanes executing the block; lowering and
+the interpreter treat it as authoritative and no longer materialise implicit
+`simt_step.active_mask` ops. The region’s terminator must be one of the
+structured terminators below.
 
 ### Structured terminators
 - `simt_struct.branch ^dest (%mask : i64)` – unconditional transfer with mask.
@@ -43,7 +47,8 @@ analyses can operate on them.
   the active mask; both operands must share the same type.
 
 These operations correspond to the merge-stack management performed by the HLSL
-interpreter.
+interpreter. `mask_pop`/`mask_merge` now appear at reconvergence points to feed
+the block’s mask argument before any user operations execute.
 
 ### Example lowering (work-in-progress)
 
@@ -54,16 +59,21 @@ interpreter.
 simt_step.return
 
 // After running the `simt-step-to-structured` pass (current prototype)
-simt_struct.block @entry {
-  %mask = simt_step.active_mask : i64
-  %tid = simt_step.dispatch_thread_id : i32
-  simt_struct.return
-}
+"simt_struct.block"() ({
+^bb0(%mask: i64, %tid: i32):
+  "simt_struct.return"() : () -> ()
+}) {sym_name = "entry"}
+
+Structured control flow introduces additional blocks. Each block’s first block
+argument threads the active mask while subsequent arguments carry SSA values
+propagated across the CFG.
 ```
 
-The pass currently handles straight-line, void functions and preserves the
-original `simt_step` operations inside a single structured block. Divergent
-control flow and value-returning functions remain to be lowered.
+The lowering now materialises mask threading and block arguments across the CFG
+so divergent control flow reconverges through explicit `mask_pop`/`mask_merge`
+sequences. Additional work remains to broaden operator coverage, but the block
+structure illustrated above reflects the semantics relied upon by the
+interpreter.
 
 ---
 
