@@ -62,7 +62,7 @@ def SimtStruct_BlockOp : Op<SimtStruct_Dialect, "block",
                        OptionalAttr<FlatSymbolRefAttr>:$merge_target,
                        OptionalAttr<FlatSymbolRefAttr>:$continue_target,
                        OptionalAttr<SimtStruct_ReconvergencePolicyAttr>:$policy);
-  let regions = (region SizedRegion<1>:$body);
+  let regions = (region AnyRegion:$body);
 
   let extraClassDeclaration = [{
     void getEntrySuccessorRegions(::llvm::ArrayRef<::mlir::Attribute> operands,
@@ -79,7 +79,8 @@ def SimtStruct_BlockOp : Op<SimtStruct_Dialect, "block",
 def SimtStruct_BranchOp : Op<SimtStruct_Dialect, "branch",
     [Terminator, HasParent<"BlockOp">, BranchOpInterface]> {
   let summary = "Unconditional branch with mask";
-  let arguments = (ins MaskLikeType:$mask);
+  let arguments = (ins MaskLikeType:$mask,
+                       Variadic<AnyType>:$dest_operands);
   let successors = (successor AnySuccessor:$dest);
 
   let extraClassDeclaration = [{
@@ -91,11 +92,14 @@ def SimtStruct_BranchOp : Op<SimtStruct_Dialect, "branch",
 }
 
 def SimtStruct_CondBranchOp : Op<SimtStruct_Dialect, "cond_branch",
-    [Terminator, HasParent<"BlockOp">, BranchOpInterface]> {
+    [Terminator, HasParent<"BlockOp">, BranchOpInterface,
+     AttrSizedOperandSegments]> {
   let summary = "Conditional branch with explicit masks";
   let arguments = (ins I1:$condition,
                        MaskLikeType:$true_mask,
                        MaskLikeType:$false_mask,
+                       Variadic<AnyType>:$true_operands,
+                       Variadic<AnyType>:$false_operands,
                        OptionalAttr<FlatSymbolRefAttr>:$merge_target,
                        OptionalAttr<SimtStruct_ReconvergencePolicyAttr>:$policy);
   let successors = (successor AnySuccessor:$trueDest,
@@ -114,6 +118,7 @@ def SimtStruct_CondBranchOp : Op<SimtStruct_Dialect, "cond_branch",
 def SimtStruct_ReturnOp : Op<SimtStruct_Dialect, "return",
     [Terminator, HasParent<"BlockOp">]> {
   let summary = "Return from structured SIMT region";
+  let arguments = (ins Variadic<AnyType>:$operands);
 }
 
 // Mask ops ------------------------------------------------------------------

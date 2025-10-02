@@ -47,13 +47,15 @@ bool isMaskLikeType(mlir::Type type) {
 
 void BlockOp::getEntrySuccessorRegions(::llvm::ArrayRef<::mlir::Attribute>,
                                        ::llvm::SmallVectorImpl<::mlir::RegionSuccessor> &regions) {
-    regions.emplace_back(&getBody());
+    if (!getBody().empty())
+        regions.emplace_back(&getBody());
 }
 
 void BlockOp::getSuccessorRegions(::mlir::RegionBranchPoint point,
                                   ::llvm::SmallVectorImpl<::mlir::RegionSuccessor> &regions) {
     if (point.isParent()) {
-        regions.emplace_back(&getBody());
+        if (!getBody().empty())
+            regions.emplace_back(&getBody());
         return;
     }
 
@@ -72,21 +74,15 @@ bool BlockOp::areTypesCompatible(::mlir::Type lhs, ::mlir::Type rhs) {
     return areMaskTypesCompatible(lhs, rhs);
 }
 
-mlir::LogicalResult CondBranchOp::verify() {
-    if (getTrueMask().getType() != getFalseMask().getType())
-        return emitOpError("true/false masks must have matching types");
-    return mlir::success();
-}
-
 mlir::SuccessorOperands BranchOp::getSuccessorOperands(unsigned index) {
     assert(index == 0 && "branch has one successor");
-    return mlir::SuccessorOperands(mlir::MutableOperandRange(getOperation(), 0, 1));
+    unsigned numOperands = getOperation()->getNumOperands();
+    unsigned numCarried = numOperands > 1 ? numOperands - 1 : 0;
+    return mlir::SuccessorOperands(
+        mlir::MutableOperandRange(getOperation(), numCarried ? 1 : 1, numCarried));
 }
 
 std::optional<mlir::BlockArgument> BranchOp::getSuccessorBlockArgument(unsigned operandIndex) {
-    if (operandIndex != 0)
-        return std::nullopt;
-
     mlir::Block *destBlock = getDest();
     if (!destBlock || destBlock->getNumArguments() <= operandIndex)
         return std::nullopt;
@@ -105,25 +101,22 @@ bool BranchOp::areTypesCompatible(::mlir::Type lhs, ::mlir::Type rhs) {
 mlir::SuccessorOperands CondBranchOp::getSuccessorOperands(unsigned index) {
     assert(index < 2 && "cond branch has two successors");
     if (index == 0)
-        return mlir::SuccessorOperands(mlir::MutableOperandRange(getOperation(), 1, 1));
-    return mlir::SuccessorOperands(mlir::MutableOperandRange(getOperation(), 2, 1));
+        return mlir::SuccessorOperands(getTrueOperandsMutable());
+    return mlir::SuccessorOperands(getFalseOperandsMutable());
 }
 
 std::optional<mlir::BlockArgument> CondBranchOp::getSuccessorBlockArgument(unsigned operandIndex) {
-    if (operandIndex == 0) {
+    if (operandIndex < getTrueOperands().size()) {
         mlir::Block *trueDest = getTrueDest();
-        if (trueDest && !trueDest->getArguments().empty())
-            return trueDest->getArgument(0);
+        if (trueDest && trueDest->getNumArguments() > operandIndex)
+            return trueDest->getArgument(operandIndex);
         return std::nullopt;
     }
 
-    if (operandIndex == 1) {
-        mlir::Block *falseDest = getFalseDest();
-        if (falseDest && !falseDest->getArguments().empty())
-            return falseDest->getArgument(0);
-        return std::nullopt;
-    }
-
+    unsigned falseIndex = operandIndex - getTrueOperands().size();
+    mlir::Block *falseDest = getFalseDest();
+    if (falseDest && falseDest->getNumArguments() > falseIndex)
+        return falseDest->getArgument(falseIndex);
     return std::nullopt;
 }
 
@@ -145,6 +138,21 @@ mlir::Block *CondBranchOp::getSuccessorForOperands(::llvm::ArrayRef<::mlir::Attr
 
 bool CondBranchOp::areTypesCompatible(::mlir::Type lhs, ::mlir::Type rhs) {
     return areMaskTypesCompatible(lhs, rhs);
+}
+
+mlir::LogicalResult CondBranchOp::verify() {
+    if (getTrueMask().getType() != getFalseMask().getType())
+        return emitOpError("true/false masks must have matching types");
+
+    if (auto *trueDest = getTrueDest())
+        if (trueDest->getNumArguments() != getTrueOperands().size())
+            return emitOpError("number of true operands must match destination arguments");
+
+    if (auto *falseDest = getFalseDest())
+        if (falseDest->getNumArguments() != getFalseOperands().size())
+            return emitOpError("number of false operands must match destination arguments");
+
+    return mlir::success();
 }
 
 mlir::LogicalResult MaskMergeOp::verify() {

@@ -66,7 +66,10 @@ struct SimtStepToStructuredPass
         FlatSymbolRefAttr(),
         simt::structured::ReconvergencePolicyAttr());
 
-    Block &structuredEntry = blockOp.getBody().front();
+    mlir::Region &structuredRegion = blockOp.getBody();
+    if (structuredRegion.empty())
+        structuredRegion.emplaceBlock();
+    Block &structuredEntry = structuredRegion.front();
     IRMapping mapper;
 
     for (BlockArgument arg : entryBlock.getArguments()) {
@@ -87,7 +90,7 @@ struct SimtStepToStructuredPass
           signalPassFailure();
           return;
         }
-        bodyBuilder.create<simt::structured::ReturnOp>(ret.getLoc());
+        bodyBuilder.create<simt::structured::ReturnOp>(ret.getLoc(), mlir::ValueRange{});
         insertedStructuredReturn = true;
         continue;
       }
@@ -98,7 +101,7 @@ struct SimtStepToStructuredPass
     }
 
     if (!insertedStructuredReturn)
-      bodyBuilder.create<simt::structured::ReturnOp>(loc);
+      bodyBuilder.create<simt::structured::ReturnOp>(loc, mlir::ValueRange{});
 
     // Remove the original operations now that the structured form exists.
     for (Operation *op : originalOps)
