@@ -15,17 +15,30 @@
 #include <mlir/IR/BuiltinOps.h>
 #include <mlir/IR/Types.h>
 
+namespace mlir {
+class Block;
+class BlockArgument;
+} // namespace mlir
+
 namespace simt::semantics {
 
 struct BlockInfo {
     std::string symbol;
     simt::structured::BlockOp block;
-    llvm::SmallVector<mlir::Type, 4> argumentTypes;
+    mlir::Block *body = nullptr;
+    mlir::Type maskType;
+    llvm::SmallVector<mlir::Type, 4> carriedTypes;
     mlir::FlatSymbolRefAttr mergeTarget;
     mlir::FlatSymbolRefAttr continueTarget;
 
     bool hasMergeTarget() const { return static_cast<bool>(mergeTarget); }
     bool hasContinueTarget() const { return static_cast<bool>(continueTarget); }
+    bool hasBody() const { return body != nullptr; }
+    unsigned getArgumentCount() const {
+        return (maskType ? 1u : 0u) + static_cast<unsigned>(carriedTypes.size());
+    }
+    llvm::ArrayRef<mlir::Type> getCarriedTypes() const { return carriedTypes; }
+    mlir::BlockArgument getMaskArgument() const;
 };
 
 /// Snapshot of structured SIMT blocks within a module. Used by the interpreter
@@ -52,7 +65,7 @@ public:
     const BlockInfo *lookupBlock(const mlir::Block *block) const;
     BlockInfo *lookupBlock(const mlir::Block *block);
 
-llvm::ArrayRef<BlockInfo> blocks() const { return blocks_; }
+    llvm::ArrayRef<BlockInfo> blocks() const { return blocks_; }
 
 private:
     mlir::ModuleOp module_{nullptr};
@@ -66,3 +79,4 @@ private:
 void registerDumpStructuredProgramPass();
 
 } // namespace simt::semantics
+

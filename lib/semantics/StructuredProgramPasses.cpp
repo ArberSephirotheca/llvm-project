@@ -34,7 +34,7 @@ struct DumpStructuredProgramPass
 
         for (const BlockInfo &info : program.blocks()) {
             os << "block " << info.symbol;
-            os << " args=" << info.argumentTypes.size();
+            os << " args=" << info.getArgumentCount();
             if (info.hasMergeTarget())
                 os << " merge=" << info.mergeTarget.getValue();
             if (info.hasContinueTarget())

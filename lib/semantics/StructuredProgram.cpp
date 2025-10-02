@@ -6,6 +6,12 @@
 
 namespace simt::semantics {
 
+mlir::BlockArgument BlockInfo::getMaskArgument() const {
+    if (!hasBody() || body->getNumArguments() == 0)
+        return {};
+    return body->getArgument(0);
+}
+
 namespace {
 
 void populateBlockInfo(BlockInfo &info) {
@@ -13,13 +19,25 @@ void populateBlockInfo(BlockInfo &info) {
     info.continueTarget = info.block.getContinueTargetAttr();
 
     auto &region = info.block.getBody();
+    info.body = nullptr;
+    info.maskType = mlir::Type();
+    info.carriedTypes.clear();
+
     if (region.empty())
         return;
+
     auto &bodyBlock = region.front();
-    info.argumentTypes.clear();
-    info.argumentTypes.reserve(bodyBlock.getNumArguments());
-    for (mlir::BlockArgument arg : bodyBlock.getArguments())
-        info.argumentTypes.push_back(arg.getType());
+    info.body = &bodyBlock;
+
+    if (bodyBlock.getNumArguments() == 0)
+        return;
+
+    info.maskType = bodyBlock.getArgument(0).getType();
+    info.carriedTypes.reserve(bodyBlock.getNumArguments() > 0
+                                  ? bodyBlock.getNumArguments() - 1
+                                  : 0);
+    for (unsigned i = 1, e = bodyBlock.getNumArguments(); i < e; ++i)
+        info.carriedTypes.push_back(bodyBlock.getArgument(i).getType());
 }
 
 } // namespace
@@ -45,9 +63,8 @@ void StructuredProgram::initialize(mlir::ModuleOp module) {
 
         indexBySymbol_.try_emplace(blocks_.back().symbol, index);
 
-        auto &region = block.getBody();
-        if (!region.empty())
-            indexByBodyBlock_[&region.front()] = index;
+        if (blocks_.back().body)
+            indexByBodyBlock_[blocks_.back().body] = index;
 
         if (!entrySymbol_) {
             entrySymbol_ = blocks_.back().symbol;
