@@ -37,7 +37,7 @@ plan and prioritize the work needed to bring the MLIR importer up to parity.
       unpacks carried variables and dispatches to the first case/default, (2) a
       block per explicit case label that lowers the associated statements and
       ends with a `simt_step.yield` carrying the updated variables plus the
-      `(hasMatched, executing, completed)` flags, and (3) a single exit block.
+      `(matchSeen, fallthroughActive, switchDone)` flags, and (3) a single exit block.
       Fallthrough uses the recorded metadata to branch to the next case or exit,
       and the default block is only created when a `default` label exists.
 

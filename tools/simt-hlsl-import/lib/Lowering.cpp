@@ -313,11 +313,11 @@ struct EmitInterpreter
     };
 
     yieldOperands.push_back(
-        ensureBool(switchFrame.breakHasMatchedValue, /*constant=*/1));
+        ensureBool(switchFrame.breakMatchSeenValue, /*constant=*/1));
     yieldOperands.push_back(
-        ensureBool(switchFrame.breakExecutingValue, /*constant=*/0));
+        ensureBool(switchFrame.breakFallthroughValue, /*constant=*/0));
     yieldOperands.push_back(
-        ensureBool(switchFrame.breakCompletedValue, /*constant=*/1));
+        ensureBool(switchFrame.breakSwitchDoneValue, /*constant=*/1));
 
     ctx.builder.create<simt::dialect::YieldOp>(mlirLoc, yieldOperands);
     ctx.emittedTerminator = true;
@@ -4257,9 +4257,9 @@ static bool lowerSwitchStmt(const clang::SwitchStmt *switchStmt,
 
   addBlockArguments(firstBlock);
 
-  size_t hasMatchedIndex = mutatedVars.size();
-  size_t executingIndex = mutatedVars.size() + 1;
-  size_t completedIndex = mutatedVars.size() + 2;
+  size_t matchSeenIndex = mutatedVars.size();
+  size_t fallthroughIndex = mutatedVars.size() + 1;
+  size_t switchDoneIndex = mutatedVars.size() + 2;
 
   auto getCurrentTuple = [&](mlir::Block &block,
                              llvm::SmallVectorImpl<mlir::Value> &tuple) {
@@ -4273,9 +4273,9 @@ static bool lowerSwitchStmt(const clang::SwitchStmt *switchStmt,
     mlir::OpBuilder emptyBuilder(&firstBlock, firstBlock.begin());
     llvm::SmallVector<mlir::Value, 8> tuple;
     getCurrentTuple(firstBlock, tuple);
-    tuple.push_back(firstBlock.getArgument(hasMatchedIndex));
-    tuple.push_back(firstBlock.getArgument(executingIndex));
-    tuple.push_back(firstBlock.getArgument(completedIndex));
+    tuple.push_back(firstBlock.getArgument(matchSeenIndex));
+    tuple.push_back(firstBlock.getArgument(fallthroughIndex));
+    tuple.push_back(firstBlock.getArgument(switchDoneIndex));
     emptyBuilder.create<simt::dialect::YieldOp>(loc, tuple);
   } else {
     auto ensureCaseBlock = [&](unsigned caseIndex) -> mlir::Block * {
@@ -4294,22 +4294,22 @@ static bool lowerSwitchStmt(const clang::SwitchStmt *switchStmt,
       llvm::SmallVector<mlir::Value, 8> incomingValues;
       getCurrentTuple(*caseBlock, incomingValues);
 
-      mlir::Value currentHasMatched =
-          caseBlock->getArgument(hasMatchedIndex);
-      mlir::Value currentExecuting =
-          caseBlock->getArgument(executingIndex);
-      mlir::Value currentCompleted =
-          caseBlock->getArgument(completedIndex);
+      mlir::Value currentMatchSeen =
+          caseBlock->getArgument(matchSeenIndex);
+      mlir::Value currentFallthrough =
+          caseBlock->getArgument(fallthroughIndex);
+      mlir::Value currentSwitchDone =
+          caseBlock->getArgument(switchDoneIndex);
 
       mlir::Value constFalse =
           caseBuilder.create<mlir::arith::ConstantIntOp>(loc, 0, 1);
       mlir::Value constTrue =
           caseBuilder.create<mlir::arith::ConstantIntOp>(loc, 1, 1);
 
-      mlir::Value notCompleted = caseBuilder.create<mlir::arith::CmpIOp>(
-          loc, mlir::arith::CmpIPredicate::eq, currentCompleted, constFalse);
-      mlir::Value hasNotMatched = caseBuilder.create<mlir::arith::CmpIOp>(
-          loc, mlir::arith::CmpIPredicate::eq, currentHasMatched, constFalse);
+      mlir::Value notSwitchDone = caseBuilder.create<mlir::arith::CmpIOp>(
+          loc, mlir::arith::CmpIPredicate::eq, currentSwitchDone, constFalse);
+      mlir::Value matchNotSeen = caseBuilder.create<mlir::arith::CmpIOp>(
+          loc, mlir::arith::CmpIPredicate::eq, currentMatchSeen, constFalse);
 
       mlir::Value caseMatch;
       if (const auto *caseStmt = llvm::dyn_cast<clang::CaseStmt>(info.label)) {
@@ -4327,18 +4327,18 @@ static bool lowerSwitchStmt(const clang::SwitchStmt *switchStmt,
         mlir::Value valueEquals = caseBuilder.create<mlir::arith::CmpIOp>(
             loc, mlir::arith::CmpIPredicate::eq, selector, caseValue);
         mlir::Value available = caseBuilder.create<mlir::arith::AndIOp>(
-            loc, hasNotMatched, notCompleted);
+            loc, matchNotSeen, notSwitchDone);
         caseMatch = caseBuilder.create<mlir::arith::AndIOp>(loc, available,
                                                             valueEquals);
       } else {
-        caseMatch = caseBuilder.create<mlir::arith::AndIOp>(loc, hasNotMatched,
-                                                            notCompleted);
+        caseMatch = caseBuilder.create<mlir::arith::AndIOp>(loc, matchNotSeen,
+                                                            notSwitchDone);
       }
 
       mlir::Value executeCondition = caseBuilder.create<mlir::arith::OrIOp>(
-          loc, currentExecuting, caseMatch);
+          loc, currentFallthrough, caseMatch);
       mlir::Value enterCase = caseBuilder.create<mlir::arith::AndIOp>(
-          loc, executeCondition, notCompleted);
+          loc, executeCondition, notSwitchDone);
 
       const SwitchCaseMetadata *metaCase =
           caseIndex < switchMeta.cases.size() ? &switchMeta.cases[caseIndex]
@@ -4395,15 +4395,15 @@ static bool lowerSwitchStmt(const clang::SwitchStmt *switchStmt,
           yieldValues.push_back(value);
           caseInterp.noteMutation(vd);
         }
-        mlir::Value updatedHasMatched =
-            thenBuilder.create<mlir::arith::OrIOp>(loc, currentHasMatched,
+        mlir::Value updatedMatchSeen =
+            thenBuilder.create<mlir::arith::OrIOp>(loc, currentMatchSeen,
                                                    caseMatch);
-        mlir::Value updatedExecuting = caseFallsThrough && !fallsOutOfSwitch
+        mlir::Value updatedFallthrough = caseFallsThrough && !fallsOutOfSwitch
                                            ? constTrue
                                            : constFalse;
-        yieldValues.push_back(updatedHasMatched);
-        yieldValues.push_back(updatedExecuting);
-        yieldValues.push_back(currentCompleted);
+        yieldValues.push_back(updatedMatchSeen);
+        yieldValues.push_back(updatedFallthrough);
+        yieldValues.push_back(currentSwitchDone);
         thenBuilder.create<simt::dialect::YieldOp>(loc, yieldValues);
       }
 
@@ -4416,9 +4416,9 @@ static bool lowerSwitchStmt(const clang::SwitchStmt *switchStmt,
       elseBuilder.setInsertionPointToStart(&elseBlock);
 
       llvm::SmallVector<mlir::Value, 8> elseValues = incomingValues;
-      elseValues.push_back(currentHasMatched);
-      elseValues.push_back(currentExecuting);
-      elseValues.push_back(currentCompleted);
+      elseValues.push_back(currentMatchSeen);
+      elseValues.push_back(currentFallthrough);
+      elseValues.push_back(currentSwitchDone);
       elseBuilder.create<simt::dialect::YieldOp>(loc, elseValues);
 
       caseBuilder.setInsertionPointAfter(ifOp);
