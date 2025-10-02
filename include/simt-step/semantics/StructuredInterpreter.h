@@ -1,7 +1,7 @@
 #pragma once
 
 #include "simt-step/semantics/SemanticsContext.h"
-#include "simt-step/semantics/StructuredExecutor.h"
+#include "simt-step/semantics/StructuredProgram.h"
 
 #include <llvm/ADT/DenseMap.h>
 #include <llvm/ADT/SmallVector.h>
@@ -67,13 +67,13 @@ struct BranchDecision {
 /// Helper that evaluates masks and dispatches structured control flow.
 class StructuredInterpreter {
 public:
-    StructuredInterpreter(StructuredExecutor &executor,
+    StructuredInterpreter(StructuredProgram &program,
                           StructuredExecutionState state);
 
     StructuredExecutionState &state() { return state_; }
     const StructuredExecutionState &state() const { return state_; }
 
-    llvm::Expected<void> handleMaskPush(structured::MaskPushOp op);
+    llvm::Error handleMaskPush(structured::MaskPushOp op);
     llvm::Expected<std::uint64_t> handleMaskPop(structured::MaskPopOp op);
     llvm::Expected<std::uint64_t> handleMaskMerge(structured::MaskMergeOp op);
 
@@ -87,7 +87,7 @@ public:
 private:
     llvm::Expected<std::uint64_t> evaluateMaskValue(mlir::Value value) const;
 
-    StructuredExecutor *executor_;
+    StructuredProgram *program_;
     StructuredExecutionState state_;
     llvm::DenseMap<mlir::Value, std::uint64_t> maskValues_;
 };

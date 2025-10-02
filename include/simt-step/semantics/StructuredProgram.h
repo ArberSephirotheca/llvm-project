@@ -1,31 +1,68 @@
 #pragma once
 
-#include <llvm/ADT/DenseMap.h>
-#include <mlir/IR/BuiltinOps.h>
+#include <cstddef>
+#include <optional>
+#include <string>
+#include <vector>
 
-namespace simt::structured {
-class BlockOp;
-}
+#include "simt-step/Dialect/SimtStructured/StructuredDialect.h"
+
+#include <llvm/ADT/DenseMap.h>
+#include <llvm/ADT/SmallVector.h>
+#include <llvm/ADT/StringMap.h>
+#include <llvm/ADT/StringRef.h>
+#include <mlir/IR/Attributes.h>
+#include <mlir/IR/BuiltinOps.h>
+#include <mlir/IR/Types.h>
 
 namespace simt::semantics {
 
-/// Light-weight helper that indexes structured SIMT blocks and prepares the
-/// interpreter for execution. The full execution semantics will populate and
-/// consume this map when the runtime wiring lands.
-class StructuredExecutor {
-public:
-    StructuredExecutor() = default;
+struct BlockInfo {
+    std::string symbol;
+    simt::structured::BlockOp block;
+    llvm::SmallVector<mlir::Type, 4> argumentTypes;
+    mlir::FlatSymbolRefAttr mergeTarget;
+    mlir::FlatSymbolRefAttr continueTarget;
 
-    /// Scan the given module for structured SIMT blocks and record them by
-    /// symbol name. Existing entries are cleared.
+    bool hasMergeTarget() const { return static_cast<bool>(mergeTarget); }
+    bool hasContinueTarget() const { return static_cast<bool>(continueTarget); }
+};
+
+/// Snapshot of structured SIMT blocks within a module. Used by the interpreter
+/// to discover blocks, their carried arguments, and reconvergence metadata.
+class StructuredProgram {
+public:
+    StructuredProgram() = default;
+
+    /// Scan the module for `simt_struct.block` operations and cache their
+    /// metadata. Any previously cached state is discarded.
     void initialize(mlir::ModuleOp module);
 
-    /// Lookup a structured block by symbol name. Returns nullptr when the
-    /// block has not been indexed yet.
-    simt::structured::BlockOp lookupBlock(llvm::StringRef name) const;
+    mlir::ModuleOp getModule() const { return module_; }
+
+    bool hasEntrySymbol() const { return entrySymbol_.has_value(); }
+    llvm::StringRef getEntrySymbol() const {
+        return entrySymbol_ ? llvm::StringRef(*entrySymbol_) : llvm::StringRef();
+    }
+    const BlockInfo *getEntryBlock() const;
+
+    const BlockInfo *lookupBlock(llvm::StringRef symbol) const;
+    BlockInfo *lookupBlock(llvm::StringRef symbol);
+
+    const BlockInfo *lookupBlock(const mlir::Block *block) const;
+    BlockInfo *lookupBlock(const mlir::Block *block);
+
+llvm::ArrayRef<BlockInfo> blocks() const { return blocks_; }
 
 private:
-    llvm::DenseMap<llvm::StringRef, mlir::Operation *> blockTable_;
+    mlir::ModuleOp module_{nullptr};
+    std::optional<std::string> entrySymbol_;
+    std::vector<BlockInfo> blocks_;
+    llvm::StringMap<std::size_t> indexBySymbol_;
+    llvm::DenseMap<const mlir::Block *, std::size_t> indexByBodyBlock_;
 };
+
+/// Register utility passes associated with structured program analysis.
+void registerDumpStructuredProgramPass();
 
 } // namespace simt::semantics

@@ -1,12 +1,13 @@
 #include "simt-step/semantics/StructuredInterpreter.h"
 
-#include "simt-step/Dialect/SimtStep/SimtStepOps.h"
+#include "simt-step/Dialect/SimtStep/SimtStepDialect.h"
 #include "simt-step/Dialect/SimtStructured/StructuredDialect.h"
 
 #include <mlir/Dialect/Arith/IR/Arith.h>
 #include <mlir/IR/Block.h>
 #include <mlir/IR/BuiltinOps.h>
 #include <mlir/IR/Operation.h>
+#include <mlir/IR/Value.h>
 
 #include <optional>
 
@@ -42,17 +43,19 @@ std::uint64_t StructuredExecutionState::mergeMask(std::uint64_t incomingMask) {
     return context_.activeMask;
 }
 
-StructuredInterpreter::StructuredInterpreter(StructuredExecutor &executor,
+StructuredInterpreter::StructuredInterpreter(StructuredProgram &program,
                                              StructuredExecutionState state)
-    : executor_(&executor), state_(state) {}
+    : program_(&program), state_(state) {}
 
-llvm::Expected<void> StructuredInterpreter::handleMaskPush(
+llvm::Error StructuredInterpreter::handleMaskPush(
     structured::MaskPushOp op) {
     auto maskOrErr = evaluateMaskValue(op.getMask());
     if (!maskOrErr)
         return maskOrErr.takeError();
 
     state_.pushMask(*maskOrErr, op.getMergeTargetAttr(), op.getContinueTargetAttr());
+    if (program_)
+        (void)program_->lookupBlock(op.getOperation()->getBlock());
     return llvm::Error::success();
 }
 
@@ -151,7 +154,7 @@ StructuredInterpreter::evaluateMaskValue(Value value) const {
     if (auto active = value.getDefiningOp<simt::dialect::ActiveMaskOp>())
         return state_.getActiveMask();
 
-    if (auto arg = value.dyn_cast<BlockArgument>()) {
+    if (auto arg = mlir::dyn_cast<BlockArgument>(value)) {
         if (auto parent = llvm::dyn_cast<structured::BlockOp>(arg.getOwner()->getParentOp())) {
             // Carried block arguments are expected to be mapped ahead of time.
             if (auto itArg = maskValues_.find(arg); itArg != maskValues_.end())

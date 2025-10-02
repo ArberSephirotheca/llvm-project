@@ -172,7 +172,7 @@ This design gives flexibility, clarity, and extensibility — ideal for research
 - Capture interpreter requirements from lowering (carried values, merge/continue targets, block symbols).
 
 ### Phase 1 – Structured Program View
-- Extend `StructuredExecutor` into a `StructuredProgram` façade: `(ModuleOp module, DenseMap<SymbolRef, BlockOp>, entry symbol)`.
+- Extend the structured metadata cache into a `StructuredProgram` façade: `(ModuleOp module, DenseMap<SymbolRef, BlockOp>, entry symbol)`.
 - Add `BlockInfo` records (merge/continue targets, operand types) materialised at creation time.
 - Unit test by parsing a tiny MLIR module and verifying block lookup + attribute capture.
 

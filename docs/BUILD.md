@@ -25,6 +25,17 @@ This produces the shared library `libsimt-step` and the command-line tools under
 - `simt-convert` reads source text, runs the selected frontend (`--frontend=hlsl|cuda`), and prints the resulting MLIR module.
 - `check-simt-hlsl-import` runs lit-based regression tests for the HLSL
   importer (requires the LLVM build tree’s `llvm-lit`).
+- `check-simt-opt` runs the structured conversion/interpreter smoke tests, including the
+  `--simt-dump-structured-program` utility pass added to `simt-opt`.
+
+After building you can exercise the structured inspection pass manually:
+
+```bash
+build/tools/simt-opt/simt-opt \
+  --simt-step-to-structured \
+  --simt-dump-structured-program \
+  path/to/input.mlir
+```
 
 ## Environment
 
