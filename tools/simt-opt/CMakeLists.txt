@@ -11,6 +11,7 @@ target_link_libraries(simt-opt
         MLIRGPUToLLVMSPV
         MLIRGPUToSPIRV
         MLIRIR
+        MLIRControlFlowDialect
         MLIRSupport
         MLIRParser
         MLIROptLib

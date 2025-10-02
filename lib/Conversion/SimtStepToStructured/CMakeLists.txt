@@ -13,4 +13,6 @@ target_link_libraries(SimtStepToStructuredPass
         MLIRIR
         MLIRFuncDialect
         MLIRSupport
+    PUBLIC
+        MLIRControlFlowDialect
 )

@@ -21,7 +21,8 @@ builtin.module {
 // CHECK:         %[[ENTRY_MASK:.*]] = "simt_step.active_mask"() : () -> i64
 // CHECK:         %[[C1:.*]] = arith.constant 1 : i32
 // CHECK:         %[[CMP:.*]] = arith.cmpi eq, %[[ENTRY_ARG]], %[[C1]] : i32
-// CHECK:         "simt_struct.cond_branch"(%[[CMP]], %[[ENTRY_MASK]], %[[ENTRY_MASK]], %[[C1]], %[[ENTRY_ARG]])
+// CHECK:         %[[ENTRY_MASK2:.*]] = "simt_step.active_mask"() : () -> i64
+// CHECK:         "simt_struct.cond_branch"(%[[CMP]], %[[ENTRY_MASK2]], %[[ENTRY_MASK2]], %[[C1]], %[[ENTRY_ARG]])
 // CHECK-SAME: {false_target = @block2,
 // CHECK-SAME: operandSegmentSizes = array<i32: 1, 1, 1, 1, 1>,
 // CHECK-SAME: true_target = @block1}

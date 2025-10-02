@@ -461,7 +461,7 @@ def SimtStep_ConditionOp : Op<SimtStep_Dialect, "condition",
 }
 
 def SimtStep_LoopOp : Op<SimtStep_Dialect, "loop",
-    [SingleBlock, NoRegionArguments]> {
+    [SingleBlock]> {
   let summary = "SIMT structured loop";
   let description = [{
     Structured loop op with separate setup and body regions. The "prepare"
