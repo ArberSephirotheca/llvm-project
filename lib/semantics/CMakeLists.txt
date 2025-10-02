@@ -3,4 +3,5 @@ target_sources(simt-step
         ${CMAKE_CURRENT_SOURCE_DIR}/Interpreter.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Runtime.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/StructuredExecutor.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/StructuredInterpreter.cpp
 )
