@@ -10,7 +10,7 @@
 #include "mlir/IR/Value.h"
 #include "mlir/Support/LogicalResult.h"
 
-#include "simt-step/Dialect/SimtStructured/StructuredOps.h"
+// #include "simt-step/Dialect/SimtStructured/StructuredOps.h"
 
 #include <cstdint>
 #include <memory>
@@ -24,6 +24,16 @@
 #include <llvm/ADT/SmallVector.h>
 
 namespace simt {
+namespace structured {
+class BlockOp;
+class BranchOp;
+class CondBranchOp;
+class ReturnOp;
+class MaskPushOp;
+class MaskPopOp;
+class MaskMergeOp;
+} // namespace structured
+
 namespace conversion {
 
 /// Forward declaration of the structured CFG builder.
