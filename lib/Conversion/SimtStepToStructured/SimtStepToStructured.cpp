@@ -338,8 +338,13 @@ static LogicalResult lowerSwitchToCFG(simt::dialect::SwitchOp switchOp) {
   SmallVector<Value> headerOperands;
   headerOperands.reserve(numCarried + numResults);
   headerOperands.append(parentBlock->args_begin(), parentBlock->args_end());
-  headerOperands.append(switchOp.getInitialValues().begin(),
-                        switchOp.getInitialValues().end());
+  for (Value value : switchOp.getInitialValues()) {
+    if (auto arg = mlir::dyn_cast<BlockArgument>(value)) {
+      if (arg.getOwner() == afterBlock)
+        value = parentBlock->getArgument(arg.getArgNumber());
+    }
+    headerOperands.push_back(value);
+  }
   entryBuilder.create<cf::BranchOp>(loc, headerBlock, headerOperands);
 
   OpBuilder headerBuilder(headerBlock, headerBlock->begin());

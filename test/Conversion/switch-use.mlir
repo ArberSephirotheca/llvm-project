@@ -24,26 +24,26 @@ builtin.module {
 
 // CHECK-LABEL: func.func @switch_use
 // CHECK: "simt_struct.block"() ({
-// CHECK:   "simt_struct.branch"(%[[ENTRY_MASK:.*]], %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}) {target = @block1}
+// CHECK:   "simt_struct.branch"(%[[ENTRY_MASK:.*]], %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}) {target = @block1}
 // CHECK: }) {sym_name = "entry"}
 // CHECK: "simt_struct.block"() ({
-// CHECK:   ^bb0(%[[CASE0_MASK:.*]]: i64, %[[CASE0_VAL:.*]]: i32,
+// CHECK:   ^bb0(%[[CASE0_MASK:.*]]: i64, %[[CASE0_SEL:.*]]: i32, %[[CASE0_VAL:.*]]: i32,
 // CHECK-SAME: %[[CASE0_HAS:.*]]: i1, %[[CASE0_EXEC:.*]]: i1, %[[CASE0_DONE:.*]]: i1)
 // CHECK:     %[[POP0:.*]] = "simt_struct.mask_pop"()
 // CHECK:     %[[MERGE0:.*]] = "simt_struct.mask_merge"(%[[CASE0_MASK]])
-// CHECK:     %[[INC0:.*]] = arith.addi %[[CASE0_VAL]], %{{.*}} : i32
-// CHECK:     "simt_struct.cond_branch"(%{{.*}}, %[[MERGE0]], %[[MERGE0]], %[[INC0]], %[[CASE0_HAS]], %[[CASE0_EXEC]], %[[CASE0_DONE]],
-// CHECK-SAME: %[[INC0]], %[[CASE0_HAS]], %[[CASE0_EXEC]], %[[CASE0_DONE]]) {false_target = @block5
+// CHECK:     %[[INC0:.*]] = arith.addi %[[CASE0_SEL]], %{{.*}} : i32
+// CHECK:     "simt_struct.cond_branch"(%{{.*}}, %[[MERGE0]], %[[MERGE0]], %[[CASE0_SEL]], %[[INC0]], %[[CASE0_VAL]], %[[CASE0_HAS]], %[[CASE0_EXEC]],
+// CHECK-SAME: %[[CASE0_SEL]], %[[INC0]], %[[CASE0_VAL]], %[[CASE0_HAS]], %[[CASE0_EXEC]]) {false_target = @block5
 // CHECK: }) {merge_target = @block5, sym_name = "block2"}
 // CHECK: "simt_struct.block"() ({
-// CHECK:   ^bb0(%[[EXIT_MASK:.*]]: i64, %[[EXIT_VAL:.*]]: i32,
+// CHECK:   ^bb0(%[[EXIT_MASK:.*]]: i64, %[[EXIT_SEL:.*]]: i32, %[[EXIT_VAL:.*]]: i32,
 // CHECK-SAME: %[[EXIT_HAS:.*]]: i1, %[[EXIT_EXEC:.*]]: i1, %[[EXIT_DONE:.*]]: i1)
 // CHECK:     %[[POP_EXIT:.*]] = "simt_struct.mask_pop"()
 // CHECK:     %[[MERGE_EXIT:.*]] = "simt_struct.mask_merge"(%[[EXIT_MASK]])
-// CHECK:     "simt_struct.branch"(%[[MERGE_EXIT]], %[[EXIT_VAL]], %[[EXIT_HAS]], %[[EXIT_EXEC]], %[[EXIT_DONE]]) {target = @block6}
+// CHECK:     "simt_struct.branch"(%[[MERGE_EXIT]], %[[EXIT_SEL]], %[[EXIT_VAL]], %[[EXIT_HAS]], %[[EXIT_EXEC]], %[[EXIT_DONE]]) {target = @block6}
 // CHECK: }) {sym_name = "block5"}
 // CHECK: "simt_struct.block"() ({
-// CHECK:   ^bb0(%[[RET_MASK:.*]]: i64, %[[RET_VAL:.*]]: i32,
+// CHECK:   ^bb0(%[[RET_MASK:.*]]: i64, %[[RET_SEL:.*]]: i32, %[[RET_VAL:.*]]: i32,
 // CHECK-SAME: %[[RET_HAS:.*]]: i1, %[[RET_EXEC:.*]]: i1, %[[RET_DONE:.*]]: i1)
 // CHECK:     %[[C4:.*]] = arith.constant 4 : i32
 // CHECK:     %[[USE:.*]] = arith.addi %[[RET_VAL]], %[[C4]] : i32
