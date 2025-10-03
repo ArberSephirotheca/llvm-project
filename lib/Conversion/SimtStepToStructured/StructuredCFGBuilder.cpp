@@ -58,6 +58,9 @@ struct StructuredCFGBuilder::EdgeInfo {
   SmallVector<mlir::Value, 4> maskValues;
   enum Kind { Plain, ConditionalTrue, ConditionalFalse, LoopBackEdge } kind =
       Plain;
+  mlir::Value condition;
+  mlir::Value switchDoneFlag;
+  bool isSwitchFallthrough = false;
 };
 
 struct StructuredCFGBuilder::IfInfo {
@@ -65,6 +68,7 @@ struct StructuredCFGBuilder::IfInfo {
   BlockInfo *parent = nullptr;
   BlockInfo *thenBlock = nullptr;
   BlockInfo *elseBlock = nullptr;
+  mlir::Value condition;
 };
 
 struct StructuredCFGBuilder::LoopInfo {
@@ -72,6 +76,7 @@ struct StructuredCFGBuilder::LoopInfo {
   BlockInfo *parent = nullptr;
   BlockInfo *prepareBlock = nullptr;
   BlockInfo *bodyBlock = nullptr;
+  mlir::Value condition;
   SmallVector<mlir::Value, 4> forwardedToBody;
   SmallVector<mlir::Value, 4> forwardedToExit;
 };
@@ -82,6 +87,17 @@ struct StructuredCFGBuilder::SwitchInfo {
   SmallVector<BlockInfo *, 4> caseBlocks;
   BlockInfo *defaultBlock = nullptr;
   SmallVector<int64_t, 8> caseValues;
+  unsigned payloadCount = 0;
+  bool hasControlFlags = false;
+  struct CaseRecord {
+    BlockInfo *block = nullptr;
+    BlockInfo *nextCase = nullptr;
+    mlir::Value matchSeen;
+    mlir::Value fallthrough;
+    mlir::Value switchDone;
+  };
+  SmallVector<CaseRecord, 4> caseRecords;
+  CaseRecord defaultRecord;
 };
 
 StructuredCFGBuilder::StructuredCFGBuilder(FunctionOpInterface func)
@@ -297,6 +313,51 @@ LogicalResult StructuredCFGBuilder::computePayloads() {
           switchInfo.defaultBlock->payloadSeed.assign(
               yield.getResults().begin(), yield.getResults().end());
     }
+
+    switchInfo.caseRecords.clear();
+    switchInfo.caseRecords.reserve(switchInfo.caseBlocks.size());
+    for (auto [index, caseInfo] : llvm::enumerate(switchInfo.caseBlocks)) {
+      SwitchInfo::CaseRecord record;
+      record.block = caseInfo;
+      record.nextCase = nullptr;
+      if (index + 1 < switchInfo.caseBlocks.size())
+        record.nextCase = switchInfo.caseBlocks[index + 1];
+      else
+        record.nextCase = switchInfo.defaultBlock;
+
+      if (switchInfo.hasControlFlags && caseInfo && caseInfo->original &&
+          !caseInfo->original->empty()) {
+        if (auto yield = llvm::dyn_cast<simt::dialect::YieldOp>(
+                caseInfo->original->getTerminator())) {
+          auto results = yield.getResults();
+          if (results.size() >= switchInfo.payloadCount + 3) {
+            record.matchSeen = results[switchInfo.payloadCount + 0];
+            record.fallthrough = results[switchInfo.payloadCount + 1];
+            record.switchDone = results[switchInfo.payloadCount + 2];
+          }
+        }
+      }
+      switchInfo.caseRecords.push_back(record);
+    }
+
+    switchInfo.defaultRecord = SwitchInfo::CaseRecord();
+    switchInfo.defaultRecord.block = switchInfo.defaultBlock;
+    if (switchInfo.hasControlFlags && switchInfo.defaultBlock &&
+        switchInfo.defaultBlock->original &&
+        !switchInfo.defaultBlock->original->empty()) {
+      if (auto yield = llvm::dyn_cast<simt::dialect::YieldOp>(
+              switchInfo.defaultBlock->original->getTerminator())) {
+        auto results = yield.getResults();
+        if (results.size() >= switchInfo.payloadCount + 3) {
+          switchInfo.defaultRecord.matchSeen =
+              results[switchInfo.payloadCount + 0];
+          switchInfo.defaultRecord.fallthrough =
+              results[switchInfo.payloadCount + 1];
+          switchInfo.defaultRecord.switchDone =
+              results[switchInfo.payloadCount + 2];
+        }
+      }
+    }
   }
 
   // TODO: propagate payloads through yields/terminators to reach a fixed point
@@ -321,6 +382,7 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
         thenEdge.source = &info;
         thenEdge.dest = ifInfo.thenBlock;
         thenEdge.kind = EdgeInfo::ConditionalTrue;
+        thenEdge.condition = ifInfo.condition;
         if (thenEdge.dest && failed(ensurePayloadShape(thenEdge)))
           return failure();
         edges.push_back(std::move(thenEdge));
@@ -329,6 +391,7 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
         elseEdge.source = &info;
         elseEdge.dest = ifInfo.elseBlock;
         elseEdge.kind = EdgeInfo::ConditionalFalse;
+        elseEdge.condition = ifInfo.condition;
         if (elseEdge.dest && failed(ensurePayloadShape(elseEdge)))
           return failure();
         edges.push_back(std::move(elseEdge));
@@ -349,6 +412,7 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
         if (loopInfo.prepareBlock && loopInfo.prepareBlock->original) {
           if (auto *term = loopInfo.prepareBlock->original->getTerminator()) {
             if (auto cond = llvm::dyn_cast<simt::dialect::ConditionOp>(term)) {
+              loopInfo.condition = cond.getCondition();
               EdgeInfo trueEdge;
               trueEdge.source = loopInfo.prepareBlock;
               trueEdge.dest = loopInfo.bodyBlock;
@@ -356,6 +420,7 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
               if (!loopInfo.forwardedToBody.empty())
                 trueEdge.payload.assign(loopInfo.forwardedToBody.begin(),
                                          loopInfo.forwardedToBody.end());
+              trueEdge.condition = cond.getCondition();
               if (trueEdge.dest && failed(ensurePayloadShape(trueEdge)))
                 return failure();
               edges.push_back(std::move(trueEdge));
@@ -366,7 +431,8 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
               falseEdge.kind = EdgeInfo::ConditionalFalse;
               if (!loopInfo.forwardedToExit.empty())
                 falseEdge.payload.assign(loopInfo.forwardedToExit.begin(),
-                                          loopInfo.forwardedToExit.end());
+                                         loopInfo.forwardedToExit.end());
+              falseEdge.condition = cond.getCondition();
               if (falseEdge.dest && failed(ensurePayloadShape(falseEdge)))
                 return failure();
               edges.push_back(std::move(falseEdge));
@@ -415,52 +481,84 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
       if (auto switchIt = switchInfos.find(op); switchIt != switchInfos.end()) {
         const SwitchInfo &switchInfo = switchIt->second;
 
-        for (BlockInfo *caseInfo : switchInfo.caseBlocks) {
-          EdgeInfo caseEdge;
-          caseEdge.source = &info;
-          caseEdge.dest = caseInfo;
-          caseEdge.kind = EdgeInfo::Plain;
-          if (caseEdge.dest && failed(ensurePayloadShape(caseEdge)))
+        for (const auto &record : switchInfo.caseRecords) {
+          BlockInfo *caseInfo = record.block;
+          EdgeInfo caseEntry;
+          caseEntry.source = &info;
+          caseEntry.dest = caseInfo;
+          caseEntry.kind = EdgeInfo::Plain;
+          if (caseEntry.dest && failed(ensurePayloadShape(caseEntry)))
             return failure();
-          edges.push_back(std::move(caseEdge));
+          edges.push_back(std::move(caseEntry));
 
-          if (caseInfo && caseInfo->original)
-            if (auto term = caseInfo->original->getTerminator())
-              if (auto yield = llvm::dyn_cast<simt::dialect::YieldOp>(term)) {
-                EdgeInfo exitEdge;
-                exitEdge.source = caseInfo;
-                exitEdge.dest = switchInfo.parent;
-                exitEdge.kind = EdgeInfo::Plain;
-                exitEdge.payload.assign(yield.getResults().begin(),
-                                        yield.getResults().end());
-                if (exitEdge.dest && failed(ensurePayloadShape(exitEdge)))
-                  return failure();
-                edges.push_back(std::move(exitEdge));
-              }
+          auto emitExitEdge = [&](EdgeInfo::Kind kind, BlockInfo *dest)
+                                  -> LogicalResult {
+            EdgeInfo exitEdge;
+            exitEdge.source = caseInfo;
+            exitEdge.dest = dest;
+            exitEdge.kind = kind;
+            if (caseInfo)
+              exitEdge.payload.assign(caseInfo->payloadSeed.begin(),
+                                      caseInfo->payloadSeed.end());
+            if (kind != EdgeInfo::Plain) {
+              exitEdge.isSwitchFallthrough = true;
+              exitEdge.condition = record.fallthrough;
+              exitEdge.switchDoneFlag = record.switchDone;
+            }
+            if (exitEdge.dest && failed(ensurePayloadShape(exitEdge)))
+              return failure();
+            edges.push_back(std::move(exitEdge));
+            return success();
+          };
+
+          bool canFallthrough = record.nextCase != nullptr &&
+                                switchInfo.hasControlFlags && record.fallthrough &&
+                                record.switchDone;
+
+          if (canFallthrough) {
+            EdgeInfo fallEdge;
+            fallEdge.source = caseInfo;
+            fallEdge.dest = record.nextCase;
+            fallEdge.kind = EdgeInfo::ConditionalTrue;
+            fallEdge.condition = record.fallthrough;
+            fallEdge.switchDoneFlag = record.switchDone;
+            fallEdge.isSwitchFallthrough = true;
+            if (caseInfo)
+              fallEdge.payload.assign(caseInfo->payloadSeed.begin(),
+                                      caseInfo->payloadSeed.end());
+            if (fallEdge.dest && failed(ensurePayloadShape(fallEdge)))
+              return failure();
+            edges.push_back(std::move(fallEdge));
+
+            if (failed(emitExitEdge(EdgeInfo::ConditionalFalse, switchInfo.parent)))
+              return failure();
+          } else {
+            if (failed(emitExitEdge(EdgeInfo::Plain, switchInfo.parent)))
+              return failure();
+          }
         }
 
         if (switchInfo.defaultBlock) {
-          EdgeInfo defaultEdge;
-          defaultEdge.source = &info;
-          defaultEdge.dest = switchInfo.defaultBlock;
-          defaultEdge.kind = EdgeInfo::Plain;
-          if (failed(ensurePayloadShape(defaultEdge)))
+          EdgeInfo defaultEntry;
+          defaultEntry.source = &info;
+          defaultEntry.dest = switchInfo.defaultBlock;
+          defaultEntry.kind = EdgeInfo::Plain;
+          if (failed(ensurePayloadShape(defaultEntry)))
             return failure();
-          edges.push_back(std::move(defaultEdge));
+          edges.push_back(std::move(defaultEntry));
 
-          if (switchInfo.defaultBlock->original)
-            if (auto term = switchInfo.defaultBlock->original->getTerminator())
-              if (auto yield = llvm::dyn_cast<simt::dialect::YieldOp>(term)) {
-                EdgeInfo exitEdge;
-                exitEdge.source = switchInfo.defaultBlock;
-                exitEdge.dest = switchInfo.parent;
-                exitEdge.kind = EdgeInfo::Plain;
-                exitEdge.payload.assign(yield.getResults().begin(),
-                                         yield.getResults().end());
-                if (exitEdge.dest && failed(ensurePayloadShape(exitEdge)))
-                  return failure();
-                edges.push_back(std::move(exitEdge));
-              }
+          if (switchInfo.defaultBlock) {
+            EdgeInfo exitEdge;
+            exitEdge.source = switchInfo.defaultBlock;
+            exitEdge.dest = switchInfo.parent;
+            exitEdge.kind = EdgeInfo::Plain;
+            if (switchInfo.defaultBlock)
+              exitEdge.payload.assign(switchInfo.defaultBlock->payloadSeed.begin(),
+                                       switchInfo.defaultBlock->payloadSeed.end());
+            if (exitEdge.dest && failed(ensurePayloadShape(exitEdge)))
+              return failure();
+            edges.push_back(std::move(exitEdge));
+          }
         }
 
         continue;
@@ -528,6 +626,8 @@ LogicalResult StructuredCFGBuilder::analyseIfOp(BlockInfo &header,
     info.elseBlock = &elseInfo;
   }
 
+  info.condition = ifOp.getCondition();
+
   return success();
 }
 
@@ -563,6 +663,8 @@ LogicalResult StructuredCFGBuilder::analyseLoopOp(BlockInfo &header,
   bodyInfo.requestsMaskPop = true;
   bodyInfo.continueTarget = prepareInfo.original;
 
+  info.condition = nullptr;
+
   return success();
 }
 
@@ -580,6 +682,12 @@ LogicalResult StructuredCFGBuilder::analyseSwitchOp(BlockInfo &header,
   info.caseBlocks.clear();
   info.caseValues.clear();
   info.defaultBlock = nullptr;
+  info.caseRecords.clear();
+  info.defaultRecord = SwitchInfo::CaseRecord();
+
+  unsigned numResults = switchOp.getNumResults();
+  info.hasControlFlags = numResults >= 3;
+  info.payloadCount = info.hasControlFlags ? numResults - 3 : numResults;
 
   header.requestsMaskPush = true;
 
