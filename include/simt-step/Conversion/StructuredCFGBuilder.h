@@ -10,9 +10,6 @@
 #include "mlir/IR/Value.h"
 #include "mlir/Support/LogicalResult.h"
 
-#include "simt-step/Dialect/SimtStructured/StructuredDialect.h"
-
-
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -23,6 +20,16 @@
 #include <llvm/ADT/DenseMap.h>
 #include <llvm/ADT/ArrayRef.h>
 #include <llvm/ADT/SmallVector.h>
+
+namespace simt::structured {
+class BlockOp;
+class BranchOp;
+class CondBranchOp;
+class ReturnOp;
+class MaskPushOp;
+class MaskPopOp;
+class MaskMergeOp;
+} // namespace simt::structured
 
 namespace simt::conversion {
 
@@ -106,7 +113,7 @@ private:
 
     mlir::Operation *originalTerminator = nullptr;
 
-    simt::structured::BlockOp structuredOp;
+    mlir::Operation *structuredOp = nullptr;
     mlir::Block *structuredBody = nullptr;
     mlir::BlockArgument structuredMaskArg;
     mlir::Value currentMask;
@@ -174,6 +181,5 @@ private:
 };
 
 } // namespace conversion
-} // namespace simt
 
 #endif // SIMT_STEP_CONVERSION_STRUCTURED_CFGBUILDER_H
