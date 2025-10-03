@@ -282,7 +282,6 @@ static LogicalResult lowerSwitchToCFG(simt::dialect::SwitchOp switchOp) {
   for (Block *caseBlock : caseBlocks) {
     auto &info = blockControlInfo[caseBlock];
     info.popMask = true;
-    info.pushMask = true;
     info.mergeTarget = exitBlock;
   }
 
@@ -338,11 +337,27 @@ static LogicalResult lowerSwitchToCFG(simt::dialect::SwitchOp switchOp) {
       }
 
       SmallVector<Value, 8> branchOperands(yieldValues.begin(), yieldValues.end());
-      if (nextCase == exitBlock)
-        fallthroughCond = constFalse;
+      Block *fallthroughBlock = nullptr;
+      if (nextCase != exitBlock) {
+        fallthroughBlock = new Block();
+        parentRegion.getBlocks().insert(nextCase->getIterator(), fallthroughBlock);
+        fallthroughBlock->addArguments(switchOp.getResultTypes(), resultLocs);
 
-      createCondBranch(termBuilder, loc, fallthroughCond, nextCase, branchOperands,
+        auto &fallthroughInfo = blockControlInfo[fallthroughBlock];
+        fallthroughInfo.pushMask = true;
+        fallthroughInfo.mergeTarget = exitBlock;
+      } else {
+        fallthroughCond = constFalse;
+      }
+
+      Block *trueDest = fallthroughBlock ? fallthroughBlock : exitBlock;
+      createCondBranch(termBuilder, loc, fallthroughCond, trueDest, branchOperands,
                        exitBlock, branchOperands);
+
+      if (fallthroughBlock) {
+        OpBuilder ftBuilder(fallthroughBlock, fallthroughBlock->begin());
+        ftBuilder.create<cf::BranchOp>(loc, nextCase, fallthroughBlock->getArguments());
+      }
     };
 
     for (auto [index, origCase] : llvm::enumerate(cases)) {
@@ -383,8 +398,10 @@ static LogicalResult lowerStructuredControlToCFG(func::FuncOp func) {
     SmallVector<simt::dialect::SwitchOp, 8> switchOps;
     func.walk([&](simt::dialect::SwitchOp switchOp) { switchOps.push_back(switchOp); });
     for (auto switchOp : llvm::reverse(switchOps)) {
-      if (failed(lowerSwitchToCFG(switchOp)))
+      if (failed(lowerSwitchToCFG(switchOp))) {
+        switchOp.emitError("failed to lower simt.switch to CFG");
         return failure();
+      }
       progress = true;
     }
   }
