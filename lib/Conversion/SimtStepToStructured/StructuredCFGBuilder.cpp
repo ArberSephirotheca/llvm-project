@@ -237,10 +237,21 @@ LogicalResult StructuredCFGBuilder::computePayloads() {
     }
     prepareInfo.payloadSeed.assign(inits.begin(), inits.end());
 
-    if (loopInfo.bodyBlock)
-      loopInfo.bodyBlock->payloadSeed.assign(
-          loopInfo.bodyBlock->blockArgs.begin(),
-          loopInfo.bodyBlock->blockArgs.end());
+    if (loopInfo.bodyBlock) {
+      BlockInfo &bodyInfo = *loopInfo.bodyBlock;
+      bodyInfo.payloadSeed.assign(bodyInfo.blockArgs.begin(),
+                                  bodyInfo.blockArgs.end());
+
+      if (prepareInfo.original) {
+        if (auto *term = prepareInfo.original->getTerminator()) {
+          if (auto cond = llvm::dyn_cast<simt::dialect::ConditionOp>(term)) {
+            mlir::ValueRange forwarded = cond.getForwarded();
+            if (forwarded.size() == bodyInfo.blockArgs.size())
+              bodyInfo.payloadSeed.assign(forwarded.begin(), forwarded.end());
+          }
+        }
+      }
+    }
   }
 
   // Switch headers inherit their initial payload directly from the op.
@@ -265,11 +276,23 @@ LogicalResult StructuredCFGBuilder::computePayloads() {
         continue;
       caseInfo->payloadSeed.assign(caseInfo->blockArgs.begin(),
                                    caseInfo->blockArgs.end());
+      if (caseInfo->original && !caseInfo->original->empty())
+        if (auto yield = llvm::dyn_cast<simt::dialect::YieldOp>(
+                caseInfo->original->getTerminator()))
+          caseInfo->payloadSeed.assign(yield.getResults().begin(),
+                                       yield.getResults().end());
     }
-    if (switchInfo.defaultBlock)
+    if (switchInfo.defaultBlock) {
       switchInfo.defaultBlock->payloadSeed.assign(
           switchInfo.defaultBlock->blockArgs.begin(),
           switchInfo.defaultBlock->blockArgs.end());
+      if (switchInfo.defaultBlock->original &&
+          !switchInfo.defaultBlock->original->empty())
+        if (auto yield = llvm::dyn_cast<simt::dialect::YieldOp>(
+                switchInfo.defaultBlock->original->getTerminator()))
+          switchInfo.defaultBlock->payloadSeed.assign(
+              yield.getResults().begin(), yield.getResults().end());
+    }
   }
 
   // TODO: propagate payloads through yields/terminators to reach a fixed point
@@ -300,7 +323,7 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
 
         EdgeInfo elseEdge;
         elseEdge.source = &info;
-        elseEdge.dest = ifInfo.elseBlock ? ifInfo.elseBlock : nullptr;
+        elseEdge.dest = ifInfo.elseBlock;
         elseEdge.kind = EdgeInfo::ConditionalFalse;
         if (elseEdge.dest && failed(ensurePayloadShape(elseEdge)))
           return failure();
@@ -308,8 +331,91 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
         continue;
       }
 
-      // TODO: enumerate loop and switch edges once payload propagation handles
-      // yields and fallthrough.
+      if (auto loopIt = loopInfos.find(op); loopIt != loopInfos.end()) {
+        const LoopInfo &loopInfo = loopIt->second;
+
+        EdgeInfo entryEdge;
+        entryEdge.source = &info;
+        entryEdge.dest = loopInfo.prepareBlock;
+        entryEdge.kind = EdgeInfo::Plain;
+        if (entryEdge.dest && failed(ensurePayloadShape(entryEdge)))
+          return failure();
+        edges.push_back(std::move(entryEdge));
+
+        if (loopInfo.prepareBlock && loopInfo.prepareBlock->original) {
+          if (auto *term = loopInfo.prepareBlock->original->getTerminator()) {
+            if (auto cond = llvm::dyn_cast<simt::dialect::ConditionOp>(term)) {
+              (void)cond;
+              EdgeInfo trueEdge;
+              trueEdge.source = loopInfo.prepareBlock;
+              trueEdge.dest = loopInfo.bodyBlock;
+              trueEdge.kind = EdgeInfo::ConditionalTrue;
+              if (trueEdge.dest && failed(ensurePayloadShape(trueEdge)))
+                return failure();
+              edges.push_back(std::move(trueEdge));
+
+              EdgeInfo falseEdge;
+              falseEdge.source = loopInfo.prepareBlock;
+              falseEdge.dest = nullptr;
+              falseEdge.kind = EdgeInfo::ConditionalFalse;
+              edges.push_back(std::move(falseEdge));
+            }
+          }
+        }
+
+        if (loopInfo.bodyBlock && loopInfo.bodyBlock->original) {
+          for (Operation &nested : *loopInfo.bodyBlock->original) {
+            if (auto cont = llvm::dyn_cast<simt::dialect::ContinueOp>(&nested)) {
+              (void)cont;
+              EdgeInfo backEdge;
+              backEdge.source = loopInfo.bodyBlock;
+              backEdge.dest = loopInfo.prepareBlock;
+              backEdge.kind = EdgeInfo::LoopBackEdge;
+              if (backEdge.dest && failed(ensurePayloadShape(backEdge)))
+                return failure();
+              edges.push_back(std::move(backEdge));
+              continue;
+            }
+            if (llvm::isa<simt::dialect::BreakOp>(&nested) ||
+                llvm::isa<simt::dialect::YieldOp>(&nested)) {
+              EdgeInfo exitEdge;
+              exitEdge.source = loopInfo.bodyBlock;
+              exitEdge.dest = nullptr;
+              exitEdge.kind = EdgeInfo::Plain;
+              edges.push_back(std::move(exitEdge));
+              continue;
+            }
+          }
+        }
+
+        continue;
+      }
+
+      if (auto switchIt = switchInfos.find(op); switchIt != switchInfos.end()) {
+        const SwitchInfo &switchInfo = switchIt->second;
+
+        for (BlockInfo *caseInfo : switchInfo.caseBlocks) {
+          EdgeInfo caseEdge;
+          caseEdge.source = &info;
+          caseEdge.dest = caseInfo;
+          caseEdge.kind = EdgeInfo::Plain;
+          if (caseEdge.dest && failed(ensurePayloadShape(caseEdge)))
+            return failure();
+          edges.push_back(std::move(caseEdge));
+        }
+
+        if (switchInfo.defaultBlock) {
+          EdgeInfo defaultEdge;
+          defaultEdge.source = &info;
+          defaultEdge.dest = switchInfo.defaultBlock;
+          defaultEdge.kind = EdgeInfo::Plain;
+          if (failed(ensurePayloadShape(defaultEdge)))
+            return failure();
+          edges.push_back(std::move(defaultEdge));
+        }
+
+        continue;
+      }
     }
   }
 
