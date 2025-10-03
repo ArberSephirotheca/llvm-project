@@ -96,6 +96,8 @@ private:
 - Basic structured terminator emission (`branch`/`cond_branch`/`return`) is in
   place for straight-line and conditional blocks; loop body `continue`/`break`
   rewriting remains future work.
+- Cleanup now removes the legacy CFG blocks after structured emission so the
+  new `simt_struct.block`s are the canonical control-flow representation.
 - `computePayloads()` now seeds each block with its formal arguments, marks loop
   prepare blocks with the `simt.loop` init tuple, and remembers the payload
   expected by switch headers; full fixed-point propagation over yields will land

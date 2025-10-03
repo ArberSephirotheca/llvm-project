@@ -747,9 +747,24 @@ LogicalResult StructuredCFGBuilder::emitStructuredBlocks() {
 }
 
 LogicalResult StructuredCFGBuilder::cleanupOriginalCFG() {
-  // TODO: erase the legacy CFG blocks once the structured region is fully
-  // populated.
-  return signalUnimplemented(func);
+  if (blockOrder.empty())
+    return success();
+
+  Block *entryBlock = blockOrder.front();
+
+  for (mlir::Block *origBlock : blockOrder) {
+    auto it = origBlock->begin();
+    while (it != origBlock->end()) {
+      Operation &op = *it++;
+      if (isa<simt::structured::BlockOp>(&op))
+        continue;
+      op.erase();
+    }
+    if (origBlock != entryBlock)
+      origBlock->erase();
+  }
+
+  return success();
 }
 
 LogicalResult StructuredCFGBuilder::emitStructuredBlock(BlockInfo &info) {
