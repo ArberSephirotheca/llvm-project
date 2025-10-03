@@ -56,21 +56,49 @@ SimtStepToStructuredPass::runOnOperation():
 ```c++
 class StructuredCFGBuilder {
 public:
-  explicit StructuredCFGBuilder(func::FuncOp func);
+  explicit StructuredCFGBuilder(FunctionOpInterface func);
   LogicalResult build();
 private:
   LogicalResult analyseBlocks();
   LogicalResult computePayloads();
+  LogicalResult enumerateEdges();
   LogicalResult emitStructuredBlocks();
-  void emitTerminator(const EdgeInfo &edge,
-                      simt::structured::BlockOp destBlock);
+  LogicalResult cleanupOriginalCFG();
 
-  func::FuncOp func;
-  DenseMap<Block *, BlockInfo> blockInfos;
-  SmallVector<EdgeInfo> edges;
-  IRMapping mapper;
+  LogicalResult emitStructuredBlock(BlockInfo &info);
+  LogicalResult emitStructuredTerminator(BlockInfo &source,
+                                         const EdgeInfo &edge);
+
+  LogicalResult ensurePayloadShape(EdgeInfo &edge);
+  LogicalResult propagatePayload(BlockInfo &source, BlockInfo &dest,
+                                 llvm::ArrayRef<Value> values);
+  LogicalResult materialiseMaskEntry(BlockInfo &info);
+  LogicalResult materialiseMaskExit(BlockInfo &info);
+
+  FunctionOpInterface func;
+  llvm::SmallVector<Block *> blockOrder;
+  llvm::DenseMap<Block *, BlockInfo> blockInfos;
+  llvm::SmallVector<EdgeInfo> edges;
+  std::unique_ptr<IRMapping> mapper;
+  std::unique_ptr<DominanceInfo> domInfo;
 };
 ```
+
+## Current Skeleton (July 2025)
+- The header now forward-declares `BlockInfo`, `EdgeInfo`, and `SwitchCaseInfo`
+  so helpers remain private implementation details.
+- `build()` wires the staged pipeline (analyse → payload → edges → emit →
+  cleanup) but each stage currently returns a `signalUnimplemented` failure to
+  keep behaviour identical to the legacy lowering until functionality lands.
+- `BlockInfo` records the original block pointer, carried argument types,
+  payload seeds, requested mask operations, and the eventual structured block
+  handle.
+- `EdgeInfo` captures source/destination `BlockInfo` pointers plus the payload
+  tuple that must be forwarded along that terminator; an enum distinguishes
+  plain branches, conditional arms, and loop back-edges.
+- Helper stubs (`analyseIfOp`, `analyseLoopOp`, `materialiseMaskEntry`, etc.)
+  are in place with TODO comments that map directly onto the build steps above
+  so incremental implementations can focus on one concern at a time.
 
 ## Migration Plan
 1. Introduce the builder alongside the existing lowering.
@@ -78,4 +106,3 @@ private:
 3. Gradually move loop/switch handling into the builder.
 4. Delete legacy helpers once all tests pass.
 5. Document the new pipeline and add regression tests for loop/switch interactions.
-
