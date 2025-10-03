@@ -362,11 +362,13 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
 
               EdgeInfo falseEdge;
               falseEdge.source = loopInfo.prepareBlock;
-              falseEdge.dest = nullptr;
+              falseEdge.dest = loopInfo.parent;
               falseEdge.kind = EdgeInfo::ConditionalFalse;
               if (!loopInfo.forwardedToExit.empty())
                 falseEdge.payload.assign(loopInfo.forwardedToExit.begin(),
                                           loopInfo.forwardedToExit.end());
+              if (falseEdge.dest && failed(ensurePayloadShape(falseEdge)))
+                return failure();
               edges.push_back(std::move(falseEdge));
             }
           }
@@ -391,7 +393,7 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
                 llvm::isa<simt::dialect::YieldOp>(&nested)) {
               EdgeInfo exitEdge;
               exitEdge.source = loopInfo.bodyBlock;
-              exitEdge.dest = nullptr;
+              exitEdge.dest = loopInfo.parent;
               exitEdge.kind = EdgeInfo::Plain;
               if (auto breakOp = llvm::dyn_cast<simt::dialect::BreakOp>(&nested))
                 exitEdge.payload.assign(breakOp->getOperands().begin(),
@@ -399,6 +401,8 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
               else if (auto yieldOp = llvm::dyn_cast<simt::dialect::YieldOp>(&nested))
                 exitEdge.payload.assign(yieldOp->getOperands().begin(),
                                         yieldOp->getOperands().end());
+              if (exitEdge.dest && failed(ensurePayloadShape(exitEdge)))
+                return failure();
               edges.push_back(std::move(exitEdge));
               continue;
             }
@@ -419,6 +423,20 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
           if (caseEdge.dest && failed(ensurePayloadShape(caseEdge)))
             return failure();
           edges.push_back(std::move(caseEdge));
+
+          if (caseInfo && caseInfo->original)
+            if (auto term = caseInfo->original->getTerminator())
+              if (auto yield = llvm::dyn_cast<simt::dialect::YieldOp>(term)) {
+                EdgeInfo exitEdge;
+                exitEdge.source = caseInfo;
+                exitEdge.dest = switchInfo.parent;
+                exitEdge.kind = EdgeInfo::Plain;
+                exitEdge.payload.assign(yield.getResults().begin(),
+                                        yield.getResults().end());
+                if (exitEdge.dest && failed(ensurePayloadShape(exitEdge)))
+                  return failure();
+                edges.push_back(std::move(exitEdge));
+              }
         }
 
         if (switchInfo.defaultBlock) {
@@ -429,6 +447,20 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
           if (failed(ensurePayloadShape(defaultEdge)))
             return failure();
           edges.push_back(std::move(defaultEdge));
+
+          if (switchInfo.defaultBlock->original)
+            if (auto term = switchInfo.defaultBlock->original->getTerminator())
+              if (auto yield = llvm::dyn_cast<simt::dialect::YieldOp>(term)) {
+                EdgeInfo exitEdge;
+                exitEdge.source = switchInfo.defaultBlock;
+                exitEdge.dest = switchInfo.parent;
+                exitEdge.kind = EdgeInfo::Plain;
+                exitEdge.payload.assign(yield.getResults().begin(),
+                                         yield.getResults().end());
+                if (exitEdge.dest && failed(ensurePayloadShape(exitEdge)))
+                  return failure();
+                edges.push_back(std::move(exitEdge));
+              }
         }
 
         continue;
