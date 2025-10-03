@@ -250,7 +250,8 @@ static LogicalResult lowerSwitchToCFG(simt::dialect::SwitchOp switchOp) {
   Block *parentBlock = switchOp->getBlock();
 
   Block *afterBlock = parentBlock->splitBlock(switchOp);
-  SmallVector<Location> resultLocs(switchOp.getNumResults(), loc);
+  unsigned numResults = switchOp.getNumResults();
+  SmallVector<Location> resultLocs(numResults, loc);
   afterBlock->addArguments(switchOp.getResultTypes(), resultLocs);
 
   Region &parentRegion = *parentBlock->getParent();
@@ -262,6 +263,19 @@ static LogicalResult lowerSwitchToCFG(simt::dialect::SwitchOp switchOp) {
   parentRegion.getBlocks().insert(afterBlock->getIterator(), exitBlock);
   exitBlock->addArguments(switchOp.getResultTypes(), resultLocs);
 
+  SmallVector<DenseMap<Block *, Value>> blockValueForResult(numResults);
+  auto registerBlockArgs = [&](Block *block) {
+    if (numResults == 0)
+      return;
+    auto args = block->getArguments();
+    for (auto [idx, arg] : llvm::enumerate(args))
+      blockValueForResult[idx][block] = arg;
+  };
+
+  registerBlockArgs(afterBlock);
+  registerBlockArgs(headerBlock);
+  registerBlockArgs(exitBlock);
+
   SmallVector<Block *, 4> caseBlocks;
   Region &cases = switchOp.getCaseBody();
   for (Block &origCaseInit : cases) {
@@ -270,6 +284,7 @@ static LogicalResult lowerSwitchToCFG(simt::dialect::SwitchOp switchOp) {
     parentRegion.getBlocks().insert(exitBlock->getIterator(), caseBlock);
     caseBlock->addArguments(switchOp.getResultTypes(), resultLocs);
     caseBlocks.push_back(caseBlock);
+    registerBlockArgs(caseBlock);
   }
 
   auto &headerInfo = blockControlInfo[headerBlock];
@@ -346,6 +361,7 @@ static LogicalResult lowerSwitchToCFG(simt::dialect::SwitchOp switchOp) {
         auto &fallthroughInfo = blockControlInfo[fallthroughBlock];
         fallthroughInfo.pushMask = true;
         fallthroughInfo.mergeTarget = exitBlock;
+        registerBlockArgs(fallthroughBlock);
       } else {
         fallthroughCond = constFalse;
       }
@@ -367,7 +383,20 @@ static LogicalResult lowerSwitchToCFG(simt::dialect::SwitchOp switchOp) {
     }
   }
 
-  switchOp.replaceAllUsesWith(afterBlock->getArguments());
+  if (numResults != 0) {
+    for (auto [idx, result] : llvm::enumerate(switchOp.getResults())) {
+      Value fallback = afterBlock->getArgument(idx);
+      auto &valueMap = blockValueForResult[idx];
+      for (auto &use : llvm::make_early_inc_range(result.getUses())) {
+        Block *useBlock = use.getOwner()->getBlock();
+        Value replacement = fallback;
+        if (auto it = valueMap.find(useBlock); it != valueMap.end())
+          replacement = it->second;
+        use.set(replacement);
+      }
+    }
+  }
+
   switchOp.erase();
   return success();
 }

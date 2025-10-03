@@ -35,7 +35,9 @@ builtin.module {
 // CHECK:     %[[FALSE0:.*]] = arith.constant false
 // CHECK:     %[[NOT_DONE0:.*]] = arith.cmpi eq, %[[CASE0_DONE]], %[[FALSE0]]
 // CHECK:     %[[HEAD_EXEC0:.*]] = arith.andi %[[CASE0_EXEC]], %[[NOT_DONE0]]
-// CHECK:     "simt_struct.cond_branch"(%[[HEAD_EXEC0]], %[[CASE0_MERGE]], %[[CASE0_MERGE]], %[[CASE0_VAL]], %[[CASE0_HAS]], %[[CASE0_EXEC]], %[[CASE0_DONE]], %[[CASE0_VAL]], %[[CASE0_HAS]], %[[CASE0_EXEC]], %[[CASE0_DONE]]) {true_target = @block3, false_target = @block5}
+// CHECK:     "simt_struct.cond_branch"(%[[HEAD_EXEC0]], %[[CASE0_MERGE]], %[[CASE0_MERGE]], %[[CASE0_VAL]], %[[CASE0_HAS]], %[[CASE0_EXEC]], %[[CASE0_DONE]], %[[CASE0_VAL]], %[[CASE0_HAS]], %[[CASE0_EXEC]], %[[CASE0_DONE]])
+// CHECK-SAME: {false_target = @block5,
+// CHECK-SAME: true_target = @block3}
 // CHECK: }) {merge_target = @block5, sym_name = "block2"}
 // CHECK: "simt_struct.block"() ({
 // CHECK:   ^bb0(%[[FALL_MASK:.*]]: i64, %[[FALL_VAL:.*]]: i32, %[[FALL_HAS:.*]]: i1, %[[FALL_EXEC:.*]]: i1, %[[FALL_DONE:.*]]: i1):
@@ -46,7 +48,9 @@ builtin.module {
 // CHECK:   ^bb0(%[[CASE1_MASK:.*]]: i64, %[[CASE1_VAL:.*]]: i32, %[[CASE1_HAS:.*]]: i1, %[[CASE1_EXEC:.*]]: i1, %[[CASE1_DONE:.*]]: i1):
 // CHECK:     %[[CASE1_POP:.*]] = "simt_struct.mask_pop"()
 // CHECK:     %[[CASE1_MERGE:.*]] = "simt_struct.mask_merge"(%[[CASE1_MASK]])
-// CHECK:     "simt_struct.cond_branch"(%{{.*}}, %[[CASE1_MERGE]], %[[CASE1_MERGE]], %[[CASE1_VAL]], %[[CASE1_HAS]], %[[CASE1_EXEC]], %[[CASE1_DONE]], %[[CASE1_VAL]], %[[CASE1_HAS]], %[[CASE1_EXEC]], %[[CASE1_DONE]]) {false_target = @block5}
+// CHECK:     "simt_struct.cond_branch"(%{{.*}}, %[[CASE1_MERGE]], %[[CASE1_MERGE]], %[[CASE1_VAL]], %[[CASE1_HAS]], %[[CASE1_EXEC]], %[[CASE1_DONE]], %[[CASE1_VAL]], %[[CASE1_HAS]], %[[CASE1_EXEC]], %[[CASE1_DONE]])
+// CHECK-SAME: {false_target = @block5
+// CHECK-SAME: true_target = @block5}
 // CHECK: }) {merge_target = @block5, sym_name = "block4"}
 // CHECK: "simt_struct.block"() ({
 // CHECK:   ^bb0(%[[EXIT_MASK:.*]]: i64, %[[EXIT_VAL:.*]]: i32, %[[EXIT_HAS:.*]]: i1, %[[EXIT_EXEC:.*]]: i1, %[[EXIT_DONE:.*]]: i1):
