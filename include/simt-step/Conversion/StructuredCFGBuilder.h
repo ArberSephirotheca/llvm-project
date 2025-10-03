@@ -80,7 +80,6 @@ private:
     BlockInfo *parent = nullptr;
     BlockInfo *prepareBlock = nullptr;
     BlockInfo *bodyBlock = nullptr;
-    mlir::Value condition;
     llvm::SmallVector<mlir::Value, 4> forwardedToBody;
     llvm::SmallVector<mlir::Value, 4> forwardedToExit;
   };

@@ -214,9 +214,8 @@ LogicalResult StructuredCFGBuilder::computePayloads() {
         if (auto *term = prepareInfo.original->getTerminator()) {
           if (auto cond = llvm::dyn_cast<simt::dialect::ConditionOp>(term)) {
             mlir::ValueRange forwarded = cond.getForwarded();
-            if (forwarded.size() == bodyInfo.blockArgs.size()) {
+            if (forwarded.size() == bodyInfo.blockArgs.size())
               bodyInfo.payloadSeed.assign(forwarded.begin(), forwarded.end());
-            }
             loopInfo.forwardedToBody.clear();
             loopInfo.forwardedToBody.append(forwarded.begin(), forwarded.end());
             loopInfo.forwardedToExit.clear();
