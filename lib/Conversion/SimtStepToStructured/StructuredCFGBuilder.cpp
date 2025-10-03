@@ -43,7 +43,8 @@ struct StructuredCFGBuilder::BlockInfo {
 
   simt::structured::BlockOp structuredOp;
   mlir::Block *structuredBody = nullptr;
-  mlir::BlockArgument structuredMask;
+  mlir::BlockArgument structuredMaskArg;
+  mlir::Value currentMask;
   SmallVector<mlir::BlockArgument, 4> structuredArgs;
 
   mlir::Block *mergeTarget = nullptr;
@@ -207,7 +208,8 @@ LogicalResult StructuredCFGBuilder::analyseBlocks() {
     info.outgoingEdges.clear();
     info.structuredOp = nullptr;
     info.structuredBody = nullptr;
-    info.structuredMask = nullptr;
+    info.structuredMaskArg = nullptr;
+    info.currentMask = nullptr;
     info.structuredArgs.clear();
     info.originalTerminator = nullptr;
     if (index == 0)
@@ -620,7 +622,8 @@ LogicalResult StructuredCFGBuilder::emitStructuredBlocks() {
                                                              mlir::Value());
     info->structuredOp = blockOp;
     info->structuredBody = &blockOp.getBody().front();
-    info->structuredMask = blockOp.getMaskArgument();
+    info->structuredMaskArg = blockOp.getMaskArgument();
+    info->currentMask = info->structuredMaskArg;
     info->structuredArgs.clear();
     info->originalTerminator = info->original ? info->original->getTerminator()
                                               : nullptr;
@@ -662,7 +665,8 @@ LogicalResult StructuredCFGBuilder::emitStructuredBlocks() {
     else
       blockOp->removeAttr(blockOp.getContinueTargetAttrName());
 
-    // TODO: insert mask push/pop based on requestsMaskPush/Pop before cloning.
+    if (failed(materialiseMaskEntry(*info)))
+      return failure();
 
     OpBuilder bodyBuilder(info->structuredBody,
                           info->structuredBody->begin());
@@ -671,7 +675,7 @@ LogicalResult StructuredCFGBuilder::emitStructuredBlocks() {
         if (isa<cf::BranchOp, cf::CondBranchOp, func::ReturnOp>(&op))
           continue;
         if (auto active = dyn_cast<simt::dialect::ActiveMaskOp>(&op)) {
-          mapper->map(active.getResult(), info->structuredMask);
+          mapper->map(active.getResult(), info->currentMask);
           continue;
         }
         Operation *cloned = bodyBuilder.clone(op, *mapper);
@@ -874,15 +878,54 @@ LogicalResult StructuredCFGBuilder::propagatePayload(
 }
 
 LogicalResult StructuredCFGBuilder::materialiseMaskEntry(BlockInfo &info) {
-  (void)info;
-  // TODO: insert `mask_push`/`mask_merge` ops for the structured block.
-  return signalUnimplemented(func);
+  if (!info.structuredBody)
+    return success();
+
+  OpBuilder builder(info.structuredBody, info.structuredBody->begin());
+  Location loc = func.getLoc();
+  if (info.original && !info.original->empty())
+    loc = info.original->front().getLoc();
+
+  Value mask = info.currentMask ? info.currentMask : info.structuredMaskArg;
+  Operation *lastOp = nullptr;
+
+  if (info.requestsMaskPop) {
+    auto pop = builder.create<simt::structured::MaskPopOp>(loc,
+                                                           mask.getType());
+    lastOp = pop.getOperation();
+    auto merge = builder.create<simt::structured::MaskMergeOp>(
+        loc, mask.getType(), info.structuredMaskArg);
+    mask = merge.getMerged();
+    lastOp = merge.getOperation();
+  }
+
+  auto getTargetAttr = [&](mlir::Block *target) -> FlatSymbolRefAttr {
+    if (!target)
+      return FlatSymbolRefAttr();
+    if (BlockInfo *targetInfo = lookupBlockInfo(target))
+      if (targetInfo->structuredOp)
+        return builder.getSymbolRefAttr(targetInfo->structuredOp.getSymName());
+    return FlatSymbolRefAttr();
+  };
+
+  if (info.requestsMaskPush) {
+    if (lastOp)
+      builder.setInsertionPointAfter(lastOp);
+    else
+      builder.setInsertionPointToStart(info.structuredBody);
+    auto mergeAttr = getTargetAttr(info.mergeTarget);
+    auto continueAttr = getTargetAttr(info.continueTarget);
+    builder.create<simt::structured::MaskPushOp>(loc, mask, mergeAttr,
+                                                 continueAttr, IntegerAttr());
+  }
+
+  info.currentMask = mask;
+  return success();
 }
 
 LogicalResult StructuredCFGBuilder::materialiseMaskExit(BlockInfo &info) {
   (void)info;
-  // TODO: add `mask_pop` when a block represents a merge point.
-  return signalUnimplemented(func);
+  return success();
 }
 
 } // namespace simt::conversion
