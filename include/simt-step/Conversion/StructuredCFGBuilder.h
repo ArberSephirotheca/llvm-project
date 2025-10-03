@@ -3,6 +3,7 @@
 
 #include "mlir/Support/LogicalResult.h"
 
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <utility>
@@ -47,7 +48,9 @@ public:
 private:
   struct BlockInfo;
   struct EdgeInfo;
-  struct SwitchCaseInfo;
+  struct IfInfo;
+  struct LoopInfo;
+  struct SwitchInfo;
 
   mlir::LogicalResult analyseBlocks();
   mlir::LogicalResult computePayloads();
@@ -67,6 +70,7 @@ private:
   /// Pull original blocks in source order so we can map them back later.
   void collectOriginalBlocks();
 
+  BlockInfo &getOrCreateBlockInfo(mlir::Block *block);
   BlockInfo *lookupBlockInfo(mlir::Block *block);
   const BlockInfo *lookupBlockInfo(mlir::Block *block) const;
 
@@ -90,6 +94,10 @@ private:
   /// Scratch storage used while cloning ops into structured blocks.
   std::unique_ptr<mlir::IRMapping> mapper;
   std::unique_ptr<mlir::DominanceInfo> domInfo;
+
+  llvm::DenseMap<mlir::Operation *, IfInfo> ifInfos;
+  llvm::DenseMap<mlir::Operation *, LoopInfo> loopInfos;
+  llvm::DenseMap<mlir::Operation *, SwitchInfo> switchInfos;
 };
 
 } // namespace conversion

@@ -1,6 +1,7 @@
 #include "simt-step/Conversion/StructuredCFGBuilder.h"
 
 #include "simt-step/Dialect/SimtStructured/StructuredDialect.h"
+#include "simt-step/Dialect/SimtStep/SimtStepDialect.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/FunctionInterfaces.h"
@@ -12,6 +13,8 @@
 #include "mlir/IR/Operation.h"
 #include "mlir/IR/Region.h"
 #include "mlir/IR/Value.h"
+
+#include <llvm/Support/Casting.h>
 
 #include <llvm/ADT/StringRef.h>
 
@@ -36,6 +39,7 @@ struct StructuredCFGBuilder::BlockInfo {
   SmallVector<mlir::Type, 4> carriedTypes;
   SmallVector<mlir::Value, 4> payloadSeed;
   SmallVector<mlir::BlockArgument, 4> blockArgs;
+  SmallVector<mlir::Operation *, 4> controlOps;
 
   simt::structured::BlockOp structuredOp;
   mlir::Block *structuredBody = nullptr;
@@ -56,10 +60,26 @@ struct StructuredCFGBuilder::EdgeInfo {
       Plain;
 };
 
-struct StructuredCFGBuilder::SwitchCaseInfo {
-  BlockInfo *header = nullptr;
-  SmallVector<BlockInfo *, 4> cases;
-  BlockInfo *defaultCase = nullptr;
+struct StructuredCFGBuilder::IfInfo {
+  mlir::Operation *op = nullptr;
+  BlockInfo *parent = nullptr;
+  BlockInfo *thenBlock = nullptr;
+  BlockInfo *elseBlock = nullptr;
+};
+
+struct StructuredCFGBuilder::LoopInfo {
+  mlir::Operation *op = nullptr;
+  BlockInfo *parent = nullptr;
+  BlockInfo *prepareBlock = nullptr;
+  BlockInfo *bodyBlock = nullptr;
+};
+
+struct StructuredCFGBuilder::SwitchInfo {
+  mlir::Operation *op = nullptr;
+  BlockInfo *parent = nullptr;
+  SmallVector<BlockInfo *, 4> caseBlocks;
+  BlockInfo *defaultBlock = nullptr;
+  SmallVector<int64_t, 8> caseValues;
 };
 
 StructuredCFGBuilder::StructuredCFGBuilder(FunctionOpInterface func)
@@ -93,8 +113,41 @@ LogicalResult StructuredCFGBuilder::build() {
 
 void StructuredCFGBuilder::collectOriginalBlocks() {
   blockOrder.clear();
-  for (Block &block : func.getBlocks())
-    blockOrder.push_back(&block);
+  if (!func)
+    return;
+
+  SmallVector<Region *, 8> worklist;
+  for (Region &region : func->getOperation()->getRegions())
+    worklist.push_back(&region);
+
+  while (!worklist.empty()) {
+    Region *region = worklist.pop_back_val();
+    if (!region)
+      continue;
+    for (Block &block : *region) {
+      blockOrder.push_back(&block);
+      for (Operation &nestedOp : block)
+        for (Region &nestedRegion : nestedOp.getRegions())
+          if (!nestedRegion.empty())
+            worklist.push_back(&nestedRegion);
+    }
+  }
+}
+
+StructuredCFGBuilder::BlockInfo &
+StructuredCFGBuilder::getOrCreateBlockInfo(mlir::Block *block) {
+  auto [it, inserted] = blockInfos.try_emplace(block);
+  BlockInfo &info = it->second;
+  if (inserted) {
+    info.original = block;
+    info.carriedTypes.reserve(block->getNumArguments());
+    info.blockArgs.reserve(block->getNumArguments());
+    for (mlir::BlockArgument arg : block->getArguments()) {
+      info.carriedTypes.push_back(arg.getType());
+      info.blockArgs.push_back(arg);
+    }
+  }
+  return info;
 }
 
 StructuredCFGBuilder::BlockInfo *
@@ -112,20 +165,48 @@ StructuredCFGBuilder::lookupBlockInfo(mlir::Block *block) const {
 }
 
 LogicalResult StructuredCFGBuilder::analyseBlocks() {
-  for (mlir::Block *block : blockOrder) {
-    BlockInfo &info = blockInfos[block];
-    info.original = block;
-    info.carriedTypes.reserve(block->getNumArguments());
-    for (mlir::BlockArgument arg : block->getArguments())
-      info.carriedTypes.push_back(arg.getType());
+  blockInfos.clear();
+  ifInfos.clear();
+  loopInfos.clear();
+  switchInfos.clear();
 
-    // TODO: inspect structured ops inside the block and record merge/continue
-    // intent.
+  for (mlir::Block *block : blockOrder)
+    (void)getOrCreateBlockInfo(block);
+
+  for (mlir::Block *block : blockOrder) {
+    BlockInfo &info = getOrCreateBlockInfo(block);
+    info.mergeTarget = nullptr;
+    info.continueTarget = nullptr;
+    info.requestsMaskPush = false;
+    info.requestsMaskPop = false;
+    info.payloadSeed.clear();
+    info.controlOps.clear();
+
+    for (mlir::Operation &op : *block) {
+      if (auto ifOp = llvm::dyn_cast<simt::dialect::IfOp>(&op)) {
+        info.controlOps.push_back(&op);
+        if (failed(analyseIfOp(info, &op)))
+          return failure();
+        continue;
+      }
+      if (auto loopOp = llvm::dyn_cast<simt::dialect::LoopOp>(&op)) {
+        (void)loopOp;
+        info.controlOps.push_back(&op);
+        if (failed(analyseLoopOp(info, &op)))
+          return failure();
+        continue;
+      }
+      if (auto switchOp = llvm::dyn_cast<simt::dialect::SwitchOp>(&op)) {
+        (void)switchOp;
+        info.controlOps.push_back(&op);
+        if (failed(analyseSwitchOp(info, &op)))
+          return failure();
+        continue;
+      }
+    }
   }
 
-  // TODO: walk structured control ops (`simt.if`, `simt.loop`, `simt.switch`)
-  // so BlockInfo captures per-header metadata for payload seeding.
-  return signalUnimplemented(func);
+  return success();
 }
 
 LogicalResult StructuredCFGBuilder::computePayloads() {
@@ -169,26 +250,123 @@ LogicalResult StructuredCFGBuilder::emitStructuredTerminator(
 
 LogicalResult StructuredCFGBuilder::analyseIfOp(BlockInfo &header,
                                                  mlir::Operation *op) {
-  (void)header;
-  (void)op;
-  // TODO: capture `simt.if` merge target, else payloads, and record edges.
-  return signalUnimplemented(func);
+  auto ifOp = llvm::dyn_cast<simt::dialect::IfOp>(op);
+  if (!ifOp) {
+    op->emitOpError("expected simt_step.if operation during analysis");
+    return failure();
+  }
+
+  IfInfo &info = ifInfos[op];
+  info.op = op;
+  info.parent = &header;
+
+  header.requestsMaskPush = true;
+  header.requestsMaskPop = true;
+
+  mlir::Region &thenRegion = ifOp.getThenRegion();
+  if (thenRegion.empty()) {
+    op->emitOpError("then region must contain a block");
+    return failure();
+  }
+
+  BlockInfo &thenInfo = getOrCreateBlockInfo(&thenRegion.front());
+  info.thenBlock = &thenInfo;
+
+  mlir::Region &elseRegion = ifOp.getElseRegion();
+  if (!elseRegion.empty()) {
+    BlockInfo &elseInfo = getOrCreateBlockInfo(&elseRegion.front());
+    info.elseBlock = &elseInfo;
+  }
+
+  return success();
 }
 
 LogicalResult StructuredCFGBuilder::analyseLoopOp(BlockInfo &header,
                                                    mlir::Operation *op) {
-  (void)header;
-  (void)op;
-  // TODO: capture loop init payload, continue target, and carried values.
-  return signalUnimplemented(func);
+  auto loopOp = llvm::dyn_cast<simt::dialect::LoopOp>(op);
+  if (!loopOp) {
+    op->emitOpError("expected simt_step.loop operation during analysis");
+    return failure();
+  }
+
+  LoopInfo &info = loopInfos[op];
+  info.op = op;
+  info.parent = &header;
+
+  mlir::Region &prepareRegion = loopOp.getPrepareRegion();
+  mlir::Region &bodyRegion = loopOp.getBodyRegion();
+  if (prepareRegion.empty() || bodyRegion.empty()) {
+    op->emitOpError("loop regions must contain a single block");
+    return failure();
+  }
+
+  BlockInfo &prepareInfo = getOrCreateBlockInfo(&prepareRegion.front());
+  BlockInfo &bodyInfo = getOrCreateBlockInfo(&bodyRegion.front());
+  info.prepareBlock = &prepareInfo;
+  info.bodyBlock = &bodyInfo;
+
+  prepareInfo.requestsMaskPush = true;
+  prepareInfo.requestsMaskPop = true;
+  prepareInfo.continueTarget = prepareInfo.original;
+
+  bodyInfo.requestsMaskPush = true;
+  bodyInfo.requestsMaskPop = true;
+  bodyInfo.continueTarget = prepareInfo.original;
+
+  return success();
 }
 
 LogicalResult StructuredCFGBuilder::analyseSwitchOp(BlockInfo &header,
                                                      mlir::Operation *op) {
-  (void)header;
-  (void)op;
-  // TODO: gather per-case payloads, fallthrough info, and default edge.
-  return signalUnimplemented(func);
+  auto switchOp = llvm::dyn_cast<simt::dialect::SwitchOp>(op);
+  if (!switchOp) {
+    op->emitOpError("expected simt_step.switch operation during analysis");
+    return failure();
+  }
+
+  SwitchInfo &info = switchInfos[op];
+  info.op = op;
+  info.parent = &header;
+  info.caseBlocks.clear();
+  info.caseValues.clear();
+  info.defaultBlock = nullptr;
+
+  header.requestsMaskPush = true;
+
+  auto caseValuesAttr = switchOp.getCaseValuesAttr();
+  if (!caseValuesAttr) {
+    op->emitOpError("missing case_values attribute");
+    return failure();
+  }
+  auto caseValues = caseValuesAttr.asArrayRef();
+
+  mlir::Region &caseRegion = switchOp.getCaseBody();
+  if (caseRegion.empty()) {
+    op->emitOpError("switch body region must not be empty");
+    return failure();
+  }
+
+  if (caseRegion.getBlocks().size() != caseValues.size()) {
+    op->emitOpError("case_values count must match number of case blocks");
+    return failure();
+  }
+
+  info.caseValues.append(caseValues.begin(), caseValues.end());
+
+  unsigned blockIndex = 0;
+  for (mlir::Block &caseBlock : caseRegion) {
+    BlockInfo &caseInfo = getOrCreateBlockInfo(&caseBlock);
+    caseInfo.requestsMaskPop = true;
+
+    if (blockIndex + 1 == caseValues.size())
+      info.defaultBlock = &caseInfo;
+    else
+      info.caseBlocks.push_back(&caseInfo);
+
+    ++blockIndex;
+  }
+
+  return success();
 }
 
 LogicalResult StructuredCFGBuilder::ensurePayloadShape(EdgeInfo &edge) {

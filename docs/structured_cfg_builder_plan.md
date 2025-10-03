@@ -85,8 +85,11 @@ private:
 ```
 
 ## Current Skeleton (July 2025)
-- The header now forward-declares `BlockInfo`, `EdgeInfo`, and `SwitchCaseInfo`
-  so helpers remain private implementation details.
+- The analysis helpers populate `BlockInfo` for every block (including nested
+  `simt.if`/`loop`/`switch` regions) and stash coarse metadata in per-op maps so
+  later stages can recover case/loop structure without mutating the CFG.
+- The header now forward-declares `BlockInfo`, `EdgeInfo`, and operation-specific
+  info records so helpers remain private implementation details.
 - `build()` wires the staged pipeline (analyse → payload → edges → emit →
   cleanup) but each stage currently returns a `signalUnimplemented` failure to
   keep behaviour identical to the legacy lowering until functionality lands.
