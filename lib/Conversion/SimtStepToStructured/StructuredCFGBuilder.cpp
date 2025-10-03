@@ -278,9 +278,42 @@ LogicalResult StructuredCFGBuilder::computePayloads() {
 }
 
 LogicalResult StructuredCFGBuilder::enumerateEdges() {
-  // TODO: build one EdgeInfo per terminator using the payload map assembled by
-  // computePayloads().
-  return signalUnimplemented(func);
+  edges.clear();
+
+  for (mlir::Block *block : blockOrder) {
+    BlockInfo &info = getOrCreateBlockInfo(block);
+
+    for (mlir::Operation *op : info.controlOps) {
+      if (!op)
+        continue;
+
+      if (auto ifIt = ifInfos.find(op); ifIt != ifInfos.end()) {
+        const IfInfo &ifInfo = ifIt->second;
+
+        EdgeInfo thenEdge;
+        thenEdge.source = &info;
+        thenEdge.dest = ifInfo.thenBlock;
+        thenEdge.kind = EdgeInfo::ConditionalTrue;
+        if (thenEdge.dest && failed(ensurePayloadShape(thenEdge)))
+          return failure();
+        edges.push_back(std::move(thenEdge));
+
+        EdgeInfo elseEdge;
+        elseEdge.source = &info;
+        elseEdge.dest = ifInfo.elseBlock ? ifInfo.elseBlock : nullptr;
+        elseEdge.kind = EdgeInfo::ConditionalFalse;
+        if (elseEdge.dest && failed(ensurePayloadShape(elseEdge)))
+          return failure();
+        edges.push_back(std::move(elseEdge));
+        continue;
+      }
+
+      // TODO: enumerate loop and switch edges once payload propagation handles
+      // yields and fallthrough.
+    }
+  }
+
+  return success();
 }
 
 LogicalResult StructuredCFGBuilder::emitStructuredBlocks() {
@@ -432,18 +465,29 @@ LogicalResult StructuredCFGBuilder::analyseSwitchOp(BlockInfo &header,
 }
 
 LogicalResult StructuredCFGBuilder::ensurePayloadShape(EdgeInfo &edge) {
-  (void)edge;
-  // TODO: expand operand tuples so that every edge forwards the correct arity.
-  return signalUnimplemented(func);
+  if (!edge.dest)
+    return success();
+
+  SmallVector<mlir::Value, 8> expected;
+  if (!edge.dest->payloadSeed.empty())
+    expected.append(edge.dest->payloadSeed.begin(), edge.dest->payloadSeed.end());
+  else
+    expected.append(edge.dest->blockArgs.begin(), edge.dest->blockArgs.end());
+
+  edge.payload.assign(expected.begin(), expected.end());
+  return success();
 }
 
 LogicalResult StructuredCFGBuilder::propagatePayload(
     BlockInfo &source, BlockInfo &dest, llvm::ArrayRef<mlir::Value> values) {
   (void)source;
-  (void)dest;
-  (void)values;
-  // TODO: record the payload values reaching `dest` from `source`.
-  return signalUnimplemented(func);
+  if (values.size() != dest.blockArgs.size()) {
+    func.emitError("payload arity mismatch while propagating values");
+    return failure();
+  }
+
+  dest.payloadSeed.assign(values.begin(), values.end());
+  return success();
 }
 
 LogicalResult StructuredCFGBuilder::materialiseMaskEntry(BlockInfo &info) {
