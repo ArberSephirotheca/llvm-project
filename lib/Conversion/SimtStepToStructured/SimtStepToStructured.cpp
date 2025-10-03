@@ -252,29 +252,60 @@ static LogicalResult lowerSwitchToCFG(simt::dialect::SwitchOp switchOp) {
   Block *afterBlock = parentBlock->splitBlock(switchOp);
   unsigned numResults = switchOp.getNumResults();
   SmallVector<Location> resultLocs(numResults, loc);
+
+  SmallVector<Type> carriedTypes;
+  SmallVector<Location> carriedLocs;
+  for (BlockArgument arg : parentBlock->getArguments()) {
+    carriedTypes.push_back(arg.getType());
+    carriedLocs.push_back(arg.getLoc());
+  }
+  unsigned numCarried = carriedTypes.size();
+
+  auto addCarriedArgs = [&](Block *block) {
+    if (numCarried == 0)
+      return;
+    block->addArguments(carriedTypes, carriedLocs);
+  };
+
+  auto replaceCarriedUses = [&](Block *block) {
+    if (numCarried == 0)
+      return;
+    auto carriedArgs = block->getArguments().take_front(numCarried);
+    for (auto [index, parentArg] : llvm::enumerate(parentBlock->getArguments()))
+      parentArg.replaceUsesWithIf(carriedArgs[index], [&](OpOperand &use) {
+        return use.getOwner()->getBlock() == block;
+      });
+  };
+
+  addCarriedArgs(afterBlock);
   afterBlock->addArguments(switchOp.getResultTypes(), resultLocs);
+  replaceCarriedUses(afterBlock);
 
   Region &parentRegion = *parentBlock->getParent();
   Block *headerBlock = new Block();
   parentRegion.getBlocks().insert(afterBlock->getIterator(), headerBlock);
+  addCarriedArgs(headerBlock);
   headerBlock->addArguments(switchOp.getResultTypes(), resultLocs);
+  replaceCarriedUses(headerBlock);
 
   Block *exitBlock = new Block();
   parentRegion.getBlocks().insert(afterBlock->getIterator(), exitBlock);
+  addCarriedArgs(exitBlock);
   exitBlock->addArguments(switchOp.getResultTypes(), resultLocs);
+  replaceCarriedUses(exitBlock);
 
   SmallVector<DenseMap<Block *, Value>> blockValueForResult(numResults);
-  auto registerBlockArgs = [&](Block *block) {
+  auto registerResultArgs = [&](Block *block) {
     if (numResults == 0)
       return;
-    auto args = block->getArguments();
+    auto args = block->getArguments().drop_front(numCarried);
     for (auto [idx, arg] : llvm::enumerate(args))
       blockValueForResult[idx][block] = arg;
   };
 
-  registerBlockArgs(afterBlock);
-  registerBlockArgs(headerBlock);
-  registerBlockArgs(exitBlock);
+  registerResultArgs(afterBlock);
+  registerResultArgs(headerBlock);
+  registerResultArgs(exitBlock);
 
   SmallVector<Block *, 4> caseBlocks;
   Region &cases = switchOp.getCaseBody();
@@ -282,9 +313,11 @@ static LogicalResult lowerSwitchToCFG(simt::dialect::SwitchOp switchOp) {
     (void)origCaseInit;
     Block *caseBlock = new Block();
     parentRegion.getBlocks().insert(exitBlock->getIterator(), caseBlock);
+    addCarriedArgs(caseBlock);
     caseBlock->addArguments(switchOp.getResultTypes(), resultLocs);
     caseBlocks.push_back(caseBlock);
-    registerBlockArgs(caseBlock);
+    registerResultArgs(caseBlock);
+    replaceCarriedUses(caseBlock);
   }
 
   auto &headerInfo = blockControlInfo[headerBlock];
@@ -302,7 +335,12 @@ static LogicalResult lowerSwitchToCFG(simt::dialect::SwitchOp switchOp) {
 
   eraseTerminatorIfPresent(parentBlock);
   OpBuilder entryBuilder(parentBlock, parentBlock->end());
-  entryBuilder.create<cf::BranchOp>(loc, headerBlock, switchOp.getInitialValues());
+  SmallVector<Value> headerOperands;
+  headerOperands.reserve(numCarried + numResults);
+  headerOperands.append(parentBlock->args_begin(), parentBlock->args_end());
+  headerOperands.append(switchOp.getInitialValues().begin(),
+                        switchOp.getInitialValues().end());
+  entryBuilder.create<cf::BranchOp>(loc, headerBlock, headerOperands);
 
   OpBuilder headerBuilder(headerBlock, headerBlock->begin());
   if (caseBlocks.empty()) {
@@ -351,17 +389,23 @@ static LogicalResult lowerSwitchToCFG(simt::dialect::SwitchOp switchOp) {
         fallthroughCond = termBuilder.create<mlir::arith::AndIOp>(loc, fallthrough, notDone);
       }
 
-      SmallVector<Value, 8> branchOperands(yieldValues.begin(), yieldValues.end());
+      SmallVector<Value, 8> branchOperands;
+      if (numCarried != 0) {
+        auto carriedArgs = newCase->getArguments().take_front(numCarried);
+        branchOperands.append(carriedArgs.begin(), carriedArgs.end());
+      }
+      branchOperands.append(yieldValues.begin(), yieldValues.end());
       Block *fallthroughBlock = nullptr;
       if (nextCase != exitBlock) {
         fallthroughBlock = new Block();
         parentRegion.getBlocks().insert(nextCase->getIterator(), fallthroughBlock);
+        addCarriedArgs(fallthroughBlock);
         fallthroughBlock->addArguments(switchOp.getResultTypes(), resultLocs);
 
         auto &fallthroughInfo = blockControlInfo[fallthroughBlock];
         fallthroughInfo.pushMask = true;
         fallthroughInfo.mergeTarget = exitBlock;
-        registerBlockArgs(fallthroughBlock);
+        registerResultArgs(fallthroughBlock);
       } else {
         fallthroughCond = constFalse;
       }
@@ -373,7 +417,10 @@ static LogicalResult lowerSwitchToCFG(simt::dialect::SwitchOp switchOp) {
       if (fallthroughBlock) {
         OpBuilder ftBuilder(fallthroughBlock, fallthroughBlock->begin());
         ftBuilder.create<cf::BranchOp>(loc, nextCase, fallthroughBlock->getArguments());
+        replaceCarriedUses(fallthroughBlock);
       }
+
+      replaceCarriedUses(newCase);
     };
 
     for (auto [index, origCase] : llvm::enumerate(cases)) {
@@ -385,7 +432,7 @@ static LogicalResult lowerSwitchToCFG(simt::dialect::SwitchOp switchOp) {
 
   if (numResults != 0) {
     for (auto [idx, result] : llvm::enumerate(switchOp.getResults())) {
-      Value fallback = afterBlock->getArgument(idx);
+      Value fallback = afterBlock->getArgument(numCarried + idx);
       auto &valueMap = blockValueForResult[idx];
       for (auto &use : llvm::make_early_inc_range(result.getUses())) {
         Block *useBlock = use.getOwner()->getBlock();
