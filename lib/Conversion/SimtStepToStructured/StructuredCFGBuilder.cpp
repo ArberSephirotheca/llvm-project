@@ -459,6 +459,10 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
           edges.push_back(std::move(caseEntry));
           info.outgoingEdges.push_back(&edges.back());
 
+          mlir::Operation *yieldOp = nullptr;
+          if (caseInfo && caseInfo->original)
+            yieldOp = caseInfo->original->getTerminator();
+
           auto emitExitEdge = [&](EdgeInfo::Kind kind, BlockInfo *dest)
                                   -> LogicalResult {
             EdgeInfo exitEdge;
@@ -473,11 +477,12 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
               exitEdge.condition = record.fallthrough;
               exitEdge.switchDoneFlag = record.switchDone;
             }
+            exitEdge.origin = yieldOp;
             if (exitEdge.dest && failed(ensurePayloadShape(exitEdge)))
               return failure();
             edges.push_back(std::move(exitEdge));
             if (caseInfo)
-              caseInfo->outgoingEdges.push_back(&edges.back());
+              caseInfo->perOpEdges[yieldOp].push_back(&edges.back());
             return success();
           };
 
@@ -500,7 +505,7 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
               return failure();
             edges.push_back(std::move(fallEdge));
             if (caseInfo)
-              caseInfo->outgoingEdges.push_back(&edges.back());
+              caseInfo->perOpEdges[yieldOp].push_back(&edges.back());
 
             if (failed(emitExitEdge(EdgeInfo::ConditionalFalse, switchInfo.parent)))
               return failure();
@@ -531,7 +536,11 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
             if (exitEdge.dest && failed(ensurePayloadShape(exitEdge)))
               return failure();
             edges.push_back(std::move(exitEdge));
-            switchInfo.defaultBlock->outgoingEdges.push_back(&edges.back());
+            mlir::Operation *yieldOp = switchInfo.defaultBlock->original
+                                           ? switchInfo.defaultBlock->original
+                                                 ->getTerminator()
+                                           : nullptr;
+            switchInfo.defaultBlock->perOpEdges[yieldOp].push_back(&edges.back());
           }
         }
 
