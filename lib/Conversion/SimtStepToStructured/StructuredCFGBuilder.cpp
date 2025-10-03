@@ -5,6 +5,7 @@
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/FunctionInterfaces.h"
+#include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/Block.h"
 #include "mlir/IR/Diagnostics.h"
 #include "mlir/IR/Dominance.h"
@@ -16,6 +17,7 @@
 
 #include <llvm/Support/Casting.h>
 
+#include <llvm/ADT/STLExtras.h>
 #include <llvm/ADT/StringRef.h>
 
 using namespace mlir;
@@ -682,10 +684,12 @@ LogicalResult StructuredCFGBuilder::emitStructuredBlocks() {
         mapper->map(op.getResults(), cloned->getResults());
       }
     }
+
+    if (failed(emitStructuredTerminator(*info)))
+      return failure();
   }
 
-  // TODO: emit structured terminators using outgoingEdges metadata.
-  return signalUnimplemented(func);
+  return success();
 }
 
 LogicalResult StructuredCFGBuilder::cleanupOriginalCFG() {
@@ -701,12 +705,127 @@ LogicalResult StructuredCFGBuilder::emitStructuredBlock(BlockInfo &info) {
   return signalUnimplemented(func);
 }
 
-LogicalResult StructuredCFGBuilder::emitStructuredTerminator(
-    BlockInfo &source, const EdgeInfo &edge) {
-  (void)source;
-  (void)edge;
-  // TODO: create `branch`/`cond_branch` terminators with the payload tuple.
-  return signalUnimplemented(func);
+LogicalResult StructuredCFGBuilder::emitStructuredTerminator(BlockInfo &source) {
+  if (!source.structuredBody)
+    return success();
+
+  Operation *origTerm = source.originalTerminator;
+  OpBuilder builder(source.structuredBody, source.structuredBody->end());
+  Location loc = origTerm ? origTerm->getLoc() : func.getLoc();
+
+  auto mapValue = [&](Value v, StringRef context) -> std::optional<Value> {
+    if (!v)
+      return Value();
+    if (Value mapped = mapper->lookupOrNull(v))
+      return mapped;
+    if (origTerm)
+      origTerm->emitError() << "unable to map value in " << context;
+    return std::nullopt;
+  };
+
+  auto mapValues = [&](ArrayRef<Value> vals, SmallVectorImpl<Value> &out,
+                       StringRef context) -> LogicalResult {
+    for (Value v : vals) {
+      auto mapped = mapValue(v, context);
+      if (!mapped)
+        return failure();
+      out.push_back(*mapped);
+    }
+    return success();
+  };
+
+  if (auto ret = dyn_cast_or_null<func::ReturnOp>(origTerm)) {
+    SmallVector<Value> results;
+    if (failed(mapValues(ret.getOperands(), results, "return")))
+      return failure();
+    builder.create<simt::structured::ReturnOp>(loc, results);
+    return success();
+  }
+
+  if (source.outgoingEdges.empty()) {
+    if (origTerm)
+      origTerm->emitError("structured terminator requires recorded edges");
+    return failure();
+  }
+
+  const EdgeInfo *trueEdge = nullptr;
+  const EdgeInfo *falseEdge = nullptr;
+  SmallVector<const EdgeInfo *, 4> plainEdges;
+
+  for (const EdgeInfo *edge : source.outgoingEdges) {
+    switch (edge->kind) {
+    case EdgeInfo::ConditionalTrue:
+      trueEdge = edge;
+      break;
+    case EdgeInfo::ConditionalFalse:
+      falseEdge = edge;
+      break;
+    case EdgeInfo::LoopBackEdge:
+    case EdgeInfo::Plain:
+      plainEdges.push_back(edge);
+      break;
+    }
+  }
+
+  auto buildBranch = [&](const EdgeInfo *edge) -> LogicalResult {
+    if (!edge || !edge->dest || !edge->dest->structuredOp) {
+      if (origTerm)
+        origTerm->emitError("branch edge missing destination");
+      return failure();
+    }
+    SmallVector<Value> operands;
+    if (failed(mapValues(edge->payload, operands, "branch payload")))
+      return failure();
+    Value mask = source.currentMask ? source.currentMask : source.structuredMaskArg;
+    auto targetAttr = builder.getSymbolRefAttr(
+        edge->dest->structuredOp.getSymName());
+    builder.create<simt::structured::BranchOp>(loc, mask, targetAttr,
+                                               operands);
+    return success();
+  };
+
+  if (trueEdge && falseEdge) {
+    auto cond = mapValue(trueEdge->condition, "cond branch condition");
+    if (!cond) {
+      if (origTerm)
+        origTerm->emitError("conditional edge missing condition value");
+      return failure();
+    }
+
+    SmallVector<Value> truePayload;
+    SmallVector<Value> falsePayload;
+    if (failed(mapValues(trueEdge->payload, truePayload,
+                         "cond true payload")) ||
+        failed(mapValues(falseEdge->payload, falsePayload,
+                         "cond false payload")))
+      return failure();
+
+    auto trueTarget = trueEdge->dest && trueEdge->dest->structuredOp
+                          ? builder.getSymbolRefAttr(
+                                trueEdge->dest->structuredOp.getSymName())
+                          : FlatSymbolRefAttr();
+    auto falseTarget = falseEdge->dest && falseEdge->dest->structuredOp
+                           ? builder.getSymbolRefAttr(
+                                 falseEdge->dest->structuredOp.getSymName())
+                           : FlatSymbolRefAttr();
+
+    Value trueMask = source.currentMask ? source.currentMask
+                                        : source.structuredMaskArg;
+    Value falseMask = trueMask;
+
+    builder.create<simt::structured::CondBranchOp>(
+        loc, *cond, trueMask, falseMask, trueTarget, falseTarget,
+        truePayload, falsePayload, FlatSymbolRefAttr(),
+        simt::structured::ReconvergencePolicyAttr());
+    return success();
+  }
+
+  if (plainEdges.size() == 1)
+    return buildBranch(plainEdges.front());
+
+  if (origTerm)
+    origTerm->emitError("unsupported structured terminator pattern");
+  return failure();
 }
 
 LogicalResult StructuredCFGBuilder::analyseIfOp(BlockInfo &header,

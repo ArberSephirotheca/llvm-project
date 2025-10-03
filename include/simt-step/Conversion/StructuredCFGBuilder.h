@@ -59,8 +59,7 @@ private:
   mlir::LogicalResult cleanupOriginalCFG();
 
   mlir::LogicalResult emitStructuredBlock(BlockInfo &info);
-  mlir::LogicalResult emitStructuredTerminator(BlockInfo &source,
-                                                const EdgeInfo &edge);
+  mlir::LogicalResult emitStructuredTerminator(BlockInfo &source);
 
   /// Helpers used while analysing structured control ops.
   mlir::LogicalResult analyseIfOp(BlockInfo &header, mlir::Operation *op);

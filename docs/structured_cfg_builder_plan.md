@@ -66,8 +66,7 @@ private:
   LogicalResult cleanupOriginalCFG();
 
   LogicalResult emitStructuredBlock(BlockInfo &info);
-  LogicalResult emitStructuredTerminator(BlockInfo &source,
-                                         const EdgeInfo &edge);
+  LogicalResult emitStructuredTerminator(BlockInfo &source);
 
   LogicalResult ensurePayloadShape(EdgeInfo &edge);
   LogicalResult propagatePayload(BlockInfo &source, BlockInfo &dest,
@@ -91,9 +90,12 @@ private:
 - Each `BlockInfo` now records a deterministic symbol name (`entry`, `blockN`)
   so the emission phase can reserve stable identifiers for the forthcoming
   `simt_struct.block` ops.
-- `emitStructuredBlocks()` now sketches the creation of `simt_struct.block`
-  ops in original order and clones non-terminator operations with an
-  `IRMapping`; terminators and mask scaffolding remain TODOs.
+- `emitStructuredBlocks()` now creates `simt_struct.block` ops, runs the mask
+  prologue (`mask_pop`/`mask_merge`/`mask_push`), and clones non-terminator ops,
+  leaving only final terminator emission and cleanup on the TODO list.
+- Basic structured terminator emission (`branch`/`cond_branch`/`return`) is in
+  place for straight-line and conditional blocks; loop body `continue`/`break`
+  rewriting remains future work.
 - `computePayloads()` now seeds each block with its formal arguments, marks loop
   prepare blocks with the `simt.loop` init tuple, and remembers the payload
   expected by switch headers; full fixed-point propagation over yields will land
