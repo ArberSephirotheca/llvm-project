@@ -49,6 +49,7 @@ struct StructuredCFGBuilder::BlockInfo {
 
   bool requestsMaskPush = false;
   bool requestsMaskPop = false;
+  std::string symbolName;
 };
 
 struct StructuredCFGBuilder::EdgeInfo {
@@ -191,7 +192,7 @@ LogicalResult StructuredCFGBuilder::analyseBlocks() {
   for (mlir::Block *block : blockOrder)
     (void)getOrCreateBlockInfo(block);
 
-  for (mlir::Block *block : blockOrder) {
+  for (auto [index, block] : llvm::enumerate(blockOrder)) {
     BlockInfo &info = getOrCreateBlockInfo(block);
     info.mergeTarget = nullptr;
     info.continueTarget = nullptr;
@@ -199,6 +200,10 @@ LogicalResult StructuredCFGBuilder::analyseBlocks() {
     info.requestsMaskPop = false;
     info.payloadSeed.clear();
     info.controlOps.clear();
+    if (index == 0)
+      info.symbolName = "entry";
+    else
+      info.symbolName = ("block" + std::to_string(index));
 
     for (mlir::Operation &op : *block) {
       if (auto ifOp = llvm::dyn_cast<simt::dialect::IfOp>(&op)) {

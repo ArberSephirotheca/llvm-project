@@ -88,6 +88,9 @@ private:
 - The analysis helpers populate `BlockInfo` for every block (including nested
   `simt.if`/`loop`/`switch` regions) and stash coarse metadata in per-op maps so
   later stages can recover case/loop structure without mutating the CFG.
+- Each `BlockInfo` now records a deterministic symbol name (`entry`, `blockN`)
+  so the emission phase can reserve stable identifiers for the forthcoming
+  `simt_struct.block` ops.
 - `computePayloads()` now seeds each block with its formal arguments, marks loop
   prepare blocks with the `simt.loop` init tuple, and remembers the payload
   expected by switch headers; full fixed-point propagation over yields will land
