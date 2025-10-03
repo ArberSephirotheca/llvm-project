@@ -72,6 +72,8 @@ struct StructuredCFGBuilder::LoopInfo {
   BlockInfo *parent = nullptr;
   BlockInfo *prepareBlock = nullptr;
   BlockInfo *bodyBlock = nullptr;
+  SmallVector<mlir::Value, 4> forwardedToBody;
+  SmallVector<mlir::Value, 4> forwardedToExit;
 };
 
 struct StructuredCFGBuilder::SwitchInfo {
@@ -248,6 +250,8 @@ LogicalResult StructuredCFGBuilder::computePayloads() {
             mlir::ValueRange forwarded = cond.getForwarded();
             if (forwarded.size() == bodyInfo.blockArgs.size())
               bodyInfo.payloadSeed.assign(forwarded.begin(), forwarded.end());
+            loopInfo.forwardedToBody.assign(forwarded.begin(), forwarded.end());
+            loopInfo.forwardedToExit.assign(forwarded.begin(), forwarded.end());
           }
         }
       }
@@ -345,11 +349,13 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
         if (loopInfo.prepareBlock && loopInfo.prepareBlock->original) {
           if (auto *term = loopInfo.prepareBlock->original->getTerminator()) {
             if (auto cond = llvm::dyn_cast<simt::dialect::ConditionOp>(term)) {
-              (void)cond;
               EdgeInfo trueEdge;
               trueEdge.source = loopInfo.prepareBlock;
               trueEdge.dest = loopInfo.bodyBlock;
               trueEdge.kind = EdgeInfo::ConditionalTrue;
+              if (!loopInfo.forwardedToBody.empty())
+                trueEdge.payload.assign(loopInfo.forwardedToBody.begin(),
+                                         loopInfo.forwardedToBody.end());
               if (trueEdge.dest && failed(ensurePayloadShape(trueEdge)))
                 return failure();
               edges.push_back(std::move(trueEdge));
@@ -358,6 +364,9 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
               falseEdge.source = loopInfo.prepareBlock;
               falseEdge.dest = nullptr;
               falseEdge.kind = EdgeInfo::ConditionalFalse;
+              if (!loopInfo.forwardedToExit.empty())
+                falseEdge.payload.assign(loopInfo.forwardedToExit.begin(),
+                                          loopInfo.forwardedToExit.end());
               edges.push_back(std::move(falseEdge));
             }
           }
@@ -371,6 +380,8 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
               backEdge.source = loopInfo.bodyBlock;
               backEdge.dest = loopInfo.prepareBlock;
               backEdge.kind = EdgeInfo::LoopBackEdge;
+              backEdge.payload.assign(cont.getOperands().begin(),
+                                      cont.getOperands().end());
               if (backEdge.dest && failed(ensurePayloadShape(backEdge)))
                 return failure();
               edges.push_back(std::move(backEdge));
@@ -382,6 +393,12 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
               exitEdge.source = loopInfo.bodyBlock;
               exitEdge.dest = nullptr;
               exitEdge.kind = EdgeInfo::Plain;
+              if (auto breakOp = llvm::dyn_cast<simt::dialect::BreakOp>(&nested))
+                exitEdge.payload.assign(breakOp->getOperands().begin(),
+                                        breakOp->getOperands().end());
+              else if (auto yieldOp = llvm::dyn_cast<simt::dialect::YieldOp>(&nested))
+                exitEdge.payload.assign(yieldOp->getOperands().begin(),
+                                        yieldOp->getOperands().end());
               edges.push_back(std::move(exitEdge));
               continue;
             }
@@ -573,6 +590,17 @@ LogicalResult StructuredCFGBuilder::analyseSwitchOp(BlockInfo &header,
 LogicalResult StructuredCFGBuilder::ensurePayloadShape(EdgeInfo &edge) {
   if (!edge.dest)
     return success();
+
+  if (!edge.payload.empty()) {
+    // Trust the caller-provided payload, but sanity-check width if we already
+    // know the destination seed tuple.
+    if (!edge.dest->payloadSeed.empty() &&
+        edge.dest->payloadSeed.size() != edge.payload.size()) {
+      func.emitError("edge payload arity does not match destination seed");
+      return failure();
+    }
+    return success();
+  }
 
   SmallVector<mlir::Value, 8> expected;
   if (!edge.dest->payloadSeed.empty())

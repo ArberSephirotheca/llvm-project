@@ -92,9 +92,10 @@ private:
   prepare blocks with the `simt.loop` init tuple, and remembers the payload
   expected by switch headers; full fixed-point propagation over yields will land
   alongside edge enumeration.
-- `enumerateEdges()` records edges for `simt.if` plus preliminary loop entry/
-  back-edges and switch case entry edges; forward exits still rely on TODOs
-  while we plumb payload propagation through `break`/`yield` targets.
+- `enumerateEdges()` records edges for `simt.if`, loop entry/condition/back
+  edges (capturing forwarded payloads from `condition`/`continue`/`break`), and
+  switch case entry edges; exits still reference future merge wiring but now
+  cache the operand tuples they must forward.
 - The header now forward-declares `BlockInfo`, `EdgeInfo`, and operation-specific
   info records so helpers remain private implementation details.
 - `build()` wires the staged pipeline (analyse → payload → edges → emit →
