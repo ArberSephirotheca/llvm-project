@@ -367,7 +367,6 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
         if (loopInfo.prepareBlock && loopInfo.prepareBlock->original) {
           if (auto *term = loopInfo.prepareBlock->original->getTerminator()) {
             if (auto cond = llvm::dyn_cast<simt::dialect::ConditionOp>(term)) {
-              loopInfo.condition = cond.getCondition();
               EdgeInfo trueEdge;
               trueEdge.source = loopInfo.prepareBlock;
               trueEdge.dest = loopInfo.bodyBlock;
@@ -938,8 +937,6 @@ LogicalResult StructuredCFGBuilder::analyseLoopOp(BlockInfo &header,
   bodyInfo.requestsMaskPush = true;
   bodyInfo.requestsMaskPop = true;
   bodyInfo.continueTarget = prepareInfo.original;
-
-  info.condition = nullptr;
 
   return success();
 }
