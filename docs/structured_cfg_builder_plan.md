@@ -91,6 +91,9 @@ private:
 - Each `BlockInfo` now records a deterministic symbol name (`entry`, `blockN`)
   so the emission phase can reserve stable identifiers for the forthcoming
   `simt_struct.block` ops.
+- `emitStructuredBlocks()` now sketches the creation of `simt_struct.block`
+  ops in original order and clones non-terminator operations with an
+  `IRMapping`; terminators and mask scaffolding remain TODOs.
 - `computePayloads()` now seeds each block with its formal arguments, marks loop
   prepare blocks with the `simt.loop` init tuple, and remembers the payload
   expected by switch headers; full fixed-point propagation over yields will land

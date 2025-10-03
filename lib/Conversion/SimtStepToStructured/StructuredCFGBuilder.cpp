@@ -50,6 +50,7 @@ struct StructuredCFGBuilder::BlockInfo {
   bool requestsMaskPush = false;
   bool requestsMaskPop = false;
   std::string symbolName;
+  SmallVector<const EdgeInfo *, 4> outgoingEdges;
 };
 
 struct StructuredCFGBuilder::EdgeInfo {
@@ -200,6 +201,7 @@ LogicalResult StructuredCFGBuilder::analyseBlocks() {
     info.requestsMaskPop = false;
     info.payloadSeed.clear();
     info.controlOps.clear();
+    info.outgoingEdges.clear();
     if (index == 0)
       info.symbolName = "entry";
     else
@@ -391,6 +393,7 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
         if (thenEdge.dest && failed(ensurePayloadShape(thenEdge)))
           return failure();
         edges.push_back(std::move(thenEdge));
+        info.outgoingEdges.push_back(&edges.back());
 
         EdgeInfo elseEdge;
         elseEdge.source = &info;
@@ -400,6 +403,7 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
         if (elseEdge.dest && failed(ensurePayloadShape(elseEdge)))
           return failure();
         edges.push_back(std::move(elseEdge));
+        info.outgoingEdges.push_back(&edges.back());
         continue;
       }
 
@@ -413,6 +417,7 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
         if (entryEdge.dest && failed(ensurePayloadShape(entryEdge)))
           return failure();
         edges.push_back(std::move(entryEdge));
+        info.outgoingEdges.push_back(&edges.back());
 
         if (loopInfo.prepareBlock && loopInfo.prepareBlock->original) {
           if (auto *term = loopInfo.prepareBlock->original->getTerminator()) {
@@ -429,6 +434,7 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
               if (trueEdge.dest && failed(ensurePayloadShape(trueEdge)))
                 return failure();
               edges.push_back(std::move(trueEdge));
+              loopInfo.prepareBlock->outgoingEdges.push_back(&edges.back());
 
               EdgeInfo falseEdge;
               falseEdge.source = loopInfo.prepareBlock;
@@ -436,11 +442,12 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
               falseEdge.kind = EdgeInfo::ConditionalFalse;
               if (!loopInfo.forwardedToExit.empty())
                 falseEdge.payload.assign(loopInfo.forwardedToExit.begin(),
-                                         loopInfo.forwardedToExit.end());
+                                          loopInfo.forwardedToExit.end());
               falseEdge.condition = cond.getCondition();
               if (falseEdge.dest && failed(ensurePayloadShape(falseEdge)))
                 return failure();
               edges.push_back(std::move(falseEdge));
+              loopInfo.prepareBlock->outgoingEdges.push_back(&edges.back());
             }
           }
         }
@@ -458,6 +465,7 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
               if (backEdge.dest && failed(ensurePayloadShape(backEdge)))
                 return failure();
               edges.push_back(std::move(backEdge));
+              loopInfo.bodyBlock->outgoingEdges.push_back(&edges.back());
               continue;
             }
             if (llvm::isa<simt::dialect::BreakOp>(&nested) ||
@@ -475,6 +483,7 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
               if (exitEdge.dest && failed(ensurePayloadShape(exitEdge)))
                 return failure();
               edges.push_back(std::move(exitEdge));
+              loopInfo.bodyBlock->outgoingEdges.push_back(&edges.back());
               continue;
             }
           }
@@ -495,6 +504,7 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
           if (caseEntry.dest && failed(ensurePayloadShape(caseEntry)))
             return failure();
           edges.push_back(std::move(caseEntry));
+          info.outgoingEdges.push_back(&edges.back());
 
           auto emitExitEdge = [&](EdgeInfo::Kind kind, BlockInfo *dest)
                                   -> LogicalResult {
@@ -513,6 +523,8 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
             if (exitEdge.dest && failed(ensurePayloadShape(exitEdge)))
               return failure();
             edges.push_back(std::move(exitEdge));
+            if (caseInfo)
+              caseInfo->outgoingEdges.push_back(&edges.back());
             return success();
           };
 
@@ -534,6 +546,8 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
             if (fallEdge.dest && failed(ensurePayloadShape(fallEdge)))
               return failure();
             edges.push_back(std::move(fallEdge));
+            if (caseInfo)
+              caseInfo->outgoingEdges.push_back(&edges.back());
 
             if (failed(emitExitEdge(EdgeInfo::ConditionalFalse, switchInfo.parent)))
               return failure();
@@ -551,6 +565,7 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
           if (failed(ensurePayloadShape(defaultEntry)))
             return failure();
           edges.push_back(std::move(defaultEntry));
+          info.outgoingEdges.push_back(&edges.back());
 
           if (switchInfo.defaultBlock) {
             EdgeInfo exitEdge;
@@ -563,6 +578,7 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
             if (exitEdge.dest && failed(ensurePayloadShape(exitEdge)))
               return failure();
             edges.push_back(std::move(exitEdge));
+            switchInfo.defaultBlock->outgoingEdges.push_back(&edges.back());
           }
         }
 
@@ -575,8 +591,59 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
 }
 
 LogicalResult StructuredCFGBuilder::emitStructuredBlocks() {
-  // TODO: create `simt_struct.block` ops mirroring `blockOrder`, clone bodies,
-  // and materialise mask stack management before forwarding payloads.
+  if (blockOrder.empty())
+    return success();
+
+  OpBuilder builder(func);
+  mapper->clear();
+
+  for (BlockInfo &info : llvm::make_second_range(blockInfos)) {
+    info.structuredOp = nullptr;
+    info.structuredBody = nullptr;
+  }
+
+  Block *entryBlock = blockOrder.front();
+  builder.setInsertionPointToStart(entryBlock);
+
+  for (mlir::Block *origBlock : blockOrder) {
+    BlockInfo &info = blockInfos[origBlock];
+
+    auto symAttr = builder.getStringAttr(info.symbolName);
+    auto blockOp = builder.create<simt::structured::BlockOp>(
+        symAttr, mlir::Value());
+    info.structuredOp = blockOp;
+    info.structuredBody = &blockOp.getBody().front();
+
+    // Map mask argument.
+    mlir::BlockArgument maskArg = blockOp.getMaskArgument();
+    if (origBlock->getNumArguments() > 0) {
+      mapper->map(origBlock->getArgument(0), maskArg);
+    }
+
+    // Add carried arguments.
+    for (auto [idx, type] : llvm::enumerate(info.carriedTypes)) {
+      if (idx == 0)
+        continue; // mask already mapped
+      auto arg = info.structuredBody->addArgument(type,
+                                                   origBlock->getArgument(idx)
+                                                       .getLoc());
+      mapper->map(origBlock->getArgument(idx), arg);
+    }
+
+    // TODO: set merge/continue attrs, insert mask push/pop as needed.
+
+    // Clone body ops except terminator.
+    OpBuilder bodyBuilder(info.structuredBody, info.structuredBody->begin());
+    for (Operation &op : origBlock->without_terminator()) {
+      if (isa<cf::BranchOp, cf::CondBranchOp, func::ReturnOp>(&op))
+        continue;
+      Operation *cloned = bodyBuilder.clone(op, *mapper);
+      mapper->map(op.getResults(), cloned->getResults());
+    }
+
+    // TODO: call emitStructuredTerminator once implemented.
+  }
+
   return signalUnimplemented(func);
 }
 
