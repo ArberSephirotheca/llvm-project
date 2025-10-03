@@ -24,6 +24,7 @@
 
 ## Lowering Passes
 - [ ] Implement `SimtToStructuredPass` converting `simt_step` regions into `simt_struct` blocks (basic straight-line lowering exists; extend to divergent control flow, carried values, and loop/switch metadata).
+- [ ] Fix nested loop/switch lowering so carried block arguments are propagated when rebuilding structured branches (`loop_switch.mlir`/`switch_loop.mlir` remain XFAIL because the switch header expects more operands than the `cf.br` provides).
 - [ ] Implement `StructuredToDynamicPass` that materializes dynamic block frames/mask stack used by interpreter.
 - [ ] Provide canonicalization and optimization passes on both dialects (fold redundant mask ops, dead blocks, constant propagation with masks).
 - [ ] Create pass pipelines (e.g., `simt-interpreter-init`, `simt-llvm-lowering`).
