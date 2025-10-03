@@ -36,86 +36,14 @@ static LogicalResult signalUnimplemented(FunctionOpInterface func) {
 
 } // namespace
 
-struct StructuredCFGBuilder::BlockInfo {
-  mlir::Block *original = nullptr;
-  SmallVector<mlir::Type, 4> carriedTypes;
-  SmallVector<mlir::Value, 4> payloadSeed;
-  SmallVector<mlir::BlockArgument, 4> blockArgs;
-  SmallVector<mlir::Operation *, 4> controlOps;
-
-  simt::structured::BlockOp structuredOp;
-  mlir::Block *structuredBody = nullptr;
-  mlir::BlockArgument structuredMaskArg;
-  mlir::Value currentMask;
-  SmallVector<mlir::BlockArgument, 4> structuredArgs;
-
-  mlir::Block *mergeTarget = nullptr;
-  mlir::Block *continueTarget = nullptr;
-
-  bool requestsMaskPush = false;
-  bool requestsMaskPop = false;
-  std::string symbolName;
-  SmallVector<const EdgeInfo *, 4> outgoingEdges;
-  Operation *originalTerminator = nullptr;
-  llvm::DenseMap<Operation *, SmallVector<const EdgeInfo *, 2>> perOpEdges;
-};
-
-struct StructuredCFGBuilder::EdgeInfo {
-  BlockInfo *source = nullptr;
-  BlockInfo *dest = nullptr;
-  SmallVector<mlir::Value, 8> payload;
-  SmallVector<mlir::Value, 4> maskValues;
-  enum Kind { Plain, ConditionalTrue, ConditionalFalse, LoopBackEdge } kind =
-      Plain;
-  mlir::Value condition;
-  mlir::Value switchDoneFlag;
-  bool isSwitchFallthrough = false;
-  Operation *origin = nullptr;
-};
-
-struct StructuredCFGBuilder::IfInfo {
-  mlir::Operation *op = nullptr;
-  BlockInfo *parent = nullptr;
-  BlockInfo *thenBlock = nullptr;
-  BlockInfo *elseBlock = nullptr;
-  mlir::Value condition;
-};
-
-struct StructuredCFGBuilder::LoopInfo {
-  mlir::Operation *op = nullptr;
-  BlockInfo *parent = nullptr;
-  BlockInfo *prepareBlock = nullptr;
-  BlockInfo *bodyBlock = nullptr;
-  mlir::Value condition;
-  SmallVector<mlir::Value, 4> forwardedToBody;
-  SmallVector<mlir::Value, 4> forwardedToExit;
-};
-
-struct StructuredCFGBuilder::SwitchInfo {
-  mlir::Operation *op = nullptr;
-  BlockInfo *parent = nullptr;
-  SmallVector<BlockInfo *, 4> caseBlocks;
-  BlockInfo *defaultBlock = nullptr;
-  SmallVector<int64_t, 8> caseValues;
-  unsigned payloadCount = 0;
-  bool hasControlFlags = false;
-  struct CaseRecord {
-    BlockInfo *block = nullptr;
-    BlockInfo *nextCase = nullptr;
-    mlir::Value matchSeen;
-    mlir::Value fallthrough;
-    mlir::Value switchDone;
-  };
-  SmallVector<CaseRecord, 4> caseRecords;
-  CaseRecord defaultRecord;
-};
-
 StructuredCFGBuilder::StructuredCFGBuilder(FunctionOpInterface func)
     : func(func) {}
 
 LogicalResult StructuredCFGBuilder::build() {
   mapper = std::make_unique<IRMapping>();
   domInfo = std::make_unique<DominanceInfo>(func);
+  functionReturnValues.clear();
+  hasFunctionReturn = false;
 
   collectOriginalBlocks();
 
@@ -764,6 +692,13 @@ LogicalResult StructuredCFGBuilder::cleanupOriginalCFG() {
       origBlock->erase();
   }
 
+  OpBuilder retBuilder(func);
+  retBuilder.setInsertionPointToEnd(entryBlock);
+  if (hasFunctionReturn)
+    retBuilder.create<func::ReturnOp>(func.getLoc(), functionReturnValues);
+  else
+    retBuilder.create<func::ReturnOp>(func.getLoc());
+
   return success();
 }
 
@@ -811,6 +746,21 @@ LogicalResult StructuredCFGBuilder::emitStructuredTerminator(BlockInfo &source) 
     if (failed(mapValues(ret.getOperands(), results, "return")))
       return failure();
     builder.create<simt::structured::ReturnOp>(loc, results);
+
+    if (!hasFunctionReturn) {
+      functionReturnValues.assign(results.begin(), results.end());
+      hasFunctionReturn = true;
+    } else {
+      if (functionReturnValues.size() != results.size()) {
+        ret.emitError("inconsistent return arity in structured lowering");
+        return failure();
+      }
+      for (auto [lhs, rhs] : llvm::zip(functionReturnValues, results))
+        if (lhs.getType() != rhs.getType()) {
+          ret.emitError("inconsistent return types in structured lowering");
+          return failure();
+        }
+    }
     return success();
   }
 
