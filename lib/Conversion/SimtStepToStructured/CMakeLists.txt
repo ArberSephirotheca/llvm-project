@@ -1,5 +1,6 @@
 add_library(SimtStepToStructuredPass STATIC
     SimtStepToStructured.cpp
+    StructuredCFGBuilder.cpp
 )
 
 target_include_directories(SimtStepToStructuredPass

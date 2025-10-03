@@ -1,4 +1,5 @@
 #include "simt-step/Conversion/SimtStepToStructured.h"
+#include "simt-step/Conversion/StructuredCFGBuilder.h"
 
 #include "simt-step/Dialect/SimtStructured/StructuredDialect.h"
 #include "simt-step/Dialect/SimtStep/SimtStepDialect.h"
@@ -295,19 +296,24 @@ static LogicalResult lowerSwitchToCFG(simt::dialect::SwitchOp switchOp) {
   replaceCarriedUses(exitBlock);
 
   SmallVector<DenseMap<Block *, Value>> blockValueForResult(numResults);
-  auto registerResultArgs = [&](Block *block) {
+  DenseMap<Block *, SmallVector<Value>> blockPayload;
+  auto recordPayloadForArgs = [&](Block *block) {
     if (numResults == 0)
       return;
-    auto args = block->getArguments().drop_front(numCarried);
-    for (auto [idx, arg] : llvm::enumerate(args))
-      blockValueForResult[idx][block] = arg;
+    SmallVector<Value> payload;
+    payload.reserve(numResults);
+    for (Value arg : block->getArguments().drop_front(numCarried))
+      payload.push_back(arg);
+    blockPayload[block] = payload;
+    for (auto [idx, val] : llvm::enumerate(payload))
+      blockValueForResult[idx][block] = val;
   };
 
-  registerResultArgs(afterBlock);
-  registerResultArgs(headerBlock);
-  registerResultArgs(exitBlock);
+  recordPayloadForArgs(afterBlock);
+  recordPayloadForArgs(exitBlock);
 
   SmallVector<Block *, 4> caseBlocks;
+  SmallVector<Block *, 4> fallthroughBlocks;
   Region &cases = switchOp.getCaseBody();
   for (Block &origCaseInit : cases) {
     (void)origCaseInit;
@@ -316,8 +322,8 @@ static LogicalResult lowerSwitchToCFG(simt::dialect::SwitchOp switchOp) {
     addCarriedArgs(caseBlock);
     caseBlock->addArguments(switchOp.getResultTypes(), resultLocs);
     caseBlocks.push_back(caseBlock);
-    registerResultArgs(caseBlock);
     replaceCarriedUses(caseBlock);
+    recordPayloadForArgs(caseBlock);
   }
 
   auto &headerInfo = blockControlInfo[headerBlock];
@@ -363,8 +369,9 @@ static LogicalResult lowerSwitchToCFG(simt::dialect::SwitchOp switchOp) {
 
     auto cloneCase = [&](Block &origCase, Block *newCase, Block *nextCase) {
       IRMapping mapping;
+      auto newCaseResultArgs = newCase->getArguments().drop_front(numCarried);
       for (auto [origArg, newArg] : llvm::zip(origCase.getArguments(),
-                                              newCase->getArguments()))
+                                              newCaseResultArgs))
         mapping.map(origArg, newArg);
 
       OpBuilder caseBuilder(newCase, newCase->begin());
@@ -410,7 +417,8 @@ static LogicalResult lowerSwitchToCFG(simt::dialect::SwitchOp switchOp) {
         auto &fallthroughInfo = blockControlInfo[fallthroughBlock];
         fallthroughInfo.pushMask = true;
         fallthroughInfo.mergeTarget = exitBlock;
-        registerResultArgs(fallthroughBlock);
+        recordPayloadForArgs(fallthroughBlock);
+        fallthroughBlocks.push_back(fallthroughBlock);
       } else {
         fallthroughCond = constFalse;
       }
@@ -426,6 +434,12 @@ static LogicalResult lowerSwitchToCFG(simt::dialect::SwitchOp switchOp) {
       }
 
       replaceCarriedUses(newCase);
+      if (numResults != 0) {
+        SmallVector<Value> payload(yieldValues.begin(), yieldValues.end());
+        blockPayload[newCase] = payload;
+        for (auto [idx, val] : llvm::enumerate(payload))
+          blockValueForResult[idx][newCase] = val;
+      }
     };
 
     for (auto [index, origCase] : llvm::enumerate(cases)) {
@@ -434,6 +448,88 @@ static LogicalResult lowerSwitchToCFG(simt::dialect::SwitchOp switchOp) {
       cloneCase(origCase, caseBlocks[index], nextCase);
     }
   }
+
+  ValueRange initialValues = switchOp.getInitialValues();
+  if (numResults != 0) {
+    SmallVector<Value> payload(initialValues.begin(), initialValues.end());
+    blockPayload[parentBlock] = payload;
+    for (auto [idx, val] : llvm::enumerate(payload))
+      blockValueForResult[idx][parentBlock] = val;
+  }
+
+  auto appendMissingDestOperands = [&](Block *target) {
+    unsigned expected = target->getNumArguments();
+    if (expected == numCarried)
+      return;
+
+    for (Block *pred : target->getPredecessors()) {
+      Operation *terminator = pred->getTerminator();
+      auto appendRange = [&](MutableOperandRange destOperands) {
+        if (destOperands.size() == expected)
+          return;
+        assert(destOperands.size() == numCarried &&
+               "branch missing carried operands during switch lowering");
+
+        llvm::errs() << "Switch lowering: adjusting edge " << pred << " -> "
+                     << target << " (" << destOperands.size() << " -> "
+                     << expected << ")\n";
+
+        auto payloadIt = blockPayload.find(pred);
+        if (payloadIt == blockPayload.end()) {
+          SmallVector<Value> inferredPayload;
+          inferredPayload.reserve(numResults);
+          for (unsigned idx = 0; idx < numResults; ++idx) {
+            auto &valueMap = blockValueForResult[idx];
+            if (auto it = valueMap.find(pred); it != valueMap.end())
+              inferredPayload.push_back(it->second);
+            else
+              inferredPayload.push_back(afterBlock->getArgument(numCarried + idx));
+          }
+          payloadIt = blockPayload.try_emplace(pred, inferredPayload).first;
+        }
+
+        SmallVector<Value> newOperands;
+        newOperands.reserve(destOperands.size() + payloadIt->second.size());
+        for (OpOperand &operand : destOperands)
+          newOperands.push_back(operand.get());
+        newOperands.append(payloadIt->second.begin(), payloadIt->second.end());
+        destOperands.assign(newOperands);
+
+        SmallVector<Value> updatedPayload(newOperands.begin() + numCarried,
+                                          newOperands.end());
+        blockPayload[pred] = updatedPayload;
+        for (auto [idx, val] : llvm::enumerate(updatedPayload))
+          blockValueForResult[idx][pred] = val;
+
+        llvm::errs() << "  payload size now " << updatedPayload.size() << "\n";
+      };
+
+      if (auto branch = dyn_cast<cf::BranchOp>(terminator)) {
+        if (branch.getDest() == target)
+          appendRange(branch.getDestOperandsMutable());
+        continue;
+      }
+
+      if (auto cond = dyn_cast<cf::CondBranchOp>(terminator)) {
+        if (cond.getTrueDest() == target)
+          appendRange(cond.getTrueDestOperandsMutable());
+        if (cond.getFalseDest() == target)
+          appendRange(cond.getFalseDestOperandsMutable());
+        continue;
+      }
+    }
+  };
+
+  SmallVector<Block *, 8> operandTargets;
+  operandTargets.push_back(exitBlock);
+  operandTargets.push_back(afterBlock);
+  operandTargets.append(caseBlocks.begin(), caseBlocks.end());
+  operandTargets.append(fallthroughBlocks.begin(), fallthroughBlocks.end());
+
+  llvm::DenseSet<Block *> visitedTargets;
+  for (Block *target : operandTargets)
+    if (visitedTargets.insert(target).second)
+      appendMissingDestOperands(target);
 
   if (numResults != 0) {
     for (auto [idx, result] : llvm::enumerate(switchOp.getResults())) {
@@ -444,6 +540,9 @@ static LogicalResult lowerSwitchToCFG(simt::dialect::SwitchOp switchOp) {
         Value replacement = fallback;
         if (auto it = valueMap.find(useBlock); it != valueMap.end())
           replacement = it->second;
+        else
+          llvm::errs() << "Switch result " << idx
+                       << " using fallback in block " << useBlock << "\n";
         use.set(replacement);
       }
     }
@@ -505,6 +604,9 @@ struct SimtStepToStructuredPass
 
   void runOnOperation() override {
     func::FuncOp func = getOperation();
+
+    // TODO: Replace the legacy lowering helpers with StructuredCFGBuilder once
+    // the single-pass rewrite lands.
 
     if (failed(lowerStructuredControlToCFG(func))) {
       signalPassFailure();
