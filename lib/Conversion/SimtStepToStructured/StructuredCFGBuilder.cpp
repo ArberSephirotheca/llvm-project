@@ -43,6 +43,8 @@ struct StructuredCFGBuilder::BlockInfo {
 
   simt::structured::BlockOp structuredOp;
   mlir::Block *structuredBody = nullptr;
+  mlir::BlockArgument structuredMask;
+  SmallVector<mlir::BlockArgument, 4> structuredArgs;
 
   mlir::Block *mergeTarget = nullptr;
   mlir::Block *continueTarget = nullptr;
@@ -51,6 +53,7 @@ struct StructuredCFGBuilder::BlockInfo {
   bool requestsMaskPop = false;
   std::string symbolName;
   SmallVector<const EdgeInfo *, 4> outgoingEdges;
+  Operation *originalTerminator = nullptr;
 };
 
 struct StructuredCFGBuilder::EdgeInfo {
@@ -202,6 +205,11 @@ LogicalResult StructuredCFGBuilder::analyseBlocks() {
     info.payloadSeed.clear();
     info.controlOps.clear();
     info.outgoingEdges.clear();
+    info.structuredOp = nullptr;
+    info.structuredBody = nullptr;
+    info.structuredMask = nullptr;
+    info.structuredArgs.clear();
+    info.originalTerminator = nullptr;
     if (index == 0)
       info.symbolName = "entry";
     else
@@ -597,53 +605,82 @@ LogicalResult StructuredCFGBuilder::emitStructuredBlocks() {
   OpBuilder builder(func);
   mapper->clear();
 
-  for (BlockInfo &info : llvm::make_second_range(blockInfos)) {
-    info.structuredOp = nullptr;
-    info.structuredBody = nullptr;
-  }
+  SmallVector<BlockInfo *, 16> orderedInfos;
+  orderedInfos.reserve(blockOrder.size());
+  for (mlir::Block *origBlock : blockOrder)
+    orderedInfos.push_back(&blockInfos[origBlock]);
 
   Block *entryBlock = blockOrder.front();
   builder.setInsertionPointToStart(entryBlock);
 
-  for (mlir::Block *origBlock : blockOrder) {
-    BlockInfo &info = blockInfos[origBlock];
+  // First pass: create structured block ops and map block arguments.
+  for (BlockInfo *info : orderedInfos) {
+    auto symAttr = builder.getStringAttr(info->symbolName);
+    auto blockOp = builder.create<simt::structured::BlockOp>(symAttr,
+                                                             mlir::Value());
+    info->structuredOp = blockOp;
+    info->structuredBody = &blockOp.getBody().front();
+    info->structuredMask = blockOp.getMaskArgument();
+    info->structuredArgs.clear();
+    info->originalTerminator = info->original ? info->original->getTerminator()
+                                              : nullptr;
 
-    auto symAttr = builder.getStringAttr(info.symbolName);
-    auto blockOp = builder.create<simt::structured::BlockOp>(
-        symAttr, mlir::Value());
-    info.structuredOp = blockOp;
-    info.structuredBody = &blockOp.getBody().front();
-
-    // Map mask argument.
-    mlir::BlockArgument maskArg = blockOp.getMaskArgument();
-    if (origBlock->getNumArguments() > 0) {
-      mapper->map(origBlock->getArgument(0), maskArg);
+    if (info->original) {
+      for (mlir::BlockArgument origArg : info->original->getArguments()) {
+        auto newArg = info->structuredBody->addArgument(origArg.getType(),
+                                                        origArg.getLoc());
+        info->structuredArgs.push_back(newArg);
+        mapper->map(origArg, newArg);
+      }
     }
 
-    // Add carried arguments.
-    for (auto [idx, type] : llvm::enumerate(info.carriedTypes)) {
-      if (idx == 0)
-        continue; // mask already mapped
-      auto arg = info.structuredBody->addArgument(type,
-                                                   origBlock->getArgument(idx)
-                                                       .getLoc());
-      mapper->map(origBlock->getArgument(idx), arg);
-    }
-
-    // TODO: set merge/continue attrs, insert mask push/pop as needed.
-
-    // Clone body ops except terminator.
-    OpBuilder bodyBuilder(info.structuredBody, info.structuredBody->begin());
-    for (Operation &op : origBlock->without_terminator()) {
-      if (isa<cf::BranchOp, cf::CondBranchOp, func::ReturnOp>(&op))
-        continue;
-      Operation *cloned = bodyBuilder.clone(op, *mapper);
-      mapper->map(op.getResults(), cloned->getResults());
-    }
-
-    // TODO: call emitStructuredTerminator once implemented.
+    builder.setInsertionPointAfter(blockOp);
   }
 
+  // Second pass: set attributes and clone bodies (excluding terminators).
+  for (BlockInfo *info : orderedInfos) {
+    auto blockOp = info->structuredOp;
+    if (!blockOp)
+      continue;
+
+    auto setSymbolAttr = [&](StringRef attrName, BlockInfo *target) {
+      if (!target || !target->structuredOp)
+        return;
+      auto ref = builder.getSymbolRefAttr(target->structuredOp.getSymName());
+      blockOp->setAttr(attrName, ref);
+    };
+
+    if (info->mergeTarget)
+      setSymbolAttr(blockOp.getMergeTargetAttrName(),
+                    &blockInfos[info->mergeTarget]);
+    else
+      blockOp->removeAttr(blockOp.getMergeTargetAttrName());
+
+    if (info->continueTarget)
+      setSymbolAttr(blockOp.getContinueTargetAttrName(),
+                    &blockInfos[info->continueTarget]);
+    else
+      blockOp->removeAttr(blockOp.getContinueTargetAttrName());
+
+    // TODO: insert mask push/pop based on requestsMaskPush/Pop before cloning.
+
+    OpBuilder bodyBuilder(info->structuredBody,
+                          info->structuredBody->begin());
+    if (info->original) {
+      for (Operation &op : info->original->without_terminator()) {
+        if (isa<cf::BranchOp, cf::CondBranchOp, func::ReturnOp>(&op))
+          continue;
+        if (auto active = dyn_cast<simt::dialect::ActiveMaskOp>(&op)) {
+          mapper->map(active.getResult(), info->structuredMask);
+          continue;
+        }
+        Operation *cloned = bodyBuilder.clone(op, *mapper);
+        mapper->map(op.getResults(), cloned->getResults());
+      }
+    }
+  }
+
+  // TODO: emit structured terminators using outgoingEdges metadata.
   return signalUnimplemented(func);
 }
 
