@@ -553,7 +553,7 @@ static LogicalResult lowerSwitchToCFG(simt::dialect::SwitchOp switchOp) {
 }
 
 
-static LogicalResult lowerStructuredControlToCFG(func::FuncOp func) {
+[[maybe_unused]] static LogicalResult lowerStructuredControlToCFG(func::FuncOp func) {
   blockControlInfo.clear();
   bool progress = true;
   while (progress) {
@@ -605,9 +605,8 @@ struct SimtStepToStructuredPass
   void runOnOperation() override {
     func::FuncOp func = getOperation();
 
-    // TODO: Switch the pass over to StructuredCFGBuilder once the new
-    // implementation supports all control-flow shapes exercised by the tests.
-    if (failed(lowerStructuredControlToCFG(func))) {
+    StructuredCFGBuilder builder(func);
+    if (failed(builder.build())) {
       signalPassFailure();
       return;
     }
