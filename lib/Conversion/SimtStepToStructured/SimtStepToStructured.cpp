@@ -605,8 +605,9 @@ struct SimtStepToStructuredPass
   void runOnOperation() override {
     func::FuncOp func = getOperation();
 
-    StructuredCFGBuilder builder(func);
-    if (failed(builder.build())) {
+    // TODO: Switch the pass over to StructuredCFGBuilder once the new
+    // implementation supports all control-flow shapes exercised by the tests.
+    if (failed(lowerStructuredControlToCFG(func))) {
       signalPassFailure();
       return;
     }
