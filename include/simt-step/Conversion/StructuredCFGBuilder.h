@@ -91,6 +91,7 @@ private:
     llvm::SmallVector<BlockInfo *, 4> caseBlocks;
     BlockInfo *defaultBlock = nullptr;
     llvm::SmallVector<int64_t, 8> caseValues;
+    unsigned carriedCount = 0;
     unsigned payloadCount = 0;
     bool hasControlFlags = false;
     struct CaseRecord {
@@ -99,6 +100,9 @@ private:
       mlir::Value matchSeen;
       mlir::Value fallthrough;
       mlir::Value switchDone;
+      llvm::SmallVector<mlir::Value, 4> carriedValues;
+      llvm::SmallVector<mlir::Value, 4> payloadValues;
+      llvm::SmallVector<mlir::Value, 4> controlValues;
     };
     llvm::SmallVector<CaseRecord, 4> caseRecords;
     CaseRecord defaultRecord;

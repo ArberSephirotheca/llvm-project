@@ -243,6 +243,9 @@ LogicalResult StructuredCFGBuilder::computePayloads() {
     mlir::ValueRange initialValues = switchOp.getInitialValues();
     parentInfo.payloadSeed.append(initialValues.begin(), initialValues.end());
 
+    switchInfo.carriedCount = parentInfo.original
+                                  ? parentInfo.original->getNumArguments()
+                                  : 0;
     for (BlockInfo *caseInfo : switchInfo.caseBlocks) {
       if (!caseInfo)
         continue;
@@ -277,6 +280,11 @@ LogicalResult StructuredCFGBuilder::computePayloads() {
       else
         record.nextCase = switchInfo.defaultBlock;
 
+      if (caseInfo && caseInfo->original) {
+        auto args = caseInfo->original->getArguments();
+        for (unsigned i = 0; i < switchInfo.carriedCount && i < args.size(); ++i)
+          record.carriedValues.push_back(args[i]);
+      }
       if (switchInfo.hasControlFlags && caseInfo && caseInfo->original &&
           !caseInfo->original->empty()) {
         if (auto yield = llvm::dyn_cast<simt::dialect::YieldOp>(
@@ -286,14 +294,40 @@ LogicalResult StructuredCFGBuilder::computePayloads() {
             record.matchSeen = results[switchInfo.payloadCount + 0];
             record.fallthrough = results[switchInfo.payloadCount + 1];
             record.switchDone = results[switchInfo.payloadCount + 2];
+            record.payloadValues.append(results.begin(),
+                                        results.begin() + switchInfo.payloadCount);
+            record.controlValues.append(results.begin() + switchInfo.payloadCount,
+                                        results.end());
+          } else {
+            record.payloadValues.append(results.begin(), results.end());
           }
+        } else if (caseInfo) {
+          auto args = caseInfo->original->getArguments();
+          unsigned payloadStart = switchInfo.carriedCount;
+          unsigned payloadEnd = std::min<unsigned>(args.size(),
+                                                   payloadStart + switchInfo.payloadCount);
+          record.payloadValues.append(args.begin() + payloadStart,
+                                      args.begin() + payloadEnd);
         }
+      }
+      if (record.payloadValues.empty() && caseInfo && caseInfo->original) {
+        auto args = caseInfo->original->getArguments();
+        unsigned payloadStart = switchInfo.carriedCount;
+        unsigned payloadEnd = std::min<unsigned>(args.size(),
+                                                 payloadStart + switchInfo.payloadCount);
+        record.payloadValues.append(args.begin() + payloadStart,
+                                    args.begin() + payloadEnd);
       }
       switchInfo.caseRecords.push_back(record);
     }
 
     switchInfo.defaultRecord = SwitchInfo::CaseRecord();
     switchInfo.defaultRecord.block = switchInfo.defaultBlock;
+    if (switchInfo.defaultBlock && switchInfo.defaultBlock->original) {
+      auto args = switchInfo.defaultBlock->original->getArguments();
+      for (unsigned i = 0; i < switchInfo.carriedCount && i < args.size(); ++i)
+        switchInfo.defaultRecord.carriedValues.push_back(args[i]);
+    }
     if (switchInfo.hasControlFlags && switchInfo.defaultBlock &&
         switchInfo.defaultBlock->original &&
         !switchInfo.defaultBlock->original->empty()) {
@@ -307,8 +341,23 @@ LogicalResult StructuredCFGBuilder::computePayloads() {
               results[switchInfo.payloadCount + 1];
           switchInfo.defaultRecord.switchDone =
               results[switchInfo.payloadCount + 2];
+          switchInfo.defaultRecord.payloadValues.append(
+              results.begin(), results.begin() + switchInfo.payloadCount);
+          switchInfo.defaultRecord.controlValues.append(
+              results.begin() + switchInfo.payloadCount, results.end());
         }
       }
+    }
+    if (switchInfo.defaultRecord.payloadValues.empty() &&
+        switchInfo.defaultBlock && switchInfo.defaultBlock->original) {
+      auto args = switchInfo.defaultBlock->original->getArguments();
+      for (unsigned i = 0; i < switchInfo.carriedCount && i < args.size(); ++i)
+        switchInfo.defaultRecord.carriedValues.push_back(args[i]);
+      unsigned payloadStart = switchInfo.carriedCount;
+      unsigned payloadEnd = std::min<unsigned>(args.size(),
+                                               payloadStart + switchInfo.payloadCount);
+      switchInfo.defaultRecord.payloadValues.append(args.begin() + payloadStart,
+                                                    args.begin() + payloadEnd);
     }
   }
 
@@ -470,9 +519,10 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
             exitEdge.source = caseInfo;
             exitEdge.dest = dest;
             exitEdge.kind = kind;
-            if (caseInfo)
-              exitEdge.payload.assign(caseInfo->payloadSeed.begin(),
-                                      caseInfo->payloadSeed.end());
+            exitEdge.payload.append(record.carriedValues.begin(),
+                                     record.carriedValues.end());
+            exitEdge.payload.append(record.payloadValues.begin(),
+                                     record.payloadValues.end());
             if (kind != EdgeInfo::Plain) {
               exitEdge.isSwitchFallthrough = true;
               exitEdge.condition = record.fallthrough;
@@ -499,9 +549,12 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
             fallEdge.condition = record.fallthrough;
             fallEdge.switchDoneFlag = record.switchDone;
             fallEdge.isSwitchFallthrough = true;
-            if (caseInfo)
-              fallEdge.payload.assign(caseInfo->payloadSeed.begin(),
-                                      caseInfo->payloadSeed.end());
+            fallEdge.payload.append(record.carriedValues.begin(),
+                                     record.carriedValues.end());
+            fallEdge.payload.append(record.payloadValues.begin(),
+                                     record.payloadValues.end());
+            fallEdge.payload.append(record.controlValues.begin(),
+                                     record.controlValues.end());
             if (fallEdge.dest && failed(ensurePayloadShape(fallEdge)))
               return failure();
             edges.push_back(std::move(fallEdge));
@@ -531,9 +584,12 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
             exitEdge.source = switchInfo.defaultBlock;
             exitEdge.dest = switchInfo.parent;
             exitEdge.kind = EdgeInfo::Plain;
-            if (switchInfo.defaultBlock)
-              exitEdge.payload.assign(switchInfo.defaultBlock->payloadSeed.begin(),
-                                       switchInfo.defaultBlock->payloadSeed.end());
+            exitEdge.payload.append(
+                switchInfo.defaultRecord.carriedValues.begin(),
+                switchInfo.defaultRecord.carriedValues.end());
+            exitEdge.payload.append(
+                switchInfo.defaultRecord.payloadValues.begin(),
+                switchInfo.defaultRecord.payloadValues.end());
             if (exitEdge.dest && failed(ensurePayloadShape(exitEdge)))
               return failure();
             edges.push_back(std::move(exitEdge));
