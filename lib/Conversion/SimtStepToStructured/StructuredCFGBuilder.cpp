@@ -792,9 +792,6 @@ LogicalResult StructuredCFGBuilder::emitStructuredTerminator(BlockInfo &source) 
   OpBuilder builder(source.structuredBody, source.structuredBody->end());
   Location loc = origTerm ? origTerm->getLoc() : func.getLoc();
 
-  if (source.outgoingEdges.empty())
-    return success();
-
   auto mapValue = [&](Value v, StringRef context) -> std::optional<Value> {
     if (!v)
       return Value();
@@ -837,6 +834,60 @@ LogicalResult StructuredCFGBuilder::emitStructuredTerminator(BlockInfo &source) 
         }
     }
     return success();
+  }
+
+  auto getTargetAttr = [&](mlir::Block *target) -> FlatSymbolRefAttr {
+    if (!target)
+      return FlatSymbolRefAttr();
+    if (BlockInfo *targetInfo = lookupBlockInfo(target))
+      if (targetInfo->structuredOp)
+        return FlatSymbolRefAttr::get(
+            builder.getContext(),
+            llvm::cast<simt::structured::BlockOp>(targetInfo->structuredOp)
+                .getSymName());
+    return FlatSymbolRefAttr();
+  };
+
+  if (source.outgoingEdges.empty()) {
+    if (!origTerm)
+      return success();
+
+    Value mask = source.currentMask ? source.currentMask : source.structuredMaskArg;
+
+    if (auto branch = dyn_cast<cf::BranchOp>(origTerm)) {
+      SmallVector<Value> destOperands;
+      if (failed(mapValues(branch.getDestOperands(), destOperands,
+                           "branch payload")))
+        return failure();
+      auto targetAttr = getTargetAttr(branch.getDest());
+      builder.create<simt::structured::BranchOp>(loc, mask, targetAttr,
+                                                 destOperands);
+      return success();
+    }
+
+    if (auto cond = dyn_cast<cf::CondBranchOp>(origTerm)) {
+      SmallVector<Value> trueOperands;
+      SmallVector<Value> falseOperands;
+      if (failed(mapValues(cond.getTrueDestOperands(), trueOperands,
+                           "true payload")) ||
+          failed(mapValues(cond.getFalseDestOperands(), falseOperands,
+                           "false payload")))
+        return failure();
+      auto condition = mapValue(cond.getCondition(), "condition");
+      if (!condition)
+        return failure();
+
+      auto trueTarget = getTargetAttr(cond.getTrueDest());
+      auto falseTarget = getTargetAttr(cond.getFalseDest());
+      builder.create<simt::structured::CondBranchOp>(
+          loc, *condition, mask, mask, trueTarget, falseTarget, trueOperands,
+          falseOperands, FlatSymbolRefAttr(),
+          simt::structured::ReconvergencePolicyAttr());
+      return success();
+    }
+
+    origTerm->emitError("unable to synthesize structured terminator");
+    return failure();
   }
 
   const EdgeInfo *trueEdge = nullptr;
