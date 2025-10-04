@@ -121,6 +121,13 @@ private:
   are in place with TODO comments that map directly onto the build steps above
   so incremental implementations can focus on one concern at a time.
 
+### Known Gaps (July 2025)
+- `computePayloads()` covers loop/switch tuple seeding but still lacks a full fixed-point walk over back-edges, so payloads sourced from nested yields may diverge from the eventual edge tuples.
+- `enumerateEdges()` still forwards the current block mask because per-edge masks are unset; `EdgeInfo::maskValues` remains unused even though the fallthrough guard now materialises via `fallthrough && !switchDone`.
+- `emitStructuredBlocks()` clones the original `simt_step.if/loop/switch` ops because per-op emission is still pending and `emitStructuredBlock()` is a stub; we need to drive emission purely from analysed metadata.
+- Mask plumbing stops at block entry: `materialiseMaskExit()` is a no-op, so we never pop/merge on exit, and switch/loop reconvergence does not update the merge stack.
+- Payload helpers now seed loop/switch payloads but still skip the fixed-point revisit for back-edges introduced by nested regions.
+
 ## Migration Plan
 1. Introduce the builder alongside the existing lowering.
 2. Port simple cases first (straight-line + `if`).

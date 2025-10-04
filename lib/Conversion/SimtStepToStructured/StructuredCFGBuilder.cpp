@@ -3,6 +3,7 @@
 #include "simt-step/Dialect/SimtStep/SimtStepDialect.h"
 #include "simt-step/Conversion/StructuredCFGBuilder.h"
 
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/BuiltinAttributes.h"
@@ -225,6 +226,16 @@ LogicalResult StructuredCFGBuilder::computePayloads() {
         }
       }
     }
+
+    if (!loopInfo.forwardedToBody.empty() && loopInfo.bodyBlock)
+      if (failed(propagatePayload(*loopInfo.prepareBlock, *loopInfo.bodyBlock,
+                                  loopInfo.forwardedToBody)))
+        return failure();
+
+    if (!loopInfo.forwardedToExit.empty() && loopInfo.mergeBlock)
+      if (failed(propagatePayload(*loopInfo.prepareBlock, *loopInfo.mergeBlock,
+                                  loopInfo.forwardedToExit)))
+        return failure();
   }
 
   // Switch headers inherit their initial payload directly from the op.
@@ -360,10 +371,45 @@ LogicalResult StructuredCFGBuilder::computePayloads() {
       switchInfo.defaultRecord.payloadValues.append(args.begin() + payloadStart,
                                                     args.begin() + payloadEnd);
     }
+
+    auto buildCombinedPayload = [&](SwitchInfo::CaseRecord &record,
+                                    bool includeControl) {
+      llvm::SmallVector<mlir::Value, 8> combined;
+      combined.append(record.carriedValues.begin(), record.carriedValues.end());
+      combined.append(record.payloadValues.begin(), record.payloadValues.end());
+      if (includeControl)
+        combined.append(record.controlValues.begin(), record.controlValues.end());
+      return combined;
+    };
+
+    auto propagateIfPossible = [&](BlockInfo *source, BlockInfo *dest,
+                                   llvm::ArrayRef<mlir::Value> values) -> LogicalResult {
+      if (!dest || values.empty())
+        return success();
+      if (!source)
+        source = dest;
+      return propagatePayload(*source, *dest, values);
+    };
+
+    for (auto &record : switchInfo.caseRecords) {
+      bool includeControl = switchInfo.hasControlFlags;
+      auto combined = buildCombinedPayload(record, includeControl);
+      if (failed(propagateIfPossible(switchInfo.parent, record.block, combined)))
+        return failure();
+      if (record.nextCase)
+        if (failed(propagateIfPossible(record.block, record.nextCase, combined)))
+          return failure();
+    }
+
+    auto defaultCombined = buildCombinedPayload(switchInfo.defaultRecord,
+                                                switchInfo.hasControlFlags);
+    if (failed(propagateIfPossible(switchInfo.parent, switchInfo.defaultBlock,
+                                   defaultCombined)))
+      return failure();
   }
 
-  // TODO: propagate payloads through yields/terminators to reach a fixed point
-  // once edge enumeration is implemented.
+  // TODO: tighten propagation by iterating until convergence once back-edge
+  // payload materialisation lands.
   return success();
 }
 
@@ -708,6 +754,8 @@ LogicalResult StructuredCFGBuilder::emitStructuredBlocks() {
 
     if (info->original) {
       for (Operation &op : info->original->without_terminator()) {
+        if (llvm::is_contained(info->controlOps, &op))
+          continue;
         if (auto it = info->perOpEdges.find(&op); it != info->perOpEdges.end()) {
           for (const EdgeInfo *edge : it->second) {
             if (!edge || !edge->dest || !edge->dest->structuredOp) {
@@ -926,6 +974,24 @@ LogicalResult StructuredCFGBuilder::emitStructuredTerminator(BlockInfo &source) 
       return failure();
     }
 
+    Value finalCond = *cond;
+    if (trueEdge->isSwitchFallthrough) {
+      auto mappedDoneOpt = mapValue(trueEdge->switchDoneFlag,
+                                    "switch done flag");
+      if (!mappedDoneOpt)
+        return failure();
+      Value doneVal = *mappedDoneOpt;
+      if (!doneVal) {
+        if (origTerm)
+          origTerm->emitError("switch fallthrough missing done flag");
+        return failure();
+      }
+      auto constFalse = builder.create<arith::ConstantIntOp>(loc, 0, 1);
+      Value notDone = builder.create<arith::CmpIOp>(
+          loc, arith::CmpIPredicate::eq, doneVal, constFalse);
+      finalCond = builder.create<arith::AndIOp>(loc, *cond, notDone);
+    }
+
     SmallVector<Value> truePayload;
     SmallVector<Value> falsePayload;
     if (failed(mapValues(trueEdge->payload, truePayload,
@@ -950,7 +1016,7 @@ LogicalResult StructuredCFGBuilder::emitStructuredTerminator(BlockInfo &source) 
     Value falseMask = trueMask;
 
     builder.create<simt::structured::CondBranchOp>(
-        loc, *cond, trueMask, falseMask, trueTarget, falseTarget,
+        loc, finalCond, trueMask, falseMask, trueTarget, falseTarget,
         truePayload, falsePayload, FlatSymbolRefAttr(),
         simt::structured::ReconvergencePolicyAttr());
     return success();
