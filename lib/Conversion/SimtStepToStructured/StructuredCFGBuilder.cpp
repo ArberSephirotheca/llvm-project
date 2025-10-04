@@ -44,6 +44,7 @@ LogicalResult StructuredCFGBuilder::build() {
   domInfo = std::make_unique<DominanceInfo>(func);
   functionReturnValues.clear();
   hasFunctionReturn = false;
+  structuredOpsInOrder.clear();
 
   collectOriginalBlocks();
 
@@ -138,7 +139,7 @@ LogicalResult StructuredCFGBuilder::analyseBlocks() {
     info.payloadSeed.clear();
     info.controlOps.clear();
     info.outgoingEdges.clear();
-    info.structuredOp = nullptr;
+    info.structuredOp = simt::structured::BlockOp();
     info.structuredBody = nullptr;
     info.structuredMaskArg = nullptr;
     info.currentMask = nullptr;
@@ -621,6 +622,8 @@ LogicalResult StructuredCFGBuilder::emitStructuredBlocks() {
   for (mlir::Block *origBlock : blockOrder)
     orderedInfos.push_back(&blockInfos[origBlock]);
 
+  structuredOpsInOrder.clear();
+
   Block *entryBlock = blockOrder.front();
   builder.setInsertionPointToStart(entryBlock);
 
@@ -630,13 +633,14 @@ LogicalResult StructuredCFGBuilder::emitStructuredBlocks() {
     auto blockOp = builder.create<simt::structured::BlockOp>(func.getLoc(),
                                                              symAttr,
                                                              mlir::Value());
-    info->structuredOp = blockOp.getOperation();
+    info->structuredOp = blockOp;
     info->structuredBody = &blockOp.getBody().front();
     info->structuredMaskArg = blockOp.getMaskArgument();
     info->currentMask = info->structuredMaskArg;
     info->structuredArgs.clear();
     info->originalTerminator = info->original ? info->original->getTerminator()
                                               : nullptr;
+    structuredOpsInOrder.push_back(blockOp);
 
     if (info->original) {
       for (mlir::BlockArgument origArg : info->original->getArguments()) {
@@ -652,20 +656,15 @@ LogicalResult StructuredCFGBuilder::emitStructuredBlocks() {
 
   // Second pass: set attributes and clone bodies (excluding terminators).
   for (BlockInfo *info : orderedInfos) {
-    auto blockOp = info->structuredOp
-                        ? llvm::cast<simt::structured::BlockOp>(
-                              info->structuredOp)
-                        : simt::structured::BlockOp();
-    if (!info->structuredOp)
+    auto blockOp = info->structuredOp;
+    if (!blockOp)
       continue;
 
     auto setSymbolAttr = [&](StringRef attrName, BlockInfo *target) {
       if (!target || !target->structuredOp)
         return;
       auto ref = FlatSymbolRefAttr::get(builder.getContext(),
-                                        llvm::cast<simt::structured::BlockOp>(
-                                            target->structuredOp)
-                                            .getSymName());
+                                        target->structuredOp.getSymName());
       blockOp->setAttr(attrName, ref);
     };
 
@@ -719,9 +718,7 @@ LogicalResult StructuredCFGBuilder::emitStructuredBlocks() {
             if (failed(mapValuesInline(edge->payload, &op, operands)))
               return failure();
             auto targetAttr = FlatSymbolRefAttr::get(
-                builder.getContext(),
-                llvm::cast<simt::structured::BlockOp>(edge->dest->structuredOp)
-                    .getSymName());
+                builder.getContext(), edge->dest->structuredOp.getSymName());
             Value mask = info->currentMask ? info->currentMask
                                            : info->structuredMaskArg;
             bodyBuilder.create<simt::structured::BranchOp>(op.getLoc(), mask,
@@ -750,29 +747,24 @@ LogicalResult StructuredCFGBuilder::emitStructuredBlocks() {
 }
 
 LogicalResult StructuredCFGBuilder::cleanupOriginalCFG() {
-  if (blockOrder.empty())
+  if (structuredOpsInOrder.empty())
     return success();
 
-  Block *entryBlock = blockOrder.front();
+  // Detach structured ops from their current blocks so we can rebuild the
+  // function body from scratch.
+  for (simt::structured::BlockOp blockOp : structuredOpsInOrder)
+    if (blockOp)
+      blockOp->remove();
 
-  for (mlir::Block *origBlock : blockOrder) {
-    auto it = origBlock->begin();
-    while (it != origBlock->end()) {
-      Operation &op = *it++;
-      if (isa<simt::structured::BlockOp>(&op))
-        continue;
-      op.erase();
-    }
-    if (origBlock != entryBlock)
-      origBlock->erase();
-  }
+  // Drop all existing blocks in the function.
+  func.getBody().clear();
 
-  OpBuilder retBuilder(func);
-  retBuilder.setInsertionPointToEnd(entryBlock);
-  if (hasFunctionReturn)
-    retBuilder.create<func::ReturnOp>(func.getLoc(), functionReturnValues);
-  else
-    retBuilder.create<func::ReturnOp>(func.getLoc());
+  // Recreate a single entry block to host the structured blocks.
+  mlir::Block *entry = func.addBlock();
+  OpBuilder builder(entry, entry->begin());
+  for (simt::structured::BlockOp blockOp : structuredOpsInOrder)
+    if (blockOp)
+      builder.insert(blockOp);
 
   return success();
 }
@@ -919,10 +911,8 @@ LogicalResult StructuredCFGBuilder::emitStructuredTerminator(BlockInfo &source) 
     if (failed(mapValues(edge->payload, operands, "branch payload")))
       return failure();
     Value mask = source.currentMask ? source.currentMask : source.structuredMaskArg;
-    auto targetAttr = FlatSymbolRefAttr::get(
-        builder.getContext(),
-        llvm::cast<simt::structured::BlockOp>(edge->dest->structuredOp)
-            .getSymName());
+    auto targetAttr = FlatSymbolRefAttr::get(builder.getContext(),
+                                             edge->dest->structuredOp.getSymName());
     builder.create<simt::structured::BranchOp>(loc, mask, targetAttr,
                                                operands);
     return success();
@@ -947,16 +937,12 @@ LogicalResult StructuredCFGBuilder::emitStructuredTerminator(BlockInfo &source) 
     auto trueTarget = trueEdge->dest && trueEdge->dest->structuredOp
                           ? FlatSymbolRefAttr::get(
                                 builder.getContext(),
-                                llvm::cast<simt::structured::BlockOp>(
-                                    trueEdge->dest->structuredOp)
-                                    .getSymName())
+                                trueEdge->dest->structuredOp.getSymName())
                           : FlatSymbolRefAttr();
     auto falseTarget = falseEdge->dest && falseEdge->dest->structuredOp
                            ? FlatSymbolRefAttr::get(
                                  builder.getContext(),
-                                 llvm::cast<simt::structured::BlockOp>(
-                                     falseEdge->dest->structuredOp)
-                                     .getSymName())
+                                 falseEdge->dest->structuredOp.getSymName())
                            : FlatSymbolRefAttr();
 
     Value trueMask = source.currentMask ? source.currentMask
@@ -1177,10 +1163,8 @@ LogicalResult StructuredCFGBuilder::materialiseMaskEntry(BlockInfo &info) {
       return FlatSymbolRefAttr();
     if (BlockInfo *targetInfo = lookupBlockInfo(target))
       if (targetInfo->structuredOp)
-        return FlatSymbolRefAttr::get(
-            builder.getContext(),
-            llvm::cast<simt::structured::BlockOp>(targetInfo->structuredOp)
-                .getSymName());
+        return FlatSymbolRefAttr::get(builder.getContext(),
+                                      targetInfo->structuredOp.getSymName());
     return FlatSymbolRefAttr();
   };
 

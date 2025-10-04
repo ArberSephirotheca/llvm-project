@@ -10,6 +10,8 @@
 #include "mlir/IR/Value.h"
 #include "mlir/Support/LogicalResult.h"
 
+#include "simt-step/Dialect/SimtStructured/StructuredDialect.h"
+
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -117,7 +119,7 @@ private:
 
     mlir::Operation *originalTerminator = nullptr;
 
-    mlir::Operation *structuredOp = nullptr;
+    simt::structured::BlockOp structuredOp;
     mlir::Block *structuredBody = nullptr;
     mlir::BlockArgument structuredMaskArg;
     mlir::Value currentMask;
@@ -182,6 +184,8 @@ private:
 
   llvm::SmallVector<mlir::Value, 4> functionReturnValues;
   bool hasFunctionReturn = false;
+
+  llvm::SmallVector<simt::structured::BlockOp, 8> structuredOpsInOrder;
 };
 
 } // namespace conversion
