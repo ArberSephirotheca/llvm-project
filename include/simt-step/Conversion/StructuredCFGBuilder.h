@@ -80,6 +80,7 @@ private:
     BlockInfo *parent = nullptr;
     BlockInfo *prepareBlock = nullptr;
     BlockInfo *bodyBlock = nullptr;
+    BlockInfo *mergeBlock = nullptr;
     llvm::SmallVector<mlir::Value, 4> forwardedToBody;
     llvm::SmallVector<mlir::Value, 4> forwardedToExit;
   };

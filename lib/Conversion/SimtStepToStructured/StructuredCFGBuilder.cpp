@@ -382,7 +382,7 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
 
               EdgeInfo falseEdge;
               falseEdge.source = loopInfo.prepareBlock;
-              falseEdge.dest = loopInfo.parent;
+              falseEdge.dest = loopInfo.mergeBlock;
               falseEdge.kind = EdgeInfo::ConditionalFalse;
               if (!loopInfo.forwardedToExit.empty())
                 falseEdge.payload.assign(loopInfo.forwardedToExit.begin(),
@@ -415,7 +415,7 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
             if (auto breakOp = llvm::dyn_cast<simt::dialect::BreakOp>(&nested)) {
               EdgeInfo exitEdge;
               exitEdge.source = loopInfo.bodyBlock;
-              exitEdge.dest = loopInfo.parent;
+              exitEdge.dest = loopInfo.mergeBlock;
               exitEdge.kind = EdgeInfo::Plain;
               exitEdge.origin = breakOp;
               exitEdge.payload.assign(breakOp->getOperands().begin(),
@@ -929,6 +929,12 @@ LogicalResult StructuredCFGBuilder::analyseLoopOp(BlockInfo &header,
   BlockInfo &bodyInfo = getOrCreateBlockInfo(&bodyRegion.front());
   info.prepareBlock = &prepareInfo;
   info.bodyBlock = &bodyInfo;
+
+  if (mlir::Block *parentBlock = op->getBlock()) {
+    auto it = std::next(parentBlock->getIterator());
+    if (it != parentBlock->getParent()->end())
+      info.mergeBlock = &getOrCreateBlockInfo(&*it);
+  }
 
   prepareInfo.requestsMaskPush = true;
   prepareInfo.requestsMaskPop = true;
