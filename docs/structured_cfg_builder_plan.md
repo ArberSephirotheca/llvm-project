@@ -124,7 +124,7 @@ private:
 ### Known Gaps (July 2025)
 - `computePayloads()` covers loop/switch tuple seeding but still lacks a full fixed-point walk over back-edges, so payloads sourced from nested yields may diverge from the eventual edge tuples.
 - `enumerateEdges()` still forwards the current block mask because per-edge masks are unset; `EdgeInfo::maskValues` remains unused. We will materialise precise lane masks in a later pass (e.g. mask-specialisation or dynamic block lowering).
-- `emitStructuredBlocks()` clones the original `simt_step.if/loop/switch` ops because per-op emission is still pending and `emitStructuredBlock()` is a stub; we need to drive emission purely from analysed metadata.
+- `emitStructuredBlocks()` still clones control ops because `emitStructuredBlock()` is a stub and loop `continue`/`break` rewriting is unfinished; factoring the emission into the helper is the next milestone.
 - Mask plumbing stops at block entry: `materialiseMaskExit()` is a no-op, so we never pop/merge on exit, and switch/loop reconvergence does not update the merge stack.
 - Payload helpers now seed loop/switch payloads but still skip the fixed-point revisit for back-edges introduced by nested regions.
 

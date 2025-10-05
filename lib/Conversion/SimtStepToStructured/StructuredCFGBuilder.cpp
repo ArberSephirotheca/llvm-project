@@ -703,102 +703,10 @@ LogicalResult StructuredCFGBuilder::emitStructuredBlocks() {
     builder.setInsertionPointAfter(blockOp);
   }
 
-  // Second pass: set attributes and clone bodies (excluding terminators).
-  for (BlockInfo *info : orderedInfos) {
-    auto blockOp = info->structuredOp;
-    if (!blockOp)
-      continue;
-
-    auto setSymbolAttr = [&](StringRef attrName, BlockInfo *target) {
-      if (!target || !target->structuredOp)
-        return;
-      auto ref = FlatSymbolRefAttr::get(builder.getContext(),
-                                        target->structuredOp.getSymName());
-      blockOp->setAttr(attrName, ref);
-    };
-
-    if (info->mergeTarget)
-      setSymbolAttr(blockOp.getMergeTargetAttrName(),
-                    &blockInfos[info->mergeTarget]);
-    else
-      blockOp->removeAttr(blockOp.getMergeTargetAttrName());
-
-    if (info->continueTarget)
-      setSymbolAttr(blockOp.getContinueTargetAttrName(),
-                    &blockInfos[info->continueTarget]);
-    else
-      blockOp->removeAttr(blockOp.getContinueTargetAttrName());
-
-    if (failed(materialiseMaskEntry(*info)))
+  // Second pass: populate each structured block.
+  for (BlockInfo *info : orderedInfos)
+    if (failed(emitStructuredBlock(*info)))
       return failure();
-
-    OpBuilder bodyBuilder(info->structuredBody,
-                          info->structuredBody->begin());
-    auto mapValueInline = [&](Value v, Operation *contextOp)
-                              -> std::optional<Value> {
-      if (!v)
-        return Value();
-      if (Value mapped = mapper->lookupOrNull(v))
-        return mapped;
-      if (contextOp)
-        contextOp->emitError("unable to remap operand during structured lowering");
-      return std::nullopt;
-    };
-    auto mapValuesInline = [&](ValueRange vals, Operation *contextOp,
-                               SmallVectorImpl<Value> &out) -> LogicalResult {
-      for (Value v : vals) {
-        auto mapped = mapValueInline(v, contextOp);
-        if (!mapped)
-          return failure();
-        out.push_back(*mapped);
-      }
-      return success();
-    };
-
-    if (info->original) {
-      for (Operation &op : info->original->without_terminator()) {
-        if (llvm::is_contained(info->controlOps, &op))
-          continue;
-        if (auto it = info->perOpEdges.find(&op); it != info->perOpEdges.end()) {
-          for (const EdgeInfo *edge : it->second) {
-            if (!edge || !edge->dest || !edge->dest->structuredOp) {
-              op.emitError("missing destination for structured branch");
-              return failure();
-            }
-            SmallVector<Value> operands;
-            if (failed(mapValuesInline(edge->payload, &op, operands)))
-              return failure();
-            auto targetAttr = FlatSymbolRefAttr::get(
-                builder.getContext(), edge->dest->structuredOp.getSymName());
-            Value mask = info->currentMask ? info->currentMask
-                                           : info->structuredMaskArg;
-            if (info->requestsMaskPush) {
-              auto pop = bodyBuilder.create<simt::structured::MaskPopOp>(
-                  op.getLoc(), mask.getType());
-              mask = pop.getResult();
-              info->currentMask = mask;
-            }
-            bodyBuilder.create<simt::structured::BranchOp>(op.getLoc(), mask,
-                                                           targetAttr,
-                                                           operands);
-          }
-          info->perOpEdges.erase(it);
-          continue;
-        }
-        if (isa<cf::BranchOp, cf::CondBranchOp, func::ReturnOp>(&op))
-          continue;
-        if (auto active = dyn_cast<simt::dialect::ActiveMaskOp>(&op)) {
-          mapper->map(active.getResult(), info->currentMask);
-          continue;
-        }
-        Operation *cloned = bodyBuilder.clone(op, *mapper);
-        mapper->map(op.getResults(), cloned->getResults());
-      }
-    }
-
-    if (failed(emitStructuredTerminator(*info)))
-      return failure();
-  }
 
   return success();
 }
@@ -899,10 +807,97 @@ LogicalResult StructuredCFGBuilder::cleanupOriginalCFG() {
 }
 
 LogicalResult StructuredCFGBuilder::emitStructuredBlock(BlockInfo &info) {
-  (void)info;
-  // TODO: populate a single structured block, including carried arguments and
-  // mask entry prologue.
-  return signalUnimplemented(func);
+  simt::structured::BlockOp blockOp = info.structuredOp;
+  if (!blockOp)
+    return success();
+
+  auto setSymbolAttr = [&](StringRef attrName, BlockInfo *target) {
+    if (!target || !target->structuredOp)
+      return;
+    auto ref = FlatSymbolRefAttr::get(func.getContext(),
+                                      target->structuredOp.getSymName());
+    blockOp->setAttr(attrName, ref);
+  };
+
+  if (info.mergeTarget)
+    setSymbolAttr(blockOp.getMergeTargetAttrName(),
+                  lookupBlockInfo(info.mergeTarget));
+  else
+    blockOp->removeAttr(blockOp.getMergeTargetAttrName());
+
+  if (info.continueTarget)
+    setSymbolAttr(blockOp.getContinueTargetAttrName(),
+                  lookupBlockInfo(info.continueTarget));
+  else
+    blockOp->removeAttr(blockOp.getContinueTargetAttrName());
+
+  if (failed(materialiseMaskEntry(info)))
+    return failure();
+
+  OpBuilder bodyBuilder(info.structuredBody, info.structuredBody->begin());
+  auto mapValueInline = [&](Value v, Operation *contextOp)
+                            -> std::optional<Value> {
+    if (!v)
+      return Value();
+    if (Value mapped = mapper->lookupOrNull(v))
+      return mapped;
+    if (contextOp)
+      contextOp->emitError("unable to remap operand during structured lowering");
+    return std::nullopt;
+  };
+  auto mapValuesInline = [&](ValueRange vals, Operation *contextOp,
+                             SmallVectorImpl<Value> &out) -> LogicalResult {
+    for (Value v : vals) {
+      auto mapped = mapValueInline(v, contextOp);
+      if (!mapped)
+        return failure();
+      out.push_back(*mapped);
+    }
+    return success();
+  };
+
+  if (info.original) {
+    for (Operation &op : info.original->without_terminator()) {
+      if (llvm::is_contained(info.controlOps, &op))
+        continue;
+      if (auto it = info.perOpEdges.find(&op); it != info.perOpEdges.end()) {
+        for (const EdgeInfo *edge : it->second) {
+          if (!edge || !edge->dest || !edge->dest->structuredOp) {
+            op.emitError("missing destination for structured branch");
+            return failure();
+          }
+          SmallVector<Value> operands;
+          if (failed(mapValuesInline(edge->payload, &op, operands)))
+            return failure();
+          auto targetAttr = FlatSymbolRefAttr::get(
+              func.getContext(), edge->dest->structuredOp.getSymName());
+          Value mask = info.currentMask ? info.currentMask
+                                           : info.structuredMaskArg;
+          if (info.requestsMaskPush) {
+            auto pop = bodyBuilder.create<simt::structured::MaskPopOp>(
+                op.getLoc(), mask.getType());
+            mask = pop.getResult();
+            info.currentMask = mask;
+          }
+          bodyBuilder.create<simt::structured::BranchOp>(op.getLoc(), mask,
+                                                         targetAttr,
+                                                         operands);
+        }
+        info.perOpEdges.erase(it);
+        continue;
+      }
+      if (isa<cf::BranchOp, cf::CondBranchOp, func::ReturnOp>(&op))
+        continue;
+      if (auto active = dyn_cast<simt::dialect::ActiveMaskOp>(&op)) {
+        mapper->map(active.getResult(), info.currentMask);
+        continue;
+      }
+      Operation *cloned = bodyBuilder.clone(op, *mapper);
+      mapper->map(op.getResults(), cloned->getResults());
+    }
+  }
+
+  return emitStructuredTerminator(info);
 }
 
 LogicalResult StructuredCFGBuilder::emitStructuredTerminator(BlockInfo &source) {
