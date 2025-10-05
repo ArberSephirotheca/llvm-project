@@ -860,6 +860,64 @@ LogicalResult StructuredCFGBuilder::emitStructuredBlock(BlockInfo &info) {
     for (Operation &op : info.original->without_terminator()) {
       if (llvm::is_contained(info.controlOps, &op))
         continue;
+      if (auto cont = dyn_cast<simt::dialect::ContinueOp>(&op)) {
+        auto it = info.perOpEdges.find(&op);
+        if (it == info.perOpEdges.end() || it->second.empty()) {
+          cont.emitError("missing structured continue edge");
+          return failure();
+        }
+        for (const EdgeInfo *edge : it->second) {
+          if (!edge || !edge->dest || !edge->dest->structuredOp) {
+            cont.emitError("missing destination for structured continue");
+            return failure();
+          }
+          SmallVector<Value> operands;
+          if (failed(mapValuesInline(edge->payload, cont, operands)))
+            return failure();
+          Value mask = info.currentMask ? info.currentMask : info.structuredMaskArg;
+          if (info.requestsMaskPush) {
+            auto pop = bodyBuilder.create<simt::structured::MaskPopOp>(
+                cont.getLoc(), mask.getType());
+            mask = pop.getResult();
+            info.currentMask = mask;
+          }
+          auto targetAttr = FlatSymbolRefAttr::get(
+              func.getContext(), edge->dest->structuredOp.getSymName());
+          bodyBuilder.create<simt::structured::BranchOp>(cont.getLoc(), mask,
+                                                         targetAttr, operands);
+        }
+        info.perOpEdges.erase(it);
+        continue;
+      }
+      if (auto brk = dyn_cast<simt::dialect::BreakOp>(&op)) {
+        auto it = info.perOpEdges.find(&op);
+        if (it == info.perOpEdges.end() || it->second.empty()) {
+          brk.emitError("missing structured break edge");
+          return failure();
+        }
+        for (const EdgeInfo *edge : it->second) {
+          if (!edge || !edge->dest || !edge->dest->structuredOp) {
+            brk.emitError("missing destination for structured break");
+            return failure();
+          }
+          SmallVector<Value> operands;
+          if (failed(mapValuesInline(edge->payload, brk, operands)))
+            return failure();
+          Value mask = info.currentMask ? info.currentMask : info.structuredMaskArg;
+          if (info.requestsMaskPush) {
+            auto pop = bodyBuilder.create<simt::structured::MaskPopOp>(
+                brk.getLoc(), mask.getType());
+            mask = pop.getResult();
+            info.currentMask = mask;
+          }
+          auto targetAttr = FlatSymbolRefAttr::get(
+              func.getContext(), edge->dest->structuredOp.getSymName());
+          bodyBuilder.create<simt::structured::BranchOp>(brk.getLoc(), mask,
+                                                         targetAttr, operands);
+        }
+        info.perOpEdges.erase(it);
+        continue;
+      }
       if (auto it = info.perOpEdges.find(&op); it != info.perOpEdges.end()) {
         for (const EdgeInfo *edge : it->second) {
           if (!edge || !edge->dest || !edge->dest->structuredOp) {
