@@ -18,6 +18,8 @@
 
 #include <llvm/Support/Casting.h>
 
+#include <cassert>
+
 #include <llvm/ADT/STLExtras.h>
 #include <llvm/ADT/StringRef.h>
 #include <llvm/ADT/DenseSet.h>
@@ -1169,6 +1171,7 @@ LogicalResult StructuredCFGBuilder::analyseIfOp(BlockInfo &header,
   info.op = op;
   info.parent = &header;
   info.mergeBlock = &header;
+  info.mergeBlock = &header;
   info.resultTypes.clear();
   info.results.clear();
   info.resultTypes.reserve(ifOp.getNumResults());
@@ -1227,11 +1230,7 @@ LogicalResult StructuredCFGBuilder::analyseLoopOp(BlockInfo &header,
   info.prepareBlock = &prepareInfo;
   info.bodyBlock = &bodyInfo;
 
-  if (mlir::Block *parentBlock = op->getBlock()) {
-    auto it = std::next(parentBlock->getIterator());
-    if (it != parentBlock->getParent()->end())
-      info.mergeBlock = &getOrCreateBlockInfo(&*it);
-  }
+  ensureLoopMergeBlock(info, op);
 
   prepareInfo.requestsMaskPush = true;
   prepareInfo.requestsMaskPop = true;
@@ -1385,6 +1384,38 @@ LogicalResult StructuredCFGBuilder::materialiseMaskEntry(BlockInfo &info) {
 
   info.currentMask = mask;
   return success();
+}
+
+
+StructuredCFGBuilder::BlockInfo &
+StructuredCFGBuilder::ensureLoopMergeBlock(LoopInfo &loopInfo,
+                                           mlir::Operation *loopOperation) {
+  if (loopInfo.mergeBlock)
+    return *loopInfo.mergeBlock;
+
+  auto loopOp = llvm::dyn_cast<simt::dialect::LoopOp>(loopOperation);
+  assert(loopOp && "expected simt_step.loop operation");
+
+  mlir::Block *parentBlock = loopOp->getBlock();
+  auto splitPoint = std::next(loopOp->getIterator());
+  mlir::Block *mergeBlock = parentBlock->splitBlock(splitPoint);
+
+  BlockInfo &mergeInfo = getOrCreateBlockInfo(mergeBlock);
+  if (mergeInfo.symbolName.empty()) {
+    if (loopInfo.parent)
+      mergeInfo.symbolName = loopInfo.parent->symbolName + std::string(".merge");
+    else
+      mergeInfo.symbolName = "block" + std::to_string(blockInfos.size());
+  }
+
+  auto orderIt = llvm::find(blockOrder, parentBlock);
+  if (orderIt != blockOrder.end())
+    blockOrder.insert(orderIt + 1, mergeBlock);
+  else
+    blockOrder.push_back(mergeBlock);
+
+  loopInfo.mergeBlock = &mergeInfo;
+  return mergeInfo;
 }
 
 LogicalResult StructuredCFGBuilder::materialiseMaskExit(BlockInfo &info) {
