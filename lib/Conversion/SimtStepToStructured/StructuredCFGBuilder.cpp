@@ -20,6 +20,7 @@
 
 #include <llvm/ADT/STLExtras.h>
 #include <llvm/ADT/StringRef.h>
+#include <llvm/ADT/DenseSet.h>
 
 using namespace mlir;
 
@@ -60,6 +61,8 @@ LogicalResult StructuredCFGBuilder::build() {
   if (failed(computePayloads()))
     return failure();
   if (failed(enumerateEdges()))
+    return failure();
+  if (failed(stabilisePayloadSeeds()))
     return failure();
   if (failed(emitStructuredBlocks()))
     return failure();
@@ -794,6 +797,76 @@ LogicalResult StructuredCFGBuilder::emitStructuredBlocks() {
   return success();
 }
 
+LogicalResult StructuredCFGBuilder::stabilisePayloadSeeds() {
+  if (edges.empty())
+    return success();
+
+  auto mergePayload = [&](BlockInfo &dest, llvm::ArrayRef<mlir::Value> incoming,
+                          bool &changed) -> LogicalResult {
+    if (incoming.size() != dest.payloadSeed.size()) {
+      func.emitError("payload arity mismatch while merging seeds");
+      return failure();
+    }
+    for (auto [index, value] : llvm::enumerate(incoming)) {
+      if (!value)
+        continue;
+      mlir::Value current = dest.payloadSeed[index];
+      mlir::Value placeholder =
+          (index < dest.blockArgs.size()) ? dest.blockArgs[index] : mlir::Value();
+      if (!current || current == placeholder) {
+        if (current != value) {
+          dest.payloadSeed[index] = value;
+          changed = true;
+        }
+        continue;
+      }
+      if (value == current || value == placeholder)
+        continue;
+      func.emitError("conflicting payload values for block");
+      return failure();
+    }
+    return success();
+  };
+
+  llvm::SmallVector<BlockInfo *, 16> worklist;
+  llvm::DenseSet<BlockInfo *> queued;
+  auto enqueue = [&](BlockInfo *info) {
+    if (!info)
+      return;
+    if (queued.insert(info).second)
+      worklist.push_back(info);
+  };
+
+  for (EdgeInfo &edge : edges)
+    if (edge.dest && !edge.payload.empty())
+      enqueue(edge.dest);
+
+  while (!worklist.empty()) {
+    BlockInfo *dest = worklist.pop_back_val();
+    queued.erase(dest);
+
+    bool changed = false;
+    for (EdgeInfo &edge : edges) {
+      if (edge.dest != dest || edge.payload.empty())
+        continue;
+      if (failed(mergePayload(*dest, edge.payload, changed)))
+        return failure();
+    }
+
+    if (changed)
+      for (const EdgeInfo *edge : dest->outgoingEdges)
+        if (edge && edge->dest)
+          enqueue(edge->dest);
+  }
+
+  for (EdgeInfo &edge : edges)
+    if (edge.dest && edge.payload.empty())
+      if (failed(ensurePayloadShape(edge)))
+        return failure();
+
+  return success();
+}
+
 LogicalResult StructuredCFGBuilder::cleanupOriginalCFG() {
   if (structuredOpsInOrder.empty())
     return success();
@@ -805,10 +878,12 @@ LogicalResult StructuredCFGBuilder::cleanupOriginalCFG() {
       blockOp->remove();
 
   // Drop all existing blocks in the function.
-  func.getBody().clear();
+  mlir::Region &body = func.getFunctionBody();
+  while (!body.empty())
+    body.front().erase();
 
   // Recreate a single entry block to host the structured blocks.
-  mlir::Block *entry = func.addBlock();
+  mlir::Block *entry = &body.emplaceBlock();
   OpBuilder builder(entry, entry->begin());
   for (simt::structured::BlockOp blockOp : structuredOpsInOrder)
     if (blockOp)
