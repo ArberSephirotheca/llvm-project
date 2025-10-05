@@ -772,6 +772,12 @@ LogicalResult StructuredCFGBuilder::emitStructuredBlocks() {
                 builder.getContext(), edge->dest->structuredOp.getSymName());
             Value mask = info->currentMask ? info->currentMask
                                            : info->structuredMaskArg;
+            if (info->requestsMaskPush) {
+              auto pop = bodyBuilder.create<simt::structured::MaskPopOp>(
+                  op.getLoc(), mask.getType());
+              mask = pop.getResult();
+              info->currentMask = mask;
+            }
             bodyBuilder.create<simt::structured::BranchOp>(op.getLoc(), mask,
                                                            targetAttr,
                                                            operands);
@@ -902,6 +908,9 @@ LogicalResult StructuredCFGBuilder::emitStructuredBlock(BlockInfo &info) {
 LogicalResult StructuredCFGBuilder::emitStructuredTerminator(BlockInfo &source) {
   if (!source.structuredBody)
     return success();
+
+  if (failed(materialiseMaskExit(source)))
+    return failure();
 
   Operation *origTerm = source.originalTerminator;
   OpBuilder builder(source.structuredBody, source.structuredBody->end());
@@ -1325,7 +1334,21 @@ LogicalResult StructuredCFGBuilder::materialiseMaskEntry(BlockInfo &info) {
 }
 
 LogicalResult StructuredCFGBuilder::materialiseMaskExit(BlockInfo &info) {
-  (void)info;
+  if (!info.structuredBody)
+    return success();
+
+  if (!info.requestsMaskPush)
+    return success();
+
+  Location loc = info.originalTerminator ? info.originalTerminator->getLoc()
+                                          : func.getLoc();
+  Value current = info.currentMask ? info.currentMask : info.structuredMaskArg;
+  if (!current)
+    return success();
+
+  OpBuilder builder(info.structuredBody, info.structuredBody->end());
+  auto pop = builder.create<simt::structured::MaskPopOp>(loc, current.getType());
+  info.currentMask = pop.getResult();
   return success();
 }
 
