@@ -132,8 +132,6 @@ private:
     bool requestsMaskPop = false;
     std::string symbolName;
     llvm::SmallVector<const EdgeInfo *, 4> outgoingEdges;
-    llvm::DenseMap<mlir::Operation *, llvm::SmallVector<const EdgeInfo *, 2>>
-        perOpEdges;
   };
 
   mlir::LogicalResult analyseBlocks();

@@ -149,7 +149,6 @@ LogicalResult StructuredCFGBuilder::analyseBlocks() {
     info.currentMask = nullptr;
     info.structuredArgs.clear();
     info.originalTerminator = nullptr;
-    info.perOpEdges.clear();
     if (index == 0)
       info.symbolName = "entry";
     else
@@ -508,7 +507,7 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
               edges.push_back(std::move(backEdge));
               if (edges.back().dest && failed(ensurePayloadShape(edges.back())))
                 return failure();
-              loopInfo.bodyBlock->perOpEdges[cont].push_back(&edges.back());
+              loopInfo.bodyBlock->outgoingEdges.push_back(&edges.back());
               continue;
             }
             if (auto breakOp = llvm::dyn_cast<simt::dialect::BreakOp>(&nested)) {
@@ -522,7 +521,7 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
               edges.push_back(std::move(exitEdge));
               if (edges.back().dest && failed(ensurePayloadShape(edges.back())))
                 return failure();
-              loopInfo.bodyBlock->perOpEdges[breakOp].push_back(&edges.back());
+              loopInfo.bodyBlock->outgoingEdges.push_back(&edges.back());
               continue;
             }
             if (auto yieldOp = llvm::dyn_cast<simt::dialect::YieldOp>(&nested)) {
@@ -583,7 +582,7 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
               return failure();
             edges.push_back(std::move(exitEdge));
             if (caseInfo)
-              caseInfo->perOpEdges[yieldOp].push_back(&edges.back());
+              caseInfo->outgoingEdges.push_back(&edges.back());
             return success();
           };
 
@@ -609,7 +608,7 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
               return failure();
             edges.push_back(std::move(fallEdge));
             if (caseInfo)
-              caseInfo->perOpEdges[yieldOp].push_back(&edges.back());
+              caseInfo->outgoingEdges.push_back(&edges.back());
 
             if (failed(emitExitEdge(EdgeInfo::ConditionalFalse, switchInfo.parent)))
               return failure();
@@ -647,7 +646,8 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
                                            ? switchInfo.defaultBlock->original
                                                  ->getTerminator()
                                            : nullptr;
-            switchInfo.defaultBlock->perOpEdges[yieldOp].push_back(&edges.back());
+            if (switchInfo.defaultBlock)
+              switchInfo.defaultBlock->outgoingEdges.push_back(&edges.back());
           }
         }
 
@@ -861,13 +861,23 @@ LogicalResult StructuredCFGBuilder::emitStructuredBlock(BlockInfo &info) {
       if (llvm::is_contained(info.controlOps, &op))
         continue;
       if (auto cont = dyn_cast<simt::dialect::ContinueOp>(&op)) {
-        auto it = info.perOpEdges.find(&op);
-        if (it == info.perOpEdges.end() || it->second.empty()) {
+        SmallVector<const EdgeInfo *, 2> edgesForContinue;
+        auto &outgoing = info.outgoingEdges;
+        for (auto it = outgoing.begin(); it != outgoing.end();) {
+          const EdgeInfo *edge = *it;
+          if (edge && edge->origin == cont) {
+            edgesForContinue.push_back(edge);
+            it = outgoing.erase(it);
+          } else {
+            ++it;
+          }
+        }
+        if (edgesForContinue.empty()) {
           cont.emitError("missing structured continue edge");
           return failure();
         }
-        for (const EdgeInfo *edge : it->second) {
-          if (!edge || !edge->dest || !edge->dest->structuredOp) {
+        for (const EdgeInfo *edge : edgesForContinue) {
+          if (!edge->dest || !edge->dest->structuredOp) {
             cont.emitError("missing destination for structured continue");
             return failure();
           }
@@ -886,17 +896,26 @@ LogicalResult StructuredCFGBuilder::emitStructuredBlock(BlockInfo &info) {
           bodyBuilder.create<simt::structured::BranchOp>(cont.getLoc(), mask,
                                                          targetAttr, operands);
         }
-        info.perOpEdges.erase(it);
         continue;
       }
       if (auto brk = dyn_cast<simt::dialect::BreakOp>(&op)) {
-        auto it = info.perOpEdges.find(&op);
-        if (it == info.perOpEdges.end() || it->second.empty()) {
+        SmallVector<const EdgeInfo *, 2> edgesForBreak;
+        auto &outgoing = info.outgoingEdges;
+        for (auto it = outgoing.begin(); it != outgoing.end();) {
+          const EdgeInfo *edge = *it;
+          if (edge && edge->origin == brk) {
+            edgesForBreak.push_back(edge);
+            it = outgoing.erase(it);
+          } else {
+            ++it;
+          }
+        }
+        if (edgesForBreak.empty()) {
           brk.emitError("missing structured break edge");
           return failure();
         }
-        for (const EdgeInfo *edge : it->second) {
-          if (!edge || !edge->dest || !edge->dest->structuredOp) {
+        for (const EdgeInfo *edge : edgesForBreak) {
+          if (!edge->dest || !edge->dest->structuredOp) {
             brk.emitError("missing destination for structured break");
             return failure();
           }
@@ -915,33 +934,6 @@ LogicalResult StructuredCFGBuilder::emitStructuredBlock(BlockInfo &info) {
           bodyBuilder.create<simt::structured::BranchOp>(brk.getLoc(), mask,
                                                          targetAttr, operands);
         }
-        info.perOpEdges.erase(it);
-        continue;
-      }
-      if (auto it = info.perOpEdges.find(&op); it != info.perOpEdges.end()) {
-        for (const EdgeInfo *edge : it->second) {
-          if (!edge || !edge->dest || !edge->dest->structuredOp) {
-            op.emitError("missing destination for structured branch");
-            return failure();
-          }
-          SmallVector<Value> operands;
-          if (failed(mapValuesInline(edge->payload, &op, operands)))
-            return failure();
-          auto targetAttr = FlatSymbolRefAttr::get(
-              func.getContext(), edge->dest->structuredOp.getSymName());
-          Value mask = info.currentMask ? info.currentMask
-                                           : info.structuredMaskArg;
-          if (info.requestsMaskPush) {
-            auto pop = bodyBuilder.create<simt::structured::MaskPopOp>(
-                op.getLoc(), mask.getType());
-            mask = pop.getResult();
-            info.currentMask = mask;
-          }
-          bodyBuilder.create<simt::structured::BranchOp>(op.getLoc(), mask,
-                                                         targetAttr,
-                                                         operands);
-        }
-        info.perOpEdges.erase(it);
         continue;
       }
       if (isa<cf::BranchOp, cf::CondBranchOp, func::ReturnOp>(&op))
