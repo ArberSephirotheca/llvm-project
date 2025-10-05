@@ -74,6 +74,9 @@ private:
     BlockInfo *parent = nullptr;
     BlockInfo *thenBlock = nullptr;
     BlockInfo *elseBlock = nullptr;
+    BlockInfo *mergeBlock = nullptr;
+    llvm::SmallVector<mlir::Type, 4> resultTypes;
+    llvm::SmallVector<mlir::Value, 4> results;
     mlir::Value condition;
   };
 

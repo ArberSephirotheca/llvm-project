@@ -858,8 +858,6 @@ LogicalResult StructuredCFGBuilder::emitStructuredBlock(BlockInfo &info) {
 
   if (info.original) {
     for (Operation &op : info.original->without_terminator()) {
-      if (llvm::is_contained(info.controlOps, &op))
-        continue;
       if (auto cont = dyn_cast<simt::dialect::ContinueOp>(&op)) {
         SmallVector<const EdgeInfo *, 2> edgesForContinue;
         auto &outgoing = info.outgoingEdges;
@@ -1170,6 +1168,15 @@ LogicalResult StructuredCFGBuilder::analyseIfOp(BlockInfo &header,
   IfInfo &info = ifInfos[op];
   info.op = op;
   info.parent = &header;
+  info.mergeBlock = &header;
+  info.resultTypes.clear();
+  info.results.clear();
+  info.resultTypes.reserve(ifOp.getNumResults());
+  info.results.reserve(ifOp.getNumResults());
+  for (mlir::Value result : ifOp.getResults()) {
+    info.resultTypes.push_back(result.getType());
+    info.results.push_back(result);
+  }
 
   header.requestsMaskPush = true;
   header.requestsMaskPop = true;
@@ -1187,6 +1194,8 @@ LogicalResult StructuredCFGBuilder::analyseIfOp(BlockInfo &header,
   if (!elseRegion.empty()) {
     BlockInfo &elseInfo = getOrCreateBlockInfo(&elseRegion.front());
     info.elseBlock = &elseInfo;
+  } else {
+    info.elseBlock = nullptr;
   }
 
   info.condition = ifOp.getCondition();

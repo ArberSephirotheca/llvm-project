@@ -125,6 +125,11 @@ private:
 - `computePayloads()` covers loop/switch tuple seeding but still lacks a full fixed-point walk over back-edges, so payloads sourced from nested yields may diverge from the eventual edge tuples.
 - `enumerateEdges()` still forwards the current block mask because per-edge masks are unset; `EdgeInfo::maskValues` remains unused. We will materialise precise lane masks in a later pass (e.g. mask-specialisation or dynamic block lowering).
 - `emitStructuredBlock()` now populates blocks but still skips nested `simt_step.if` / `simt_step.switch` ops; lowering those structured regions remains on the TODO list before we can delete the legacy control-op scaffolding.
+  * Design sketch: handle nested control with small recursive helpers (`emitStructuredIf`, `emitStructuredSwitch`, etc.) that build the sub-CFG in terms of `simt_struct.block`, call `materialiseMaskEntry/Exit` for mask plumbing, reuse `ensurePayloadShape` for tuples, and dispatch to `emitStructuredTerminator` so no `simt_step` ops remain after lowering.
+    - Step 1: snapshot the nested `if`'s `then`/`else` blocks during analysis (record block infos + yields).
+    - Step 2: in `emitStructuredBlock()`, replace the clone path with an `emitStructuredIf()` helper that builds structured blocks for header/then/else/join, threading mask entry/exit via the existing utilities.
+    - Step 3: reuse `ensurePayloadShape`/`propagatePayload` to map the `then`/`else` payload tuples into the join block and emit the cond-branch using `emitStructuredTerminator()`.
+    - Step 4: remove the fallback cloning for nested `simt_step.if` once the helper covers all cases, add regression tests.
 - Mask plumbing stops at block entry: `materialiseMaskExit()` is a no-op, so we never pop/merge on exit, and switch/loop reconvergence does not update the merge stack.
 - Payload helpers now seed loop/switch payloads but still skip the fixed-point revisit for back-edges introduced by nested regions.
 
