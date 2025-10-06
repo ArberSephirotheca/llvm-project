@@ -136,7 +136,7 @@ private:
     bool requestsMaskPush = false;
     bool requestsMaskPop = false;
     std::string symbolName;
-    llvm::SmallVector<const EdgeInfo *, 4> outgoingEdges;
+    llvm::SmallVector<unsigned, 4> outgoingEdges;
   };
 
   mlir::LogicalResult analyseBlocks();
