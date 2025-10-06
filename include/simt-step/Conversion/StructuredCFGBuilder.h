@@ -75,6 +75,7 @@ private:
     BlockInfo *thenBlock = nullptr;
     BlockInfo *elseBlock = nullptr;
     BlockInfo *mergeBlock = nullptr;
+    llvm::SmallVector<mlir::BlockArgument, 4> mergeArgs;
     llvm::SmallVector<mlir::Type, 4> resultTypes;
     llvm::SmallVector<mlir::Value, 4> results;
     mlir::Value condition;
@@ -86,6 +87,7 @@ private:
     BlockInfo *prepareBlock = nullptr;
     BlockInfo *bodyBlock = nullptr;
     BlockInfo *mergeBlock = nullptr;
+    llvm::SmallVector<mlir::BlockArgument, 4> mergeArgs;
     llvm::SmallVector<mlir::Value, 4> forwardedToBody;
     llvm::SmallVector<mlir::Value, 4> forwardedToExit;
   };

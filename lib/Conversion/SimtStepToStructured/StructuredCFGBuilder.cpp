@@ -1217,6 +1217,8 @@ LogicalResult StructuredCFGBuilder::analyseLoopOp(BlockInfo &header,
   LoopInfo &info = loopInfos[op];
   info.op = op;
   info.parent = &header;
+  info.mergeBlock = nullptr;
+  info.mergeArgs.clear();
 
   mlir::Region &prepareRegion = loopOp.getPrepareRegion();
   mlir::Region &bodyRegion = loopOp.getBodyRegion();
