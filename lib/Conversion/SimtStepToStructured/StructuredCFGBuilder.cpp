@@ -602,11 +602,27 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
           mergeEdge.origin = origin;
 
           SmallVector<mlir::Value, 8> payload;
-          if (ifInfo.parent)
-            payload.append(ifInfo.parent->payloadSeed.begin(),
-                           ifInfo.parent->payloadSeed.end());
-          if (!values.empty())
-            payload.append(values.begin(), values.end());
+          unsigned parentSize = mergeDest ? mergeDest->payloadBlockArgOffset : 0;
+          bool sourceHasBranch = false;
+
+          if (!edgeSource->payloadSeed.empty()) {
+            parentSize = edgeSource->payloadBlockArgOffset;
+            sourceHasBranch = edgeSource->payloadSeed.size() > parentSize;
+            payload.append(edgeSource->payloadSeed.begin(),
+                           edgeSource->payloadSeed.end());
+            if (!sourceHasBranch && !values.empty())
+              payload.append(values.begin(), values.end());
+          } else {
+            if (ifInfo.parent && !ifInfo.parent->payloadSeed.empty())
+              payload.append(ifInfo.parent->payloadSeed.begin(),
+                             ifInfo.parent->payloadSeed.end());
+            parentSize = payload.size();
+            if (!values.empty())
+              payload.append(values.begin(), values.end());
+          }
+
+          if (payload.size() < parentSize)
+            payload.resize(parentSize, Value());
 
           if (mergeDest && payload.size() < mergeDest->payloadSeed.size()) {
             auto begin = mergeDest->payloadSeed.begin() + payload.size();
@@ -1712,10 +1728,16 @@ LogicalResult StructuredCFGBuilder::ensurePayloadShape(EdgeInfo &edge) {
                             ? edge.dest->payloadSeed.size()
                             : edge.dest->blockArgs.size();
     if (edge.payload.size() != expected) {
-      func.emitError()
-          << "edge payload arity mismatch for block '"
-          << edge.dest->symbolName << "' (expected " << expected
-          << ", actual " << edge.payload.size() << ")";
+      auto diag = func.emitError()
+                    << "edge payload arity mismatch for block '"
+                    << edge.dest->symbolName << "' (expected " << expected
+                    << ", actual " << edge.payload.size() << ")";
+      if (edge.origin)
+        diag << " (origin " << edge.origin->getName() << ")";
+      diag << " parentOffset=" << edge.dest->payloadBlockArgOffset;
+      if (edge.source)
+        diag << ", source=" << edge.source->symbolName << " payload="
+             << edge.source->payloadSeed.size();
       return failure();
     }
     if (edge.dest->payloadSeed.empty()) {
