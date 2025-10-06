@@ -18,6 +18,8 @@
 
 #include <llvm/Support/Casting.h>
 #include <llvm/Support/ErrorHandling.h>
+#include <algorithm>
+#include <llvm/ADT/ScopeExit.h>
 
 #include <cassert>
 
@@ -603,37 +605,60 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
 
           SmallVector<mlir::Value, 8> payload;
           unsigned parentSize = mergeDest ? mergeDest->payloadBlockArgOffset : 0;
-          bool sourceHasBranch = false;
 
+          auto appendParent = [&](llvm::ArrayRef<mlir::Value> seed) {
+            if (seed.empty() || parentSize == 0)
+              return false;
+            unsigned count = std::min(parentSize, static_cast<unsigned>(seed.size()));
+            payload.append(seed.begin(), seed.begin() + count);
+            return count == parentSize;
+          };
+
+          bool haveParent = false;
           if (!edgeSource->payloadSeed.empty()) {
             parentSize = edgeSource->payloadBlockArgOffset;
-            sourceHasBranch = edgeSource->payloadSeed.size() > parentSize;
-            payload.append(edgeSource->payloadSeed.begin(),
-                           edgeSource->payloadSeed.end());
-            if (!sourceHasBranch && !values.empty())
-              payload.append(values.begin(), values.end());
-          } else {
-            if (ifInfo.parent && !ifInfo.parent->payloadSeed.empty())
-              payload.append(ifInfo.parent->payloadSeed.begin(),
-                             ifInfo.parent->payloadSeed.end());
-            parentSize = payload.size();
-            if (!values.empty())
-              payload.append(values.begin(), values.end());
+            haveParent = appendParent(edgeSource->payloadSeed);
+          }
+          if (!haveParent && ifInfo.parent && !ifInfo.parent->payloadSeed.empty())
+            haveParent = appendParent(ifInfo.parent->payloadSeed);
+          if (!haveParent && mergeDest && !mergeDest->payloadSeed.empty())
+            haveParent = appendParent(mergeDest->payloadSeed);
+
+          if (!haveParent && parentSize > payload.size()) {
+            if (mergeDest && mergeDest->payloadSeed.size() >= parentSize)
+              payload.append(mergeDest->payloadSeed.begin() + payload.size(),
+                             mergeDest->payloadSeed.begin() + parentSize);
+            else
+              payload.resize(parentSize, Value());
           }
 
-          if (payload.size() < parentSize)
-            payload.resize(parentSize, Value());
+          auto appendBranch = [&](llvm::ArrayRef<mlir::Value> vals) {
+            if (vals.empty())
+              return false;
+            payload.append(vals.begin(), vals.end());
+            return true;
+          };
 
-          if (mergeDest && payload.size() < mergeDest->payloadSeed.size()) {
-            auto begin = mergeDest->payloadSeed.begin() + payload.size();
-            payload.append(begin, mergeDest->payloadSeed.end());
-          }
+          if (!values.empty())
+            appendBranch(values);
+          else if (!edgeSource->payloadSeed.empty() &&
+                   edgeSource->payloadSeed.size() > parentSize)
+            appendBranch(llvm::ArrayRef(edgeSource->payloadSeed.begin() + parentSize,
+                                        edgeSource->payloadSeed.end()));
+
+          if (mergeDest && payload.size() < mergeDest->payloadSeed.size())
+            payload.append(mergeDest->payloadSeed.begin() + payload.size(),
+                           mergeDest->payloadSeed.end());
 
           if (payload.empty() && mergeDest)
             payload.append(mergeDest->payloadSeed.begin(),
                            mergeDest->payloadSeed.end());
 
-          mergeEdge.payload = std::move(payload);
+                    if (llvm::any_of(payload, [](mlir::Value v) { return !v; })) {
+            if (origin)
+              origin->emitRemark() << "edge has null payload entries";
+          }
+mergeEdge.payload = std::move(payload);
           if (failed(ensurePayloadShape(mergeEdge)))
             return failure();
 
@@ -1108,6 +1133,18 @@ LogicalResult StructuredCFGBuilder::emitStructuredBlock(BlockInfo &info) {
 
   OpBuilder bodyBuilder(info.structuredBody, info.structuredBody->begin());
 
+  SmallVector<std::pair<Value, Value>, 4> remappedSeeds;
+  auto restoreSeedMappings = llvm::make_scope_exit([&]() {
+    for (auto it = remappedSeeds.rbegin(); it != remappedSeeds.rend(); ++it) {
+      Value seed = it->first;
+      Value previous = it->second;
+      if (previous)
+        mapper->map(seed, previous);
+      else
+        mapper->erase(seed);
+    }
+  });
+
   for (auto [index, seed] : llvm::enumerate(info.payloadSeed)) {
     if (!seed)
       continue;
@@ -1116,6 +1153,7 @@ LogicalResult StructuredCFGBuilder::emitStructuredBlock(BlockInfo &info) {
     mlir::BlockArgument arg = info.payloadArgs[index];
     if (!arg)
       continue;
+    remappedSeeds.emplace_back(seed, mapper->lookupOrNull(seed));
     mapper->map(seed, arg);
   }
 
@@ -1155,6 +1193,22 @@ LogicalResult StructuredCFGBuilder::emitStructuredBlock(BlockInfo &info) {
             return failure();
           for (auto [index, result] : llvm::enumerate(nestedIf.getResults()))
             mapper->map(result, nestedInfo.mergeArgs[index]);
+          if (nestedInfo.mergeBlock) {
+            BlockInfo *mergeInfo = nestedInfo.mergeBlock;
+            if (info.payloadSeed.size() < mergeInfo->payloadSeed.size())
+              info.payloadSeed.resize(mergeInfo->payloadSeed.size());
+            unsigned parentCount = mergeInfo->payloadBlockArgOffset;
+            auto branchValues = llvm::ArrayRef(mergeInfo->payloadSeed)
+                                    .drop_front(parentCount);
+            if (!branchValues.empty()) {
+              unsigned start = info.payloadBlockArgOffset;
+              if (info.payloadSeed.size() < start)
+                info.payloadSeed.resize(start, Value());
+              if (info.payloadSeed.size() > start)
+                info.payloadSeed.resize(start);
+              info.payloadSeed.append(branchValues.begin(), branchValues.end());
+            }
+          }
           continue;
         }
       }
@@ -1291,8 +1345,11 @@ LogicalResult StructuredCFGBuilder::emitStructuredIf(BlockInfo &header,
       return Value();
     if (Value mapped = mapper->lookupOrNull(v))
       return mapped;
-    if (info.op)
+    if (info.op) {
       info.op->emitError() << "unable to map value in " << context;
+      if (Operation *def = v.getDefiningOp())
+        def->emitRemark() << "value defined here";
+    }
     return std::nullopt;
   };
 
@@ -1476,6 +1533,12 @@ LogicalResult StructuredCFGBuilder::emitStructuredTerminator(BlockInfo &source) 
   }
 
   auto buildBranch = [&](unsigned edgeIndex) -> LogicalResult {
+    if (edgeIndex != kInvalidEdge) {
+      EdgeInfo &edgeDbg = edges[edgeIndex];
+      if (origTerm) {
+        origTerm->emitRemark() << "building branch with payload size " << edgeDbg.payload.size();
+      }
+    }
     if (edgeIndex == kInvalidEdge)
       return failure();
     EdgeInfo &edge = edges[edgeIndex];
@@ -1487,6 +1550,9 @@ LogicalResult StructuredCFGBuilder::emitStructuredTerminator(BlockInfo &source) 
     SmallVector<Value> operands;
     if (failed(mapValues(edge.payload, operands, "branch payload")))
       return failure();
+    if (llvm::any_of(edge.payload, [](Value v) { return !v; }))
+      if (origTerm)
+        origTerm->emitRemark() << "edge payload contains null value";
     Value mask = source.currentMask ? source.currentMask : source.structuredMaskArg;
     auto targetAttr = FlatSymbolRefAttr::get(builder.getContext(),
                                              edge.dest->structuredOp.getSymName());
