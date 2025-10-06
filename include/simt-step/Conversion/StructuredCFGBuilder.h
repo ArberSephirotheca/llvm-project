@@ -79,6 +79,11 @@ private:
     llvm::SmallVector<mlir::Type, 4> resultTypes;
     llvm::SmallVector<mlir::Value, 4> results;
     mlir::Value condition;
+    llvm::SmallVector<mlir::Value, 4> thenYieldValues;
+    llvm::SmallVector<mlir::Value, 4> elseYieldValues;
+    mlir::Operation *thenYieldOp = nullptr;
+    mlir::Operation *elseYieldOp = nullptr;
+    bool elseImplicitYield = false;
   };
 
   struct LoopInfo {

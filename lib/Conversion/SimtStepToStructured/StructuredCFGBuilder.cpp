@@ -246,6 +246,45 @@ LogicalResult StructuredCFGBuilder::computePayloads() {
         return failure();
   }
 
+  // Capture if-yield payloads so nested selections propagate tuples to their
+  // merge blocks.
+  for (auto &entry : ifInfos) {
+    IfInfo &ifInfo = entry.second;
+    ifInfo.thenYieldValues.clear();
+    ifInfo.elseYieldValues.clear();
+    ifInfo.thenYieldOp = nullptr;
+    ifInfo.elseYieldOp = nullptr;
+    ifInfo.elseImplicitYield = false;
+
+    if (ifInfo.mergeBlock && !ifInfo.results.empty()) {
+      BlockInfo &mergeInfo = *ifInfo.mergeBlock;
+      if (mergeInfo.payloadSeed.size() < ifInfo.results.size())
+        mergeInfo.payloadSeed.resize(ifInfo.results.size());
+      for (auto [index, value] : llvm::enumerate(ifInfo.results))
+        mergeInfo.payloadSeed[index] = value;
+    }
+
+    auto recordYield = [&](BlockInfo *source,
+                           llvm::SmallVector<mlir::Value, 4> &out,
+                           mlir::Operation *&yieldOp) {
+      if (!source || !source->original)
+        return;
+      if (source->original->empty())
+        return;
+      Operation *terminator = source->original->getTerminator();
+      if (auto yield = llvm::dyn_cast<simt::dialect::YieldOp>(terminator)) {
+        out.assign(yield.getOperands().begin(), yield.getOperands().end());
+        yieldOp = yield;
+      }
+    };
+
+    recordYield(ifInfo.thenBlock, ifInfo.thenYieldValues, ifInfo.thenYieldOp);
+    if (ifInfo.elseBlock)
+      recordYield(ifInfo.elseBlock, ifInfo.elseYieldValues, ifInfo.elseYieldOp);
+    else if (!ifInfo.results.empty())
+      ifInfo.elseImplicitYield = true;
+  }
+
   // Switch headers inherit their initial payload directly from the op.
   for (auto &entry : switchInfos) {
     mlir::Operation *op = entry.first;
