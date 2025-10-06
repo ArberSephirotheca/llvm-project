@@ -1692,20 +1692,17 @@ LogicalResult StructuredCFGBuilder::ensurePayloadShape(EdgeInfo &edge) {
     return success();
 
   if (!edge.payload.empty()) {
-    if (!edge.dest->payloadSeed.empty()) {
-      if (edge.payload.size() > edge.dest->payloadSeed.size()) {
-        func.emitError()
-            << "edge payload arity exceeds destination seed for block '"
-            << edge.dest->symbolName << "' (expected "
-            << edge.dest->payloadSeed.size() << ", actual "
-            << edge.payload.size() << ")";
-        return failure();
-      }
-      if (edge.payload.size() < edge.dest->payloadSeed.size()) {
-        edge.payload.append(edge.dest->payloadSeed.begin() + edge.payload.size(),
-                            edge.dest->payloadSeed.end());
-      }
-    } else {
+    unsigned expected = !edge.dest->payloadSeed.empty()
+                            ? edge.dest->payloadSeed.size()
+                            : edge.dest->blockArgs.size();
+    if (edge.payload.size() != expected) {
+      func.emitError()
+          << "edge payload arity mismatch for block '"
+          << edge.dest->symbolName << "' (expected " << expected
+          << ", actual " << edge.payload.size() << ")";
+      return failure();
+    }
+    if (edge.dest->payloadSeed.empty()) {
       edge.dest->payloadSeed.assign(edge.payload.begin(), edge.payload.end());
       edge.dest->payloadBlockArgOffset =
           edge.dest->payloadSeed.size() >= edge.dest->blockArgs.size()
