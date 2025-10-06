@@ -250,29 +250,6 @@ LogicalResult StructuredCFGBuilder::computePayloads() {
   // merge blocks.
   for (auto &entry : ifInfos) {
     IfInfo &ifInfo = entry.second;
-    ifInfo.thenYieldValues.clear();
-    ifInfo.elseYieldValues.clear();
-    ifInfo.thenYieldOp = nullptr;
-    ifInfo.elseYieldOp = nullptr;
-    ifInfo.elseImplicitYield = false;
-
-    auto recordYield = [&](BlockInfo *source,
-                           llvm::SmallVector<mlir::Value, 4> &out,
-                           mlir::Operation *&yieldOp) {
-      if (!source || !source->original)
-        return;
-      if (source->original->empty())
-        return;
-      Operation *terminator = source->original->getTerminator();
-      if (auto yield = llvm::dyn_cast<simt::dialect::YieldOp>(terminator)) {
-        out.assign(yield.getOperands().begin(), yield.getOperands().end());
-        yieldOp = yield;
-      }
-    };
-
-    recordYield(ifInfo.thenBlock, ifInfo.thenYieldValues, ifInfo.thenYieldOp);
-    if (ifInfo.elseBlock)
-      recordYield(ifInfo.elseBlock, ifInfo.elseYieldValues, ifInfo.elseYieldOp);
   }
 
   // Switch headers inherit their initial payload directly from the op.
@@ -965,20 +942,6 @@ LogicalResult StructuredCFGBuilder::emitStructuredBlock(BlockInfo &info) {
     for (Operation &op : info.original->without_terminator()) {
       if (isa<simt::structured::BlockOp>(&op))
         continue;
-      if (auto nestedIf = dyn_cast<simt::dialect::IfOp>(&op)) {
-        if (auto it = ifInfos.find(nestedIf.getOperation());
-            it != ifInfos.end()) {
-          IfInfo &nestedInfo = it->second;
-          ensureIfMergeBlock(nestedInfo, nestedIf.getOperation());
-          for (auto [index, result] : llvm::enumerate(nestedIf.getResults()))
-            mapper->map(result, nestedInfo.mergeArgs[index]);
-          continue;
-        }
-      }
-      if (auto nestedIf = dyn_cast<simt::dialect::IfOp>(&op)) {
-        (void)nestedIf;
-        continue;
-      }
       if (auto cont = dyn_cast<simt::dialect::ContinueOp>(&op)) {
         SmallVector<unsigned, 2> edgesForContinue;
         auto &outgoing = info.outgoingEdges;
@@ -1069,6 +1032,71 @@ LogicalResult StructuredCFGBuilder::emitStructuredBlock(BlockInfo &info) {
   }
 
   return emitStructuredTerminator(info);
+}
+
+LogicalResult StructuredCFGBuilder::emitStructuredIf(BlockInfo &header,
+                                                     IfInfo &info) {
+  BlockInfo *thenInfo = info.thenBlock;
+  BlockInfo *elseInfo = info.elseBlock;
+  BlockInfo *mergeInfo = info.mergeBlock;
+  if (!thenInfo || !mergeInfo)
+    return failure();
+
+  Value condition = info.condition;
+  if (Value mapped = mapper->lookupOrNull(condition))
+    condition = mapped;
+
+  OpBuilder builder(header.structuredBody, header.structuredBody->end());
+  Location loc = info.op ? info.op->getLoc() : header.structuredOp.getLoc();
+
+  auto getTargetAttr = [&](BlockInfo *block) -> FlatSymbolRefAttr {
+    if (!block || !block->structuredOp)
+      return FlatSymbolRefAttr();
+    return FlatSymbolRefAttr::get(builder.getContext(),
+                                  block->structuredOp.getSymName());
+  };
+
+  auto mapPayload = [&](llvm::ArrayRef<mlir::Value> values,
+                        BlockInfo *source,
+                        llvm::SmallVectorImpl<Value> &out) -> LogicalResult {
+    for (Value value : values) {
+      if (Value mapped = mapper->lookupOrNull(value)) {
+        out.push_back(mapped);
+        continue;
+      }
+      if (source) {
+        if (value)
+          out.push_back(value);
+        else
+          out.push_back(Value());
+        continue;
+      }
+      return failure();
+    }
+    return success();
+  };
+
+  SmallVector<Value> thenPayload;
+  if (failed(mapPayload(info.thenYieldValues, thenInfo, thenPayload)))
+    return failure();
+
+  SmallVector<Value> elsePayload;
+  if (elseInfo) {
+    if (failed(mapPayload(info.elseYieldValues, elseInfo, elsePayload)))
+      return failure();
+  } else {
+    elsePayload.append(info.mergeArgs.begin(), info.mergeArgs.end());
+  }
+
+  Value mask = header.currentMask ? header.currentMask : header.structuredMaskArg;
+
+  builder.create<simt::structured::CondBranchOp>(
+      loc, condition, mask, mask, getTargetAttr(thenInfo),
+      getTargetAttr(elseInfo ? elseInfo : mergeInfo), thenPayload, elsePayload,
+      getTargetAttr(mergeInfo),
+      simt::structured::ReconvergencePolicyAttr());
+
+  return success();
 }
 
 LogicalResult StructuredCFGBuilder::emitStructuredTerminator(BlockInfo &source) {

@@ -152,6 +152,7 @@ private:
 
   mlir::LogicalResult emitStructuredBlock(BlockInfo &info);
   mlir::LogicalResult emitStructuredTerminator(BlockInfo &source);
+  mlir::LogicalResult emitStructuredIf(BlockInfo &header, IfInfo &info);
   mlir::LogicalResult stabilisePayloadSeeds();
 
   /// Helpers used while analysing structured control ops.
