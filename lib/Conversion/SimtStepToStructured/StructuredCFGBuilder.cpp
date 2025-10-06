@@ -154,6 +154,8 @@ LogicalResult StructuredCFGBuilder::analyseBlocks() {
     info.structuredMaskArg = nullptr;
     info.currentMask = nullptr;
     info.structuredArgs.clear();
+    info.payloadArgs.clear();
+    info.payloadBlockArgOffset = 0;
     info.originalTerminator = nullptr;
     if (index == 0)
       info.symbolName = "entry";
@@ -194,6 +196,10 @@ LogicalResult StructuredCFGBuilder::computePayloads() {
     BlockInfo &info = getOrCreateBlockInfo(block);
     info.payloadSeed.clear();
     info.payloadSeed.append(info.blockArgs.begin(), info.blockArgs.end());
+    info.payloadBlockArgOffset = info.payloadSeed.size() >= info.blockArgs.size()
+                                     ? info.payloadSeed.size() -
+                                           info.blockArgs.size()
+                                     : 0;
   }
 
   // Loop headers receive their initial payload from the `simt.loop` operands.
@@ -214,11 +220,21 @@ LogicalResult StructuredCFGBuilder::computePayloads() {
       return failure();
     }
     prepareInfo.payloadSeed.assign(inits.begin(), inits.end());
+    prepareInfo.payloadBlockArgOffset = prepareInfo.payloadSeed.size() >=
+                                                prepareInfo.blockArgs.size()
+                                            ? prepareInfo.payloadSeed.size() -
+                                                  prepareInfo.blockArgs.size()
+                                            : 0;
 
     if (loopInfo.bodyBlock) {
       BlockInfo &bodyInfo = *loopInfo.bodyBlock;
       bodyInfo.payloadSeed.assign(bodyInfo.blockArgs.begin(),
                                   bodyInfo.blockArgs.end());
+      bodyInfo.payloadBlockArgOffset = bodyInfo.payloadSeed.size() >=
+                                               bodyInfo.blockArgs.size()
+                                           ? bodyInfo.payloadSeed.size() -
+                                                 bodyInfo.blockArgs.size()
+                                           : 0;
 
       if (prepareInfo.original) {
         if (auto *term = prepareInfo.original->getTerminator()) {
@@ -226,6 +242,11 @@ LogicalResult StructuredCFGBuilder::computePayloads() {
             mlir::ValueRange forwarded = cond.getForwarded();
             if (forwarded.size() == bodyInfo.blockArgs.size())
               bodyInfo.payloadSeed.assign(forwarded.begin(), forwarded.end());
+            bodyInfo.payloadBlockArgOffset = bodyInfo.payloadSeed.size() >=
+                                                     bodyInfo.blockArgs.size()
+                                                 ? bodyInfo.payloadSeed.size() -
+                                                       bodyInfo.blockArgs.size()
+                                                 : 0;
             loopInfo.forwardedToBody.clear();
             loopInfo.forwardedToBody.append(forwarded.begin(), forwarded.end());
             loopInfo.forwardedToExit.clear();
@@ -250,31 +271,66 @@ LogicalResult StructuredCFGBuilder::computePayloads() {
   // merge blocks.
   for (auto &entry : ifInfos) {
     IfInfo &ifInfo = entry.second;
+    auto ifOp = llvm::dyn_cast_or_null<simt::dialect::IfOp>(ifInfo.op);
+    if (!ifOp)
+      continue;
     ifInfo.thenYieldValues.clear();
     ifInfo.elseYieldValues.clear();
     ifInfo.thenYieldOp = nullptr;
     ifInfo.elseYieldOp = nullptr;
     ifInfo.elseImplicitYield = false;
 
-    auto recordYield = [&](BlockInfo *source,
+    auto recordYield = [&](Region &region,
                            llvm::SmallVector<mlir::Value, 4> &out,
                            mlir::Operation *&yieldOp) {
-      if (!source || !source->original)
-        return;
-      if (source->original->empty())
-        return;
-      Operation *terminator = source->original->getTerminator();
-      if (auto yield = llvm::dyn_cast<simt::dialect::YieldOp>(terminator)) {
-        out.assign(yield.getOperands().begin(), yield.getOperands().end());
-        yieldOp = yield;
+      yieldOp = nullptr;
+      out.clear();
+      for (Block &block : region) {
+        Operation *terminator = block.getTerminator();
+        if (auto yield = llvm::dyn_cast<simt::dialect::YieldOp>(terminator)) {
+          out.assign(yield.getOperands().begin(), yield.getOperands().end());
+          yieldOp = yield;
+          return;
+        }
       }
     };
 
-    recordYield(ifInfo.thenBlock, ifInfo.thenYieldValues, ifInfo.thenYieldOp);
-    if (ifInfo.elseBlock)
-      recordYield(ifInfo.elseBlock, ifInfo.elseYieldValues, ifInfo.elseYieldOp);
+    recordYield(ifOp.getThenRegion(), ifInfo.thenYieldValues,
+                ifInfo.thenYieldOp);
+    if (!ifOp.getElseRegion().empty())
+      recordYield(ifOp.getElseRegion(), ifInfo.elseYieldValues,
+                  ifInfo.elseYieldOp);
     else if (!ifInfo.mergeArgs.empty())
       ifInfo.elseImplicitYield = true;
+
+    SmallVector<mlir::Value, 8> parentPayload;
+    if (ifInfo.parent) {
+      parentPayload.assign(ifInfo.parent->payloadSeed.begin(),
+                           ifInfo.parent->payloadSeed.end());
+      if (parentPayload.empty())
+        parentPayload.assign(ifInfo.parent->blockArgs.begin(),
+                             ifInfo.parent->blockArgs.end());
+    }
+
+    if (ifInfo.thenBlock) {
+      ifInfo.thenBlock->payloadSeed.assign(parentPayload.begin(),
+                                           parentPayload.end());
+      ifInfo.thenBlock->payloadBlockArgOffset = parentPayload.size();
+    }
+    if (ifInfo.elseBlock) {
+      ifInfo.elseBlock->payloadSeed.assign(parentPayload.begin(),
+                                           parentPayload.end());
+      ifInfo.elseBlock->payloadBlockArgOffset = parentPayload.size();
+    }
+
+    if (BlockInfo *mergeBlock = ifInfo.mergeBlock) {
+      SmallVector<mlir::Value, 8> combined;
+      combined.append(parentPayload.begin(), parentPayload.end());
+      combined.append(mergeBlock->blockArgs.begin(),
+                      mergeBlock->blockArgs.end());
+      mergeBlock->payloadSeed.assign(combined.begin(), combined.end());
+      mergeBlock->payloadBlockArgOffset = parentPayload.size();
+    }
   }
 
   // Switch headers inherit their initial payload directly from the op.
@@ -293,6 +349,11 @@ LogicalResult StructuredCFGBuilder::computePayloads() {
                                   parentInfo.blockArgs.end());
     mlir::ValueRange initialValues = switchOp.getInitialValues();
     parentInfo.payloadSeed.append(initialValues.begin(), initialValues.end());
+    parentInfo.payloadBlockArgOffset = parentInfo.payloadSeed.size() >=
+                                               parentInfo.blockArgs.size()
+                                           ? parentInfo.payloadSeed.size() -
+                                                 parentInfo.blockArgs.size()
+                                           : 0;
 
     switchInfo.carriedCount = 0;
     for (BlockInfo *caseInfo : switchInfo.caseBlocks) {
@@ -300,22 +361,44 @@ LogicalResult StructuredCFGBuilder::computePayloads() {
         continue;
       caseInfo->payloadSeed.assign(caseInfo->blockArgs.begin(),
                                    caseInfo->blockArgs.end());
+      caseInfo->payloadBlockArgOffset = caseInfo->payloadSeed.size() >=
+                                                caseInfo->blockArgs.size()
+                                            ? caseInfo->payloadSeed.size() -
+                                                  caseInfo->blockArgs.size()
+                                            : 0;
       if (caseInfo->original && !caseInfo->original->empty())
         if (auto yield = llvm::dyn_cast<simt::dialect::YieldOp>(
                 caseInfo->original->getTerminator()))
           caseInfo->payloadSeed.assign(yield.getResults().begin(),
                                        yield.getResults().end());
+      caseInfo->payloadBlockArgOffset = caseInfo->payloadSeed.size() >=
+                                                caseInfo->blockArgs.size()
+                                            ? caseInfo->payloadSeed.size() -
+                                                  caseInfo->blockArgs.size()
+                                            : 0;
     }
     if (switchInfo.defaultBlock) {
       switchInfo.defaultBlock->payloadSeed.assign(
           switchInfo.defaultBlock->blockArgs.begin(),
           switchInfo.defaultBlock->blockArgs.end());
+      switchInfo.defaultBlock->payloadBlockArgOffset =
+          switchInfo.defaultBlock->payloadSeed.size() >=
+                  switchInfo.defaultBlock->blockArgs.size()
+              ? switchInfo.defaultBlock->payloadSeed.size() -
+                    switchInfo.defaultBlock->blockArgs.size()
+              : 0;
       if (switchInfo.defaultBlock->original &&
           !switchInfo.defaultBlock->original->empty())
         if (auto yield = llvm::dyn_cast<simt::dialect::YieldOp>(
                 switchInfo.defaultBlock->original->getTerminator()))
           switchInfo.defaultBlock->payloadSeed.assign(
               yield.getResults().begin(), yield.getResults().end());
+      switchInfo.defaultBlock->payloadBlockArgOffset =
+          switchInfo.defaultBlock->payloadSeed.size() >=
+                  switchInfo.defaultBlock->blockArgs.size()
+              ? switchInfo.defaultBlock->payloadSeed.size() -
+                    switchInfo.defaultBlock->blockArgs.size()
+              : 0;
     }
 
     switchInfo.caseRecords.clear();
@@ -489,21 +572,45 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
 
         auto addMergeEdge = [&](BlockInfo *source,
                                 llvm::ArrayRef<mlir::Value> values,
-                                mlir::Operation *origin)
-                                -> LogicalResult {
-          if (!source || !mergeDest)
+                                mlir::Operation *origin) -> LogicalResult {
+          if ((!source && !origin) || !mergeDest)
             return success();
+
+          BlockInfo *edgeSource = source;
+          if (origin && origin->getBlock())
+            if (BlockInfo *originInfo = lookupBlockInfo(origin->getBlock()))
+              edgeSource = originInfo;
+          if (!edgeSource)
+            return success();
+
           EdgeInfo mergeEdge;
-          mergeEdge.source = source;
+          mergeEdge.source = edgeSource;
           mergeEdge.dest = mergeDest;
           mergeEdge.kind = EdgeInfo::Plain;
           mergeEdge.origin = origin;
+
+          SmallVector<mlir::Value, 8> payload;
+          if (ifInfo.parent)
+            payload.append(ifInfo.parent->payloadSeed.begin(),
+                           ifInfo.parent->payloadSeed.end());
           if (!values.empty())
-            mergeEdge.payload.append(values.begin(), values.end());
-          if (mergeEdge.dest && failed(ensurePayloadShape(mergeEdge)))
+            payload.append(values.begin(), values.end());
+
+          if (mergeDest && payload.size() < mergeDest->payloadSeed.size()) {
+            auto begin = mergeDest->payloadSeed.begin() + payload.size();
+            payload.append(begin, mergeDest->payloadSeed.end());
+          }
+
+          if (payload.empty() && mergeDest)
+            payload.append(mergeDest->payloadSeed.begin(),
+                           mergeDest->payloadSeed.end());
+
+          mergeEdge.payload = std::move(payload);
+          if (failed(ensurePayloadShape(mergeEdge)))
             return failure();
+
           edges.push_back(std::move(mergeEdge));
-          source->outgoingEdges.push_back(edges.size() - 1);
+          edgeSource->outgoingEdges.push_back(edges.size() - 1);
           return success();
         };
 
@@ -760,6 +867,7 @@ LogicalResult StructuredCFGBuilder::emitStructuredBlocks() {
     info->structuredMaskArg = blockOp.getMaskArgument();
     info->currentMask = info->structuredMaskArg;
     info->structuredArgs.clear();
+    info->payloadArgs.clear();
     info->originalTerminator = info->original ? info->original->getTerminator()
                                               : nullptr;
     structuredOpsInOrder.push_back(blockOp);
@@ -771,6 +879,20 @@ LogicalResult StructuredCFGBuilder::emitStructuredBlocks() {
         info->structuredArgs.push_back(newArg);
         mapper->map(origArg, newArg);
       }
+    }
+
+    info->payloadArgs.reserve(info->payloadSeed.size());
+    for (auto [index, seed] : llvm::enumerate(info->payloadSeed)) {
+      if (index < info->structuredArgs.size()) {
+        info->payloadArgs.push_back(info->structuredArgs[index]);
+        continue;
+      }
+      if (!seed) {
+        info->payloadArgs.push_back(mlir::BlockArgument());
+        continue;
+      }
+      auto arg = info->structuredBody->addArgument(seed.getType(), func.getLoc());
+      info->payloadArgs.push_back(arg);
     }
 
     builder.setInsertionPointAfter(blockOp);
@@ -798,8 +920,12 @@ LogicalResult StructuredCFGBuilder::stabilisePayloadSeeds() {
       if (!value)
         continue;
       mlir::Value current = dest.payloadSeed[index];
-      mlir::Value placeholder =
-          (index < dest.blockArgs.size()) ? dest.blockArgs[index] : mlir::Value();
+      mlir::Value placeholder;
+      if (index >= dest.payloadBlockArgOffset) {
+        unsigned argIndex = index - dest.payloadBlockArgOffset;
+        if (argIndex < dest.blockArgs.size())
+          placeholder = dest.blockArgs[argIndex];
+      }
       if (!current || current == placeholder) {
         if (current != value) {
           dest.payloadSeed[index] = value;
@@ -816,7 +942,16 @@ LogicalResult StructuredCFGBuilder::stabilisePayloadSeeds() {
         }
         continue;
       }
-      func.emitError("conflicting payload values for block");
+      auto diag = func.emitError("conflicting payload values for block");
+      if (!dest.symbolName.empty())
+        diag << " '" << dest.symbolName << "'";
+      diag << " at index " << index;
+      if (current) {
+        diag << ", current=" << current;
+      }
+      if (value) {
+        diag << ", incoming=" << value;
+      }
       return failure();
     }
     return success();
@@ -944,6 +1079,18 @@ LogicalResult StructuredCFGBuilder::emitStructuredBlock(BlockInfo &info) {
     return failure();
 
   OpBuilder bodyBuilder(info.structuredBody, info.structuredBody->begin());
+
+  for (auto [index, seed] : llvm::enumerate(info.payloadSeed)) {
+    if (!seed)
+      continue;
+    if (index >= info.payloadArgs.size())
+      continue;
+    mlir::BlockArgument arg = info.payloadArgs[index];
+    if (!arg)
+      continue;
+    mapper->map(seed, arg);
+  }
+
   auto mapValueInline = [&](Value v, Operation *contextOp)
                             -> std::optional<Value> {
     if (!v)
@@ -1151,6 +1298,17 @@ LogicalResult StructuredCFGBuilder::emitStructuredIf(BlockInfo &header,
       mask, mask, getTargetAttr(trueEdge.dest), getTargetAttr(falseEdge.dest),
       truePayload, falsePayload, FlatSymbolRefAttr(),
       simt::structured::ReconvergencePolicyAttr());
+
+  auto removeEdgeFromHeader = [&](unsigned index) {
+    if (index == kInvalidEdge)
+      return;
+    auto it = llvm::find(header.outgoingEdges, index);
+    if (it != header.outgoingEdges.end())
+      header.outgoingEdges.erase(it);
+  };
+
+  removeEdgeFromHeader(trueEdgeIdx);
+  removeEdgeFromHeader(falseEdgeIdx);
 
   return success();
 }
@@ -1416,6 +1574,13 @@ LogicalResult StructuredCFGBuilder::analyseIfOp(BlockInfo &header,
   BlockInfo &mergeInfo = ensureIfMergeBlock(info, op);
   info.mergeBlock = &mergeInfo;
 
+  mlir::Block *mergeTargetBlock = mergeInfo.original;
+  if (mergeTargetBlock) {
+    thenInfo.mergeTarget = mergeTargetBlock;
+    if (info.elseBlock)
+      info.elseBlock->mergeTarget = mergeTargetBlock;
+  }
+
   info.condition = ifOp.getCondition();
 
   return success();
@@ -1527,12 +1692,25 @@ LogicalResult StructuredCFGBuilder::ensurePayloadShape(EdgeInfo &edge) {
     return success();
 
   if (!edge.payload.empty()) {
-    // Trust the caller-provided payload, but sanity-check width if we already
-    // know the destination seed tuple.
-    if (!edge.dest->payloadSeed.empty() &&
-        edge.dest->payloadSeed.size() != edge.payload.size()) {
-      func.emitError("edge payload arity does not match destination seed");
-      return failure();
+    if (!edge.dest->payloadSeed.empty()) {
+      if (edge.payload.size() > edge.dest->payloadSeed.size()) {
+        func.emitError()
+            << "edge payload arity exceeds destination seed for block '"
+            << edge.dest->symbolName << "' (expected "
+            << edge.dest->payloadSeed.size() << ", actual "
+            << edge.payload.size() << ")";
+        return failure();
+      }
+      if (edge.payload.size() < edge.dest->payloadSeed.size()) {
+        edge.payload.append(edge.dest->payloadSeed.begin() + edge.payload.size(),
+                            edge.dest->payloadSeed.end());
+      }
+    } else {
+      edge.dest->payloadSeed.assign(edge.payload.begin(), edge.payload.end());
+      edge.dest->payloadBlockArgOffset =
+          edge.dest->payloadSeed.size() >= edge.dest->blockArgs.size()
+              ? edge.dest->payloadSeed.size() - edge.dest->blockArgs.size()
+              : 0;
     }
     return success();
   }
@@ -1556,6 +1734,10 @@ LogicalResult StructuredCFGBuilder::propagatePayload(
   }
 
   dest.payloadSeed.assign(values.begin(), values.end());
+  dest.payloadBlockArgOffset = dest.payloadSeed.size() >= dest.blockArgs.size()
+                                   ? dest.payloadSeed.size() -
+                                         dest.blockArgs.size()
+                                   : 0;
   return success();
 }
 
@@ -1674,6 +1856,11 @@ StructuredCFGBuilder::ensureLoopMergeBlock(LoopInfo &loopInfo,
   }
   mergeInfo.payloadSeed.assign(mergeInfo.blockArgs.begin(),
                                mergeInfo.blockArgs.end());
+  mergeInfo.payloadBlockArgOffset = mergeInfo.payloadSeed.size() >=
+                                            mergeInfo.blockArgs.size()
+                                        ? mergeInfo.payloadSeed.size() -
+                                              mergeInfo.blockArgs.size()
+                                        : 0;
   mergeInfo.requestsMaskPop = true;
   mergeInfo.requestsMaskPush = false;
   mergeInfo.mergeTarget = nullptr;

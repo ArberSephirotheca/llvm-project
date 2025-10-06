@@ -134,6 +134,8 @@ private:
     mlir::BlockArgument structuredMaskArg;
     mlir::Value currentMask;
     llvm::SmallVector<mlir::BlockArgument, 4> structuredArgs;
+    llvm::SmallVector<mlir::BlockArgument, 4> payloadArgs;
+    unsigned payloadBlockArgOffset = 0;
 
     mlir::Block *mergeTarget = nullptr;
     mlir::Block *continueTarget = nullptr;
