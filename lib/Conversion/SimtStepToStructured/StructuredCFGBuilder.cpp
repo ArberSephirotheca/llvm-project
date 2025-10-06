@@ -267,13 +267,11 @@ LogicalResult StructuredCFGBuilder::computePayloads() {
         return failure();
   }
 
-  // Capture if-yield payloads so nested selections propagate tuples to their
-  // merge blocks.
-  for (auto &entry : ifInfos) {
-    IfInfo &ifInfo = entry.second;
+  auto handleIfPayload = [&](IfInfo &ifInfo) -> LogicalResult {
     auto ifOp = llvm::dyn_cast_or_null<simt::dialect::IfOp>(ifInfo.op);
     if (!ifOp)
-      continue;
+      return success();
+
     ifInfo.thenYieldValues.clear();
     ifInfo.elseYieldValues.clear();
     ifInfo.thenYieldOp = nullptr;
@@ -312,16 +310,15 @@ LogicalResult StructuredCFGBuilder::computePayloads() {
                              ifInfo.parent->blockArgs.end());
     }
 
-    if (ifInfo.thenBlock) {
-      ifInfo.thenBlock->payloadSeed.assign(parentPayload.begin(),
-                                           parentPayload.end());
-      ifInfo.thenBlock->payloadBlockArgOffset = parentPayload.size();
-    }
-    if (ifInfo.elseBlock) {
-      ifInfo.elseBlock->payloadSeed.assign(parentPayload.begin(),
-                                           parentPayload.end());
-      ifInfo.elseBlock->payloadBlockArgOffset = parentPayload.size();
-    }
+    auto setParentSeed = [&](BlockInfo *block) {
+      if (!block)
+        return;
+      block->payloadSeed.assign(parentPayload.begin(), parentPayload.end());
+      block->payloadBlockArgOffset = parentPayload.size();
+    };
+
+    setParentSeed(ifInfo.thenBlock);
+    setParentSeed(ifInfo.elseBlock);
 
     if (BlockInfo *mergeBlock = ifInfo.mergeBlock) {
       SmallVector<mlir::Value, 8> combined;
@@ -330,6 +327,21 @@ LogicalResult StructuredCFGBuilder::computePayloads() {
                       mergeBlock->blockArgs.end());
       mergeBlock->payloadSeed.assign(combined.begin(), combined.end());
       mergeBlock->payloadBlockArgOffset = parentPayload.size();
+    }
+
+    return success();
+  };
+
+  // Capture if-yield payloads in block order so parents initialise before
+  // nested selections.
+  for (mlir::Block *block : blockOrder) {
+    BlockInfo &info = getOrCreateBlockInfo(block);
+    for (mlir::Operation *op : info.controlOps) {
+      if (!op)
+        continue;
+      if (auto it = ifInfos.find(op); it != ifInfos.end())
+        if (failed(handleIfPayload(it->second)))
+          return failure();
     }
   }
 
@@ -1329,8 +1341,12 @@ LogicalResult StructuredCFGBuilder::emitStructuredTerminator(BlockInfo &source) 
       return Value();
     if (Value mapped = mapper->lookupOrNull(v))
       return mapped;
-    if (origTerm)
-      origTerm->emitError() << "unable to map value in " << context;
+    if (origTerm) {
+      origTerm->emitError()
+          << "unable to map value in " << context << ": " << v;
+      if (Operation *def = v.getDefiningOp())
+        def->emitRemark() << "value defined here";
+    }
     return std::nullopt;
   };
 
@@ -1963,11 +1979,27 @@ StructuredCFGBuilder::ensureIfMergeBlock(IfInfo &ifInfo,
   mergeInfo.blockArgs.clear();
   mergeInfo.carriedTypes.clear();
   mergeInfo.payloadSeed.clear();
+
+  if (BlockInfo *parent = ifInfo.parent) {
+    if (!parent->payloadSeed.empty())
+      mergeInfo.payloadSeed.append(parent->payloadSeed.begin(),
+                                   parent->payloadSeed.end());
+    else if (!parent->blockArgs.empty())
+      for (mlir::BlockArgument arg : parent->blockArgs)
+        mergeInfo.payloadSeed.push_back(arg);
+  }
+
   for (mlir::BlockArgument arg : mergeBlock->getArguments()) {
     mergeInfo.blockArgs.push_back(arg);
     mergeInfo.carriedTypes.push_back(arg.getType());
     mergeInfo.payloadSeed.push_back(arg);
   }
+
+  mergeInfo.payloadBlockArgOffset = mergeInfo.payloadSeed.size() >=
+                                            mergeBlock->getNumArguments()
+                                        ? mergeInfo.payloadSeed.size() -
+                                              mergeBlock->getNumArguments()
+                                        : 0;
 
   ifInfo.mergeArgs.clear();
   for (mlir::BlockArgument arg : mergeBlock->getArguments())
