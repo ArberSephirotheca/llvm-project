@@ -292,9 +292,7 @@ LogicalResult StructuredCFGBuilder::computePayloads() {
     mlir::ValueRange initialValues = switchOp.getInitialValues();
     parentInfo.payloadSeed.append(initialValues.begin(), initialValues.end());
 
-    switchInfo.carriedCount = parentInfo.original
-                                  ? parentInfo.original->getNumArguments()
-                                  : 0;
+    switchInfo.carriedCount = 0;
     for (BlockInfo *caseInfo : switchInfo.caseBlocks) {
       if (!caseInfo)
         continue;
