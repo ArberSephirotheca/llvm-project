@@ -177,6 +177,7 @@ private:
   mlir::LogicalResult materialiseMaskExit(BlockInfo &info);
 
   BlockInfo &ensureLoopMergeBlock(LoopInfo &info, mlir::Operation *loopOp);
+  BlockInfo &ensureIfMergeBlock(IfInfo &info, mlir::Operation *ifOp);
 
   mlir::FunctionOpInterface func;
   llvm::SmallVector<mlir::Block *> blockOrder;

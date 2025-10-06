@@ -256,14 +256,6 @@ LogicalResult StructuredCFGBuilder::computePayloads() {
     ifInfo.elseYieldOp = nullptr;
     ifInfo.elseImplicitYield = false;
 
-    if (ifInfo.mergeBlock && !ifInfo.results.empty()) {
-      BlockInfo &mergeInfo = *ifInfo.mergeBlock;
-      if (mergeInfo.payloadSeed.size() < ifInfo.results.size())
-        mergeInfo.payloadSeed.resize(ifInfo.results.size());
-      for (auto [index, value] : llvm::enumerate(ifInfo.results))
-        mergeInfo.payloadSeed[index] = value;
-    }
-
     auto recordYield = [&](BlockInfo *source,
                            llvm::SmallVector<mlir::Value, 4> &out,
                            mlir::Operation *&yieldOp) {
@@ -281,8 +273,6 @@ LogicalResult StructuredCFGBuilder::computePayloads() {
     recordYield(ifInfo.thenBlock, ifInfo.thenYieldValues, ifInfo.thenYieldOp);
     if (ifInfo.elseBlock)
       recordYield(ifInfo.elseBlock, ifInfo.elseYieldValues, ifInfo.elseYieldOp);
-    else if (!ifInfo.results.empty())
-      ifInfo.elseImplicitYield = true;
   }
 
   // Switch headers inherit their initial payload directly from the op.
@@ -473,6 +463,8 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
       if (auto ifIt = ifInfos.find(op); ifIt != ifInfos.end()) {
         const IfInfo &ifInfo = ifIt->second;
 
+        BlockInfo *mergeDest = ifInfo.mergeBlock;
+
         EdgeInfo thenEdge;
         thenEdge.source = &info;
         thenEdge.dest = ifInfo.thenBlock;
@@ -485,13 +477,42 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
 
         EdgeInfo elseEdge;
         elseEdge.source = &info;
-        elseEdge.dest = ifInfo.elseBlock;
+        elseEdge.dest = ifInfo.elseBlock ? ifInfo.elseBlock : mergeDest;
         elseEdge.kind = EdgeInfo::ConditionalFalse;
         elseEdge.condition = ifInfo.condition;
         if (elseEdge.dest && failed(ensurePayloadShape(elseEdge)))
           return failure();
         edges.push_back(std::move(elseEdge));
         info.outgoingEdges.push_back(edges.size() - 1);
+
+        auto addMergeEdge = [&](BlockInfo *source,
+                                llvm::ArrayRef<mlir::Value> values,
+                                mlir::Operation *origin)
+                                -> LogicalResult {
+          if (!source || !mergeDest)
+            return success();
+          EdgeInfo mergeEdge;
+          mergeEdge.source = source;
+          mergeEdge.dest = mergeDest;
+          mergeEdge.kind = EdgeInfo::Plain;
+          mergeEdge.origin = origin;
+          if (!values.empty())
+            mergeEdge.payload.append(values.begin(), values.end());
+          if (mergeEdge.dest && failed(ensurePayloadShape(mergeEdge)))
+            return failure();
+          edges.push_back(std::move(mergeEdge));
+          source->outgoingEdges.push_back(edges.size() - 1);
+          return success();
+        };
+
+        if (failed(addMergeEdge(ifInfo.thenBlock, ifInfo.thenYieldValues,
+                                 ifInfo.thenYieldOp)))
+          return failure();
+        if (ifInfo.elseBlock) {
+          if (failed(addMergeEdge(ifInfo.elseBlock, ifInfo.elseYieldValues,
+                                   ifInfo.elseYieldOp)))
+            return failure();
+        }
         continue;
       }
 
@@ -946,6 +967,20 @@ LogicalResult StructuredCFGBuilder::emitStructuredBlock(BlockInfo &info) {
     for (Operation &op : info.original->without_terminator()) {
       if (isa<simt::structured::BlockOp>(&op))
         continue;
+      if (auto nestedIf = dyn_cast<simt::dialect::IfOp>(&op)) {
+        if (auto it = ifInfos.find(nestedIf.getOperation());
+            it != ifInfos.end()) {
+          IfInfo &nestedInfo = it->second;
+          ensureIfMergeBlock(nestedInfo, nestedIf.getOperation());
+          for (auto [index, result] : llvm::enumerate(nestedIf.getResults()))
+            mapper->map(result, nestedInfo.mergeArgs[index]);
+          continue;
+        }
+      }
+      if (auto nestedIf = dyn_cast<simt::dialect::IfOp>(&op)) {
+        (void)nestedIf;
+        continue;
+      }
       if (auto cont = dyn_cast<simt::dialect::ContinueOp>(&op)) {
         SmallVector<unsigned, 2> edgesForContinue;
         auto &outgoing = info.outgoingEdges;
@@ -1296,6 +1331,9 @@ LogicalResult StructuredCFGBuilder::analyseIfOp(BlockInfo &header,
     info.elseBlock = nullptr;
   }
 
+  BlockInfo &mergeInfo = ensureIfMergeBlock(info, op);
+  info.mergeBlock = &mergeInfo;
+
   info.condition = ifOp.getCondition();
 
   return success();
@@ -1569,6 +1607,78 @@ StructuredCFGBuilder::ensureLoopMergeBlock(LoopInfo &loopInfo,
   }
 
   mergeInfo.original = mergeBlock;
+
+  return mergeInfo;
+}
+
+StructuredCFGBuilder::BlockInfo &
+StructuredCFGBuilder::ensureIfMergeBlock(IfInfo &ifInfo,
+                                         mlir::Operation *ifOperation) {
+  auto ifOp = llvm::dyn_cast<simt::dialect::IfOp>(ifOperation);
+  assert(ifOp && "expected simt_step.if operation");
+
+  mlir::Block *parentBlock = ifOp->getBlock();
+  mlir::Block *mergeBlock = nullptr;
+
+  if (ifInfo.mergeBlock && ifInfo.mergeBlock->original &&
+      ifInfo.mergeBlock->original != parentBlock) {
+    mergeBlock = ifInfo.mergeBlock->original;
+  } else {
+    auto splitPoint = std::next(ifOp->getIterator());
+    mergeBlock = parentBlock->splitBlock(splitPoint);
+
+    BlockInfo &mergeInfo = getOrCreateBlockInfo(mergeBlock);
+    if (mergeInfo.symbolName.empty()) {
+      mergeInfo.symbolName = ifInfo.parent && !ifInfo.parent->symbolName.empty()
+                                 ? (ifInfo.parent->symbolName + ".merge")
+                                 : ("block" + std::to_string(blockInfos.size()));
+    }
+
+    auto orderIt = llvm::find(blockOrder, parentBlock);
+    if (orderIt != blockOrder.end())
+      blockOrder.insert(orderIt + 1, mergeBlock);
+    else
+      blockOrder.push_back(mergeBlock);
+
+    ifInfo.mergeBlock = &mergeInfo;
+  }
+
+  BlockInfo &mergeInfo = *ifInfo.mergeBlock;
+  if (!mergeBlock)
+    mergeBlock = mergeInfo.original;
+
+  if (!mergeBlock)
+    llvm::report_fatal_error("if merge block must exist after splitting");
+
+  // Ensure block arguments mirror the if results.
+  unsigned numResults = ifOp.getNumResults();
+  while (mergeBlock->getNumArguments() < numResults)
+    (void)mergeBlock->addArgument(ifOp.getResultTypes()
+                                      [mergeBlock->getNumArguments()],
+                                  ifOp.getLoc());
+
+  mergeInfo.blockArgs.clear();
+  mergeInfo.carriedTypes.clear();
+  mergeInfo.payloadSeed.clear();
+  for (mlir::BlockArgument arg : mergeBlock->getArguments()) {
+    mergeInfo.blockArgs.push_back(arg);
+    mergeInfo.carriedTypes.push_back(arg.getType());
+    mergeInfo.payloadSeed.push_back(arg);
+  }
+
+  ifInfo.mergeArgs.clear();
+  for (mlir::BlockArgument arg : mergeBlock->getArguments())
+    ifInfo.mergeArgs.push_back(arg);
+
+  // Redirect SSA uses of the if results to the merge block arguments.
+  for (auto [idx, result] : llvm::enumerate(ifOp.getResults())) {
+    if (idx < mergeBlock->getNumArguments())
+      result.replaceAllUsesWith(mergeBlock->getArgument(idx));
+  }
+
+  ifInfo.results.clear();
+  for (mlir::BlockArgument arg : mergeBlock->getArguments())
+    ifInfo.results.push_back(arg);
 
   return mergeInfo;
 }
