@@ -75,6 +75,7 @@ private:
     BlockInfo *thenBlock = nullptr;
     BlockInfo *elseBlock = nullptr;
     BlockInfo *mergeBlock = nullptr;
+    mlir::Block *mergeOriginal = nullptr;
     llvm::SmallVector<mlir::BlockArgument, 4> mergeArgs;
     llvm::SmallVector<mlir::Type, 4> resultTypes;
     llvm::SmallVector<mlir::Value, 4> results;
@@ -135,6 +136,7 @@ private:
     mlir::Value currentMask;
     llvm::SmallVector<mlir::BlockArgument, 4> structuredArgs;
     llvm::SmallVector<mlir::BlockArgument, 4> payloadArgs;
+    mlir::Operation *owningIf = nullptr;
     unsigned payloadBlockArgOffset = 0;
 
     mlir::Block *mergeTarget = nullptr;

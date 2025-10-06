@@ -1540,8 +1540,8 @@ LogicalResult StructuredCFGBuilder::analyseIfOp(BlockInfo &header,
   IfInfo &info = ifInfos[op];
   info.op = op;
   info.parent = &header;
-  info.mergeBlock = &header;
-  info.mergeBlock = &header;
+  info.mergeBlock = nullptr;
+  info.mergeOriginal = nullptr;
   info.resultTypes.clear();
   info.results.clear();
   info.resultTypes.reserve(ifOp.getNumResults());
@@ -1856,6 +1856,7 @@ StructuredCFGBuilder::ensureLoopMergeBlock(LoopInfo &loopInfo,
   }
   mergeInfo.payloadSeed.assign(mergeInfo.blockArgs.begin(),
                                mergeInfo.blockArgs.end());
+  mergeInfo.owningIf = nullptr;
   mergeInfo.payloadBlockArgOffset = mergeInfo.payloadSeed.size() >=
                                             mergeInfo.blockArgs.size()
                                         ? mergeInfo.payloadSeed.size() -
@@ -1889,10 +1890,36 @@ StructuredCFGBuilder::ensureIfMergeBlock(IfInfo &ifInfo,
   mlir::Block *parentBlock = ifOp->getBlock();
   mlir::Block *mergeBlock = nullptr;
 
-  if (ifInfo.mergeBlock && ifInfo.mergeBlock->original &&
-      ifInfo.mergeBlock->original != parentBlock) {
-    mergeBlock = ifInfo.mergeBlock->original;
-  } else {
+  auto reuseExistingMerge = [&]() -> BlockInfo * {
+    if (!ifInfo.mergeBlock)
+      return nullptr;
+    BlockInfo *candidate = ifInfo.mergeBlock;
+    if (!candidate->original)
+      return nullptr;
+    if (candidate->original == parentBlock)
+      return nullptr;
+    if (candidate->owningIf && candidate->owningIf != ifOperation)
+      return nullptr;
+    return candidate;
+  };
+
+  if (ifInfo.mergeOriginal && ifInfo.mergeOriginal != parentBlock) {
+    if (BlockInfo *existing = lookupBlockInfo(ifInfo.mergeOriginal)) {
+      if (!existing->owningIf || existing->owningIf == ifOperation) {
+        mergeBlock = ifInfo.mergeOriginal;
+        ifInfo.mergeBlock = existing;
+      }
+    }
+  }
+
+  if (!mergeBlock) {
+    if (BlockInfo *existing = reuseExistingMerge()) {
+      mergeBlock = existing->original;
+      ifInfo.mergeBlock = existing;
+    }
+  }
+
+  if (!mergeBlock) {
     auto splitPoint = std::next(ifOp->getIterator());
     mergeBlock = parentBlock->splitBlock(splitPoint);
 
@@ -1909,7 +1936,9 @@ StructuredCFGBuilder::ensureIfMergeBlock(IfInfo &ifInfo,
     else
       blockOrder.push_back(mergeBlock);
 
+    mergeInfo.owningIf = ifOperation;
     ifInfo.mergeBlock = &mergeInfo;
+    ifInfo.mergeOriginal = mergeBlock;
   }
 
   BlockInfo &mergeInfo = *ifInfo.mergeBlock;
@@ -1918,6 +1947,14 @@ StructuredCFGBuilder::ensureIfMergeBlock(IfInfo &ifInfo,
 
   if (!mergeBlock)
     llvm::report_fatal_error("if merge block must exist after splitting");
+
+  if (mergeInfo.owningIf && mergeInfo.owningIf != ifOperation) {
+    ifOperation->emitOpError("attempted to reuse merge block owned by a different if");
+    llvm::report_fatal_error("merge block ownership mismatch");
+  }
+
+  mergeInfo.owningIf = ifOperation;
+  ifInfo.mergeOriginal = mergeBlock;
 
   // Ensure block arguments mirror the if results.
   unsigned numResults = ifOp.getNumResults();
