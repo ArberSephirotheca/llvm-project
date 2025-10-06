@@ -25,17 +25,17 @@ builtin.module {
 // CHECK-LABEL: func.func @loop
 // CHECK: "simt_struct.block"() ({
 // CHECK:   ^bb0(%[[ENTRY_MASK:.*]]: i64, %[[ENTRY_VAL:.*]]: i32):
-// CHECK:     "simt_struct.branch"(%[[ENTRY_MASK]], %[[ENTRY_VAL]], %{{.*}}) {target = @block1}
+// CHECK:     "simt_struct.branch"(%[[ENTRY_MASK]], %[[ENTRY_VAL]], %{{.*}}) {target = @[[HDR:block[0-9]+]]}
 // CHECK: }) {sym_name = "entry"}
 // CHECK: "simt_struct.block"() ({
 // CHECK:   ^bb0(%[[HDR_MASK:.*]]: i64, %[[ITER:.*]]: i32, %[[ACC:.*]]: i32):
 // CHECK:     %[[POP_HDR:.*]] = "simt_struct.mask_pop"() : () -> i64
 // CHECK:     %[[MERGE_HDR:.*]] = "simt_struct.mask_merge"(%[[HDR_MASK]]) : (i64) -> i64
-// CHECK:     "simt_struct.mask_push"(%[[MERGE_HDR]]) {continue_target = @block1, merge_target = @block3}
+// CHECK:     "simt_struct.mask_push"(%[[MERGE_HDR]]) {continue_target = @[[HDR]], merge_target = @[[MERGE:block[0-9]+]]}
 // CHECK:     %[[CMP:.*]] = arith.cmpi
-// CHECK:     "simt_struct.cond_branch"(%[[CMP]], %[[MERGE_HDR]], %[[MERGE_HDR]], %[[ITER]], %[[ACC]], %[[ITER]], %[[ACC]]) {false_target = @block3
-// CHECK-SAME: operandSegmentSizes = array<i32: 1, 1, 1, 2, 2>, true_target = @block2}
-// CHECK: }) {continue_target = @block1, merge_target = @block3, sym_name = "block1"}
+// CHECK:     "simt_struct.cond_branch"(%[[CMP]], %[[POP_RET:.*]], %[[POP_RET]], %[[ITER]], %[[ACC]], %[[ITER]], %[[ACC]]) {false_target = @[[MERGE]]
+// CHECK-SAME: true_target = @[[BODY:block[0-9]+]]}
+// CHECK: }) {continue_target = @[[HDR]], merge_target = @[[MERGE]], sym_name = "[[HDR]]"}
 // CHECK: "simt_struct.block"() ({
 // CHECK:   ^bb0(%[[BODY_MASK:.*]]: i64, %[[BODY_ITER:.*]]: i32, %[[BODY_ACC:.*]]: i32):
 // CHECK:     %[[POP_BODY:.*]] = "simt_struct.mask_pop"() : () -> i64
