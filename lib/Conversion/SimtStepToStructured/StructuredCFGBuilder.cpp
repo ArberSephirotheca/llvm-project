@@ -622,6 +622,7 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
         thenEdge.kind = EdgeInfo::ConditionalTrue;
         thenEdge.condition = ifInfo.condition;
         thenEdge.origin = op;
+        thenEdge.control.push_back(ifInfo.condition);
         if (thenEdge.dest && failed(ensurePayloadShape(thenEdge)))
           return failure();
         edges.push_back(std::move(thenEdge));
@@ -633,6 +634,7 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
         elseEdge.kind = EdgeInfo::ConditionalFalse;
         elseEdge.condition = ifInfo.condition;
         elseEdge.origin = op;
+        elseEdge.control.push_back(ifInfo.condition);
         if (elseEdge.dest && failed(ensurePayloadShape(elseEdge)))
           return failure();
         edges.push_back(std::move(elseEdge));
@@ -657,64 +659,10 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
           mergeEdge.kind = EdgeInfo::Plain;
           mergeEdge.origin = origin;
 
-          SmallVector<mlir::Value, 8> payload;
-          unsigned parentSize = mergeDest ? mergeDest->payloadBlockArgOffset : 0;
-
-          auto appendParent = [&](llvm::ArrayRef<mlir::Value> seed) {
-            if (seed.empty() || parentSize == 0)
-              return false;
-            unsigned count = std::min(parentSize, static_cast<unsigned>(seed.size()));
-            payload.append(seed.begin(), seed.begin() + count);
-            return count == parentSize;
-          };
-
-          bool haveParent = false;
-          if (!edgeSource->payloadSeed.empty()) {
-            parentSize = edgeSource->payloadBlockArgOffset;
-            haveParent = appendParent(edgeSource->payloadSeed);
-          }
-          if (!haveParent && ifInfo.parent && !ifInfo.parent->payloadSeed.empty())
-            haveParent = appendParent(ifInfo.parent->payloadSeed);
-          if (!haveParent && mergeDest && !mergeDest->payloadSeed.empty())
-            haveParent = appendParent(mergeDest->payloadSeed);
-
-          if (!haveParent && parentSize > payload.size()) {
-            if (mergeDest && mergeDest->payloadSeed.size() >= parentSize)
-              payload.append(mergeDest->payloadSeed.begin() + payload.size(),
-                             mergeDest->payloadSeed.begin() + parentSize);
-            else
-              payload.resize(parentSize, Value());
-          }
-
-          auto appendBranch = [&](llvm::ArrayRef<mlir::Value> vals) {
-            if (vals.empty())
-              return false;
-            payload.append(vals.begin(), vals.end());
-            return true;
-          };
-
-          if (!values.empty())
-            appendBranch(values);
-          else if (!edgeSource->payloadSeed.empty() &&
-                   edgeSource->payloadSeed.size() > parentSize)
-            appendBranch(llvm::ArrayRef(edgeSource->payloadSeed.begin() + parentSize,
-                                        edgeSource->payloadSeed.end()));
-
-          if (mergeDest && payload.size() < mergeDest->payloadSeed.size())
-            payload.append(mergeDest->payloadSeed.begin() + payload.size(),
-                           mergeDest->payloadSeed.end());
-
-          if (payload.empty() && mergeDest)
-            payload.append(mergeDest->payloadSeed.begin(),
-                           mergeDest->payloadSeed.end());
-
-                    if (llvm::any_of(payload, [](mlir::Value v) { return !v; })) {
-            if (origin)
-              origin->emitRemark() << "edge has null payload entries";
-          }
-mergeEdge.payload = std::move(payload);
+          mergeEdge.payload.assign(values.begin(), values.end());
           if (failed(ensurePayloadShape(mergeEdge)))
             return failure();
+          normalizeEdgeForMerge(mergeEdge, *mergeDest);
 
           edges.push_back(std::move(mergeEdge));
           edgeSource->outgoingEdges.push_back(edges.size() - 1);
@@ -858,6 +806,8 @@ mergeEdge.payload = std::move(payload);
               exitEdge.isSwitchFallthrough = true;
               exitEdge.condition = record.fallthrough;
               exitEdge.switchDoneFlag = record.switchDone;
+              exitEdge.control.push_back(record.fallthrough);
+              exitEdge.control.push_back(record.switchDone);
             }
             exitEdge.origin = yieldOp;
             if (exitEdge.dest && failed(ensurePayloadShape(exitEdge)))
@@ -884,8 +834,8 @@ mergeEdge.payload = std::move(payload);
                                      record.carriedValues.end());
             fallEdge.payload.append(record.payloadValues.begin(),
                                      record.payloadValues.end());
-            fallEdge.payload.append(record.controlValues.begin(),
-                                     record.controlValues.end());
+            for (Value ctrl : record.controlValues)
+              fallEdge.control.push_back(ctrl);
             if (fallEdge.dest && failed(ensurePayloadShape(fallEdge)))
               return failure();
            edges.push_back(std::move(fallEdge));
