@@ -1073,10 +1073,6 @@ LogicalResult StructuredCFGBuilder::emitStructuredBlocks() {
   // First pass: create structured block ops and map block arguments.
   for (BlockInfo *info : orderedInfos) {
     // capturedInputs already computed during analysis.
-    if (info->symbolName == "block3")
-      assert(!info->capturedInputs.empty() && "block3 should capture cond1");
-    if (info->symbolName == "block2")
-      assert(!info->capturedInputs.empty() && "block2 should capture zero");
     if (info->symbolName.empty()) {
       if (info == orderedInfos.front())
         info->symbolName = "entry";
