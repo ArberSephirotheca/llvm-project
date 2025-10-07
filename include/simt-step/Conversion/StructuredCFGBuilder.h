@@ -56,10 +56,14 @@ private:
   struct LoopInfo;
   struct SwitchInfo;
 
+  enum class PayloadKind : uint8_t { Unknown, Result, Carried, Mask };
+
   struct EdgeInfo {
     BlockInfo *source = nullptr;
     BlockInfo *dest = nullptr;
     llvm::SmallVector<mlir::Value, 8> payload;
+    llvm::SmallVector<PayloadKind, 8> payloadKinds;
+    llvm::SmallVector<mlir::Value, 4> control;
     llvm::SmallVector<mlir::Value, 4> maskValues;
     enum Kind { Plain, ConditionalTrue, ConditionalFalse, LoopBackEdge } kind =
         Plain;
@@ -136,6 +140,7 @@ private:
     mlir::Value currentMask;
     llvm::SmallVector<mlir::BlockArgument, 4> structuredArgs;
     llvm::SmallVector<mlir::BlockArgument, 4> payloadArgs;
+    llvm::SmallVector<PayloadKind, 8> payloadKinds;
     mlir::Operation *owningIf = nullptr;
     unsigned payloadBlockArgOffset = 0;
 
@@ -190,7 +195,7 @@ private:
 
   /// Mapping from original blocks to collected metadata.
   llvm::DenseMap<mlir::Block *, BlockInfo> blockInfos;
-  llvm::SmallVector<EdgeInfo> edges;
+  llvm::SmallVector<EdgeInfo, 4> edges;
 
   /// Scratch storage used while cloning ops into structured blocks.
   std::unique_ptr<mlir::IRMapping> mapper;

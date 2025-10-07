@@ -149,6 +149,7 @@ LogicalResult StructuredCFGBuilder::analyseBlocks() {
     info.requestsMaskPush = false;
     info.requestsMaskPop = false;
     info.payloadSeed.clear();
+    info.payloadKinds.clear();
     info.controlOps.clear();
     info.outgoingEdges.clear();
     info.structuredOp = simt::structured::BlockOp();
@@ -202,6 +203,8 @@ LogicalResult StructuredCFGBuilder::computePayloads() {
                                      ? info.payloadSeed.size() -
                                            info.blockArgs.size()
                                      : 0;
+    info.payloadKinds.assign(info.payloadSeed.size(),
+                             PayloadKind::Carried);
   }
 
   // Loop headers receive their initial payload from the `simt.loop` operands.
@@ -227,6 +230,8 @@ LogicalResult StructuredCFGBuilder::computePayloads() {
                                             ? prepareInfo.payloadSeed.size() -
                                                   prepareInfo.blockArgs.size()
                                             : 0;
+    prepareInfo.payloadKinds.assign(prepareInfo.payloadSeed.size(),
+                                    PayloadKind::Carried);
 
     if (loopInfo.bodyBlock) {
       BlockInfo &bodyInfo = *loopInfo.bodyBlock;
@@ -237,6 +242,8 @@ LogicalResult StructuredCFGBuilder::computePayloads() {
                                            ? bodyInfo.payloadSeed.size() -
                                                  bodyInfo.blockArgs.size()
                                            : 0;
+      bodyInfo.payloadKinds.assign(bodyInfo.payloadSeed.size(),
+                                   PayloadKind::Carried);
 
       if (prepareInfo.original) {
         if (auto *term = prepareInfo.original->getTerminator()) {
@@ -249,6 +256,8 @@ LogicalResult StructuredCFGBuilder::computePayloads() {
                                                  ? bodyInfo.payloadSeed.size() -
                                                        bodyInfo.blockArgs.size()
                                                  : 0;
+            bodyInfo.payloadKinds.assign(bodyInfo.payloadSeed.size(),
+                                         PayloadKind::Carried);
             loopInfo.forwardedToBody.clear();
             loopInfo.forwardedToBody.append(forwarded.begin(), forwarded.end());
             loopInfo.forwardedToExit.clear();
@@ -312,23 +321,28 @@ LogicalResult StructuredCFGBuilder::computePayloads() {
                              ifInfo.parent->blockArgs.end());
     }
 
-    auto setParentSeed = [&](BlockInfo *block) {
-      if (!block)
-        return;
-      block->payloadSeed.assign(parentPayload.begin(), parentPayload.end());
-      block->payloadBlockArgOffset = parentPayload.size();
-    };
+  auto setParentSeed = [&](BlockInfo *block) {
+    if (!block)
+      return;
+    block->payloadSeed.assign(parentPayload.begin(), parentPayload.end());
+    block->payloadBlockArgOffset = parentPayload.size();
+    if (ifInfo.parent &&
+        ifInfo.parent->payloadKinds.size() == block->payloadSeed.size())
+      block->payloadKinds = ifInfo.parent->payloadKinds;
+    else
+      block->payloadKinds.assign(block->payloadSeed.size(),
+                                 PayloadKind::Carried);
+  };
 
     setParentSeed(ifInfo.thenBlock);
     setParentSeed(ifInfo.elseBlock);
 
     if (BlockInfo *mergeBlock = ifInfo.mergeBlock) {
-      SmallVector<mlir::Value, 8> combined;
-      combined.append(parentPayload.begin(), parentPayload.end());
-      combined.append(mergeBlock->blockArgs.begin(),
-                      mergeBlock->blockArgs.end());
-      mergeBlock->payloadSeed.assign(combined.begin(), combined.end());
-      mergeBlock->payloadBlockArgOffset = parentPayload.size();
+      mergeBlock->payloadSeed.assign(mergeBlock->blockArgs.begin(),
+                                     mergeBlock->blockArgs.end());
+      mergeBlock->payloadKinds.assign(mergeBlock->payloadSeed.size(),
+                                      PayloadKind::Result);
+      mergeBlock->payloadBlockArgOffset = 0;
     }
 
     return success();
@@ -1790,9 +1804,7 @@ LogicalResult StructuredCFGBuilder::ensurePayloadShape(EdgeInfo &edge) {
     return success();
 
   if (!edge.payload.empty()) {
-    unsigned expected = !edge.dest->payloadSeed.empty()
-                            ? edge.dest->payloadSeed.size()
-                            : edge.dest->blockArgs.size();
+    unsigned expected = edge.dest->blockArgs.size();
     if (edge.payload.size() != expected) {
       auto diag = func.emitError()
                     << "edge payload arity mismatch for block '"
@@ -1806,23 +1818,21 @@ LogicalResult StructuredCFGBuilder::ensurePayloadShape(EdgeInfo &edge) {
              << edge.source->payloadSeed.size();
       return failure();
     }
+    edge.payloadKinds = edge.dest->payloadKinds;
     if (edge.dest->payloadSeed.empty()) {
       edge.dest->payloadSeed.assign(edge.payload.begin(), edge.payload.end());
-      edge.dest->payloadBlockArgOffset =
-          edge.dest->payloadSeed.size() >= edge.dest->blockArgs.size()
-              ? edge.dest->payloadSeed.size() - edge.dest->blockArgs.size()
-              : 0;
+      edge.dest->payloadKinds.assign(edge.payloadKinds.begin(),
+                                     edge.payloadKinds.end());
+      edge.dest->payloadBlockArgOffset = 0;
     }
     return success();
   }
 
   SmallVector<mlir::Value, 8> expected;
-  if (!edge.dest->payloadSeed.empty())
-    expected.append(edge.dest->payloadSeed.begin(), edge.dest->payloadSeed.end());
-  else
-    expected.append(edge.dest->blockArgs.begin(), edge.dest->blockArgs.end());
+  expected.append(edge.dest->blockArgs.begin(), edge.dest->blockArgs.end());
 
   edge.payload.assign(expected.begin(), expected.end());
+  edge.payloadKinds = edge.dest->payloadKinds;
   return success();
 }
 
@@ -1839,6 +1849,7 @@ LogicalResult StructuredCFGBuilder::propagatePayload(
                                    ? dest.payloadSeed.size() -
                                          dest.blockArgs.size()
                                    : 0;
+  dest.payloadKinds.assign(dest.payloadSeed.size(), PayloadKind::Carried);
   return success();
 }
 
@@ -1951,18 +1962,16 @@ StructuredCFGBuilder::ensureLoopMergeBlock(LoopInfo &loopInfo,
 
   mergeInfo.blockArgs.clear();
   mergeInfo.carriedTypes.clear();
+  mergeInfo.payloadSeed.clear();
+  mergeInfo.payloadKinds.clear();
   for (mlir::BlockArgument arg : mergeBlock->getArguments()) {
     mergeInfo.blockArgs.push_back(arg);
     mergeInfo.carriedTypes.push_back(arg.getType());
+    mergeInfo.payloadSeed.push_back(arg);
+    mergeInfo.payloadKinds.push_back(PayloadKind::Carried);
   }
-  mergeInfo.payloadSeed.assign(mergeInfo.blockArgs.begin(),
-                               mergeInfo.blockArgs.end());
   mergeInfo.owningIf = nullptr;
-  mergeInfo.payloadBlockArgOffset = mergeInfo.payloadSeed.size() >=
-                                            mergeInfo.blockArgs.size()
-                                        ? mergeInfo.payloadSeed.size() -
-                                              mergeInfo.blockArgs.size()
-                                        : 0;
+  mergeInfo.payloadBlockArgOffset = 0;
   mergeInfo.requestsMaskPop = true;
   mergeInfo.requestsMaskPush = false;
   mergeInfo.mergeTarget = nullptr;
