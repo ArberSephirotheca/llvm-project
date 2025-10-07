@@ -208,7 +208,9 @@ LogicalResult StructuredCFGBuilder::materializeEdgeOperands(
     Operation *context) {
   if (!succ || !succ->structuredBody) {
     if (context)
-      context->emitError("structured successor missing body during lowering");
+      context->emitError("structured successor missing body during lowering")
+          << " (dest=\""
+          << (succ ? succ->symbolName : std::string("<null>")) << "\")";
     return failure();
   }
 
@@ -219,7 +221,7 @@ LogicalResult StructuredCFGBuilder::materializeEdgeOperands(
     if (context)
       context->emitError("edge payload arity mismatch for structured branch")
           << " (have " << edge.payload.size() << ", expected " << expected
-          << ")";
+          << ", dest=\"" << succ->symbolName << "\")";
     return failure();
   }
 
@@ -233,14 +235,17 @@ LogicalResult StructuredCFGBuilder::materializeEdgeOperands(
     if (!payload) {
       if (context)
         context->emitError("unable to materialize operand for structured branch")
-            << " at index " << i;
+            << " at index " << i << " (dest=\"" << succ->symbolName
+            << "\")";
       return failure();
     }
     BlockArgument succArg = getDataArgAt(*succ, i);
     if (payload.getType() != succArg.getType()) {
       if (context)
         context->emitError("payload type mismatch for structured branch")
-            << " at index " << i;
+            << " at index " << i << " (dest=\"" << succ->symbolName
+            << "\", have=" << payload.getType() << ", expected="
+            << succArg.getType() << ")";
       return failure();
     }
     edge.payload[i] = payload;
@@ -259,24 +264,30 @@ LogicalResult StructuredCFGBuilder::build() {
 
   collectOriginalBlocks();
 
+
   if (blockOrder.empty())
     return success();
 
   // TODO: implement the staged builder pipeline described in
   // docs/structured_cfg_builder_plan.md once analysis and payload propagation
   // logic lands.
+  auto failStage = [&](llvm::StringRef stage) {
+    func.emitError("simt-step-to-structured failed in stage: ") << stage;
+    return failure();
+  };
+
   if (failed(analyseBlocks()))
-    return failure();
+    return failStage("analyseBlocks");
   if (failed(computePayloads()))
-    return failure();
+    return failStage("computePayloads");
   if (failed(enumerateEdges()))
-    return failure();
+    return failStage("enumerateEdges");
   if (failed(stabilisePayloadSeeds()))
-    return failure();
+    return failStage("stabilisePayloadSeeds");
   if (failed(emitStructuredBlocks()))
-    return failure();
+    return failStage("emitStructuredBlocks");
   if (failed(cleanupOriginalCFG()))
-    return failure();
+    return failStage("cleanupOriginalCFG");
 
   return success();
 }
@@ -335,6 +346,7 @@ StructuredCFGBuilder::lookupBlockInfo(mlir::Block *block) const {
 }
 
 LogicalResult StructuredCFGBuilder::analyseBlocks() {
+  llvm::errs() << "[analyse] starting block analysis\n";
   blockInfos.clear();
   ifInfos.clear();
   loopInfos.clear();
@@ -1354,6 +1366,10 @@ LogicalResult StructuredCFGBuilder::emitStructuredBlock(BlockInfo &info) {
 
   if (info.original) {
     for (Operation &op : info.original->without_terminator()) {
+      llvm::errs() << "[emitStructuredBlock] visiting ";
+      op.print(llvm::errs());
+      llvm::errs() << "\n";
+
       if (isa<simt::structured::BlockOp>(&op))
         continue;
       if (auto nestedIf = dyn_cast<simt::dialect::IfOp>(&op)) {

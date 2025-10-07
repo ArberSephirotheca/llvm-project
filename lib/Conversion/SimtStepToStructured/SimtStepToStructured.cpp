@@ -1,6 +1,6 @@
 #include "simt-step/Conversion/SimtStepToStructured.h"
 #include "simt-step/Conversion/StructuredCFGBuilder.h"
-
+#include "simt-step/Dialect/SimtStep/SimtStepDialect.h"
 #include "simt-step/Dialect/SimtStructured/StructuredDialect.h"
 
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
@@ -18,7 +18,7 @@ struct SimtStepToStructuredPass
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(SimtStepToStructuredPass)
 
   void getDependentDialects(DialectRegistry &registry) const override {
-    registry.insert<simt::structured::SimtStructDialect, cf::ControlFlowDialect>();
+    registry.insert<simt::structured::SimtStructDialect, simt::dialect::SimtStepDialect, cf::ControlFlowDialect>();
   }
 
   StringRef getArgument() const final { return "simt-step-to-structured"; }
@@ -29,9 +29,15 @@ struct SimtStepToStructuredPass
   void runOnOperation() override {
     func::FuncOp func = getOperation();
 
+    llvm::errs() << "[SimtStepToStructuredPass] running on function '"
+                 << func.getName() << "'\n";
+    llvm::errs().flush();
+
     StructuredCFGBuilder builder(func);
-    if (failed(builder.build()))
+    if (failed(builder.build())) {
+      getOperation().emitError() << "simt-step-to-structured: builder failed";
       signalPassFailure();
+    }
   }
 };
 

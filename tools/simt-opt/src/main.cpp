@@ -26,10 +26,13 @@ int main(int argc, char **argv) {
                   mlir::scf::SCFDialect, mlir::tensor::TensorDialect,
                   mlir::vector::VectorDialect>();
   simt::dialect::registerSimtStepDialect(registry);
+  llvm::errs() << "Registered simt-step dialect\n";
   simt::structured::registerSimtStructuredDialect(registry);
-
+  llvm::errs() << "Registered simt-structured dialect\n";
   simt::conversion::registerSimtStepToStructuredPass();
+  llvm::errs() << "Registered simt-step to simt-structured pass\n";
   simt::semantics::registerDumpStructuredProgramPass();
+  llvm::errs() << "Registered dump structured program pass\n";
 
   return failed(mlir::MlirOptMain(argc, argv, "SIMT-Step optimizer", registry));
 }
