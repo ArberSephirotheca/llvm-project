@@ -49,20 +49,42 @@ signalUnimplemented(FunctionOpInterface func) {
 StructuredCFGBuilder::StructuredCFGBuilder(FunctionOpInterface func)
     : func(func) {}
 
+Block *StructuredCFGBuilder::getSuccessorBody(const BlockInfo &succ) {
+  if (succ.structuredBody)
+    return succ.structuredBody;
+  return succ.original;
+}
+
+unsigned StructuredCFGBuilder::getDataArgCount(const BlockInfo &succ) {
+  Block *body = getSuccessorBody(succ);
+  if (!body)
+    return 0;
+  unsigned total = body->getNumArguments();
+  if (succ.structuredMaskArg)
+    return total > 0 ? total - 1 : 0;
+  return total;
+}
+
+BlockArgument StructuredCFGBuilder::getDataArgAt(const BlockInfo &succ,
+                                                 unsigned index) {
+  Block *body = getSuccessorBody(succ);
+  assert(body && "structured successor must have a block body");
+  unsigned offset = succ.structuredMaskArg ? 1 : 0;
+  assert(index + offset < body->getNumArguments() &&
+         "data argument index out of range");
+  return body->getArgument(index + offset);
+}
+
 void StructuredCFGBuilder::normalizeEdgeForMerge(EdgeInfo &edge,
                                                  BlockInfo &merge) {
   if (edge.dest != &merge)
     return;
 
-  mlir::Block *succ = merge.structuredBody;
-  if (!succ)
-    succ = merge.original;
+  Block *succ = getSuccessorBody(merge);
   if (!succ)
     return;
 
-  unsigned expected = succ->getNumArguments();
-  if (expected == 0)
-    expected = merge.blockArgs.size();
+  unsigned expected = getDataArgCount(merge);
 
   if (edge.payload.size() > expected)
     edge.payload.erase(edge.payload.begin(),
@@ -77,14 +99,14 @@ void StructuredCFGBuilder::normalizeEdgeForMerge(EdgeInfo &edge,
       if (Value mapped = mapper->lookupOrNull(current))
         current = mapped;
     }
-    if (!current) {
-      if (i < merge.payloadSeed.size())
-        current = merge.payloadSeed[i];
-      else if (i < merge.blockArgs.size())
-        current = merge.blockArgs[i];
+    if (!current && i < merge.payloadSeed.size())
+      current = merge.payloadSeed[i];
+    if (!current && edge.source) {
+      if (i < edge.source->payloadSeed.size())
+        current = edge.source->payloadSeed[i];
+      else if (i < edge.source->blockArgs.size())
+        current = edge.source->blockArgs[i];
     }
-    if (!current && succ && i < succ->getNumArguments())
-      current = succ->getArgument(i);
     edge.payload[i] = current;
 
     if (i < merge.payloadKinds.size())
@@ -104,7 +126,8 @@ LogicalResult StructuredCFGBuilder::materializeEdgeOperands(
   }
 
   Block *succBlock = succ->structuredBody;
-  unsigned expected = succBlock->getNumArguments();
+  (void)succBlock;
+  unsigned expected = getDataArgCount(*succ);
   if (edge.payload.size() != expected) {
     if (context)
       context->emitError("edge payload arity mismatch for structured branch")
@@ -120,21 +143,20 @@ LogicalResult StructuredCFGBuilder::materializeEdgeOperands(
     if (payload && mapper)
       if (Value mapped = mapper->lookupOrNull(payload))
         payload = mapped;
-    if (!payload)
-      payload = succBlock->getArgument(i);
     if (!payload) {
       if (context)
         context->emitError("unable to materialize operand for structured branch")
             << " at index " << i;
       return failure();
     }
-    Value succArg = succBlock->getArgument(i);
+    BlockArgument succArg = getDataArgAt(*succ, i);
     if (payload.getType() != succArg.getType()) {
       if (context)
         context->emitError("payload type mismatch for structured branch")
             << " at index " << i;
       return failure();
     }
+    edge.payload[i] = payload;
     operands.push_back(payload);
   }
 

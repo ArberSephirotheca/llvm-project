@@ -164,6 +164,10 @@ private:
   mlir::LogicalResult emitStructuredIf(BlockInfo &header, IfInfo &info,
                                        mlir::OpBuilder &builder);
   void normalizeEdgeForMerge(EdgeInfo &edge, BlockInfo &merge);
+  static mlir::Block *getSuccessorBody(const BlockInfo &succ);
+  static unsigned getDataArgCount(const BlockInfo &succ);
+  static mlir::BlockArgument getDataArgAt(const BlockInfo &succ,
+                                          unsigned index);
   mlir::LogicalResult materializeEdgeOperands(EdgeInfo &edge, BlockInfo *succ,
                                               llvm::SmallVectorImpl<mlir::Value> &operands,
                                               mlir::Operation *context);
