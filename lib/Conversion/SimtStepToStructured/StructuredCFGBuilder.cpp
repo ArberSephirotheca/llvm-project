@@ -45,6 +45,14 @@ signalUnimplemented(FunctionOpInterface func) {
   return failure();
 }
 
+static bool isMaterializableLocal(Value v) {
+  if (!v) return false;
+  if (auto *def = v.getDefiningOp())
+    return isa<arith::ConstantOp>(def); // add more trivially-clonable ops if you want
+  return false;
+}
+
+
 } // namespace
 
 StructuredCFGBuilder::StructuredCFGBuilder(FunctionOpInterface func)
@@ -742,7 +750,7 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
     auto addCapturedToEdge = [&](EdgeInfo &edge) {
       if (!edge.dest || edge.dest->isMergeBlock)
         return;
-      computeCapturedInputs(*edge.dest);
+      // computeCapturedInputs(*edge.dest);
       appendCapturedInputs(edge);
     };
 
@@ -1091,7 +1099,8 @@ LogicalResult StructuredCFGBuilder::emitStructuredBlocks() {
     structuredOpsInOrder.push_back(blockOp);
 
     bool isEntry = (info == orderedInfos.front());
-    if (info->original && (isEntry || info->isMergeBlock)) {
+    // if (info->original && (isEntry || info->isMergeBlock)) {
+    if (info->original && isEntry) {
       for (mlir::BlockArgument origArg : info->original->getArguments()) {
         auto newArg = info->structuredBody->addArgument(origArg.getType(),
                                                         origArg.getLoc());
@@ -1845,9 +1854,10 @@ LogicalResult StructuredCFGBuilder::analyseIfOp(BlockInfo &header,
 
   mlir::Block *mergeTargetBlock = mergeInfo.original;
   if (mergeTargetBlock) {
-    thenInfo.mergeTarget = mergeTargetBlock;
-    if (info.elseBlock)
-      info.elseBlock->mergeTarget = mergeTargetBlock;
+    // thenInfo.mergeTarget = mergeTargetBlock;
+    // if (info.elseBlock)
+    //   info.elseBlock->mergeTarget = mergeTargetBlock;
+    header.mergeTarget = mergeTargetBlock;
   }
 
   info.condition = ifOp.getCondition();
