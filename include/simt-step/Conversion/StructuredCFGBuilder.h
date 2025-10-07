@@ -131,9 +131,6 @@ private:
     llvm::SmallVector<mlir::Value, 4> payloadSeed;
     llvm::SmallVector<mlir::BlockArgument, 4> blockArgs;
     llvm::SmallVector<mlir::Operation *, 4> controlOps;
-    llvm::SmallVector<mlir::Value, 4> capturedInputs;
-    llvm::SmallVector<mlir::BlockArgument, 4> capturedArgs;
-    llvm::DenseMap<mlir::Value, unsigned> capturedInputIndex;
 
     mlir::Operation *originalTerminator = nullptr;
 
@@ -149,6 +146,11 @@ private:
 
     mlir::Block *mergeTarget = nullptr;
     mlir::Block *continueTarget = nullptr;
+
+    bool isMergeBlock = false;
+    llvm::SmallVector<mlir::Value, 4> capturedInputs;
+    llvm::SmallVector<mlir::BlockArgument, 4> capturedArgs;
+    llvm::DenseMap<mlir::Value, unsigned> capturedInputIndex;
 
     bool requestsMaskPush = false;
     bool requestsMaskPop = false;

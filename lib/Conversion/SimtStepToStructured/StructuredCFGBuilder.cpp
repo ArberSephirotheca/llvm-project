@@ -19,6 +19,7 @@
 #include <llvm/Support/Casting.h>
 #include <llvm/Support/ErrorHandling.h>
 #include <algorithm>
+#include <cstdio>
 #include <llvm/ADT/ScopeExit.h>
 
 #include <cassert>
@@ -84,6 +85,10 @@ void StructuredCFGBuilder::computeCapturedInputs(BlockInfo &info) {
         record(operand);
     }
   }
+
+  std::fprintf(stderr, "[captured] block '%s' captured=%zu\n",
+               info.symbolName.c_str(),
+               static_cast<size_t>(info.capturedInputs.size()));
 }
 
 Block *StructuredCFGBuilder::getSuccessorBody(const BlockInfo &succ) {
@@ -129,8 +134,12 @@ void StructuredCFGBuilder::appendCapturedInputs(EdgeInfo &edge) {
   if (!edge.dest)
     return;
   BlockInfo &dest = *edge.dest;
-  if (dest.capturedInputs.empty())
+  if (dest.capturedInputs.empty() || dest.isMergeBlock)
     return;
+
+  std::fprintf(stderr, "[appendCaptured] dest=%s inputs=%zu\n",
+               dest.symbolName.c_str(),
+               static_cast<size_t>(dest.capturedInputs.size()));
 
   llvm::SmallVector<mlir::Value, 8> reordered;
   reordered.reserve(dest.capturedInputs.size() + edge.payload.size());
@@ -344,6 +353,7 @@ LogicalResult StructuredCFGBuilder::analyseBlocks() {
     info.payloadArgs.clear();
     info.payloadBlockArgOffset = 0;
     info.originalTerminator = nullptr;
+    info.isMergeBlock = false;
     info.capturedInputs.clear();
     info.capturedArgs.clear();
     info.capturedInputIndex.clear();
@@ -374,6 +384,11 @@ LogicalResult StructuredCFGBuilder::analyseBlocks() {
         continue;
       }
     }
+
+    computeCapturedInputs(info);
+    llvm::errs() << "[analyse] block '" << info.symbolName
+                 << "' captured=" << info.capturedInputs.size() << "\n";
+    llvm::errs().flush();
   }
 
   return success();
@@ -713,11 +728,6 @@ LogicalResult StructuredCFGBuilder::computePayloads() {
       return failure();
   }
 
-  for (mlir::Block *block : blockOrder) {
-    BlockInfo &info = getOrCreateBlockInfo(block);
-    computeCapturedInputs(info);
-  }
-
   // TODO: tighten propagation by iterating until convergence once back-edge
   // payload materialisation lands.
   return success();
@@ -730,6 +740,9 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
     BlockInfo &info = getOrCreateBlockInfo(block);
 
     auto addCapturedToEdge = [&](EdgeInfo &edge) {
+      if (!edge.dest || edge.dest->isMergeBlock)
+        return;
+      computeCapturedInputs(*edge.dest);
       appendCapturedInputs(edge);
     };
 
@@ -741,6 +754,10 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
         const IfInfo &ifInfo = ifIt->second;
 
         BlockInfo *mergeDest = ifInfo.mergeBlock;
+        if (ifInfo.thenBlock && ifInfo.thenBlock->capturedInputs.empty())
+          std::fprintf(stderr, "[warn] then block has no captured inputs\n");
+        if (ifInfo.elseBlock && ifInfo.elseBlock->capturedInputs.empty())
+          std::fprintf(stderr, "[warn] else block has no captured inputs\n");
 
         EdgeInfo thenEdge;
         thenEdge.source = &info;
@@ -1047,8 +1064,11 @@ LogicalResult StructuredCFGBuilder::emitStructuredBlocks() {
 
   // First pass: create structured block ops and map block arguments.
   for (BlockInfo *info : orderedInfos) {
-    computeCapturedInputs(*info);
-    // Debug hook can be enabled here if needed to inspect captured inputs.
+    // capturedInputs already computed during analysis.
+    if (info->symbolName == "block3")
+      assert(!info->capturedInputs.empty() && "block3 should capture cond1");
+    if (info->symbolName == "block2")
+      assert(!info->capturedInputs.empty() && "block2 should capture zero");
     if (info->symbolName.empty()) {
       if (info == orderedInfos.front())
         info->symbolName = "entry";
@@ -1070,7 +1090,8 @@ LogicalResult StructuredCFGBuilder::emitStructuredBlocks() {
                                               : nullptr;
     structuredOpsInOrder.push_back(blockOp);
 
-    if (info->original) {
+    bool isEntry = (info == orderedInfos.front());
+    if (info->original && (isEntry || info->isMergeBlock)) {
       for (mlir::BlockArgument origArg : info->original->getArguments()) {
         auto newArg = info->structuredBody->addArgument(origArg.getType(),
                                                         origArg.getLoc());
@@ -1175,7 +1196,7 @@ LogicalResult StructuredCFGBuilder::stabilisePayloadSeeds() {
   };
 
   for (EdgeInfo &edge : edges)
-    if (edge.dest && !edge.payload.empty())
+    if (edge.dest && edge.dest->isMergeBlock && !edge.payload.empty())
       enqueue(edge.dest);
 
   while (!worklist.empty()) {
@@ -1183,6 +1204,8 @@ LogicalResult StructuredCFGBuilder::stabilisePayloadSeeds() {
     queued.erase(dest);
 
     bool changed = false;
+    if (!dest->isMergeBlock)
+      continue;
     for (EdgeInfo &edge : edges) {
       if (edge.dest != dest || edge.payload.empty())
         continue;
@@ -1193,13 +1216,13 @@ LogicalResult StructuredCFGBuilder::stabilisePayloadSeeds() {
     if (changed)
       for (unsigned edgeIndex : dest->outgoingEdges) {
         EdgeInfo &edge = edges[edgeIndex];
-        if (edge.dest)
+        if (edge.dest && edge.dest->isMergeBlock)
           enqueue(edge.dest);
       }
   }
 
   for (EdgeInfo &edge : edges)
-    if (edge.dest && edge.payload.empty())
+    if (edge.dest && edge.dest->isMergeBlock && edge.payload.empty())
       if (failed(ensurePayloadShape(edge)))
         return failure();
 
@@ -1806,11 +1829,13 @@ LogicalResult StructuredCFGBuilder::analyseIfOp(BlockInfo &header,
 
   BlockInfo &thenInfo = getOrCreateBlockInfo(&thenRegion.front());
   info.thenBlock = &thenInfo;
+  computeCapturedInputs(thenInfo);
 
   mlir::Region &elseRegion = ifOp.getElseRegion();
   if (!elseRegion.empty()) {
     BlockInfo &elseInfo = getOrCreateBlockInfo(&elseRegion.front());
     info.elseBlock = &elseInfo;
+    computeCapturedInputs(elseInfo);
   } else {
     info.elseBlock = nullptr;
   }
@@ -1855,6 +1880,8 @@ LogicalResult StructuredCFGBuilder::analyseLoopOp(BlockInfo &header,
   BlockInfo &bodyInfo = getOrCreateBlockInfo(&bodyRegion.front());
   info.prepareBlock = &prepareInfo;
   info.bodyBlock = &bodyInfo;
+  computeCapturedInputs(prepareInfo);
+  computeCapturedInputs(bodyInfo);
 
   BlockInfo &mergeInfo = ensureLoopMergeBlock(info, op);
 
@@ -1919,6 +1946,7 @@ LogicalResult StructuredCFGBuilder::analyseSwitchOp(BlockInfo &header,
   for (mlir::Block &caseBlock : caseRegion) {
     BlockInfo &caseInfo = getOrCreateBlockInfo(&caseBlock);
     caseInfo.requestsMaskPop = true;
+    computeCapturedInputs(caseInfo);
 
     if (blockIndex + 1 == caseValues.size())
       info.defaultBlock = &caseInfo;
@@ -1933,6 +1961,9 @@ LogicalResult StructuredCFGBuilder::analyseSwitchOp(BlockInfo &header,
 
 LogicalResult StructuredCFGBuilder::ensurePayloadShape(EdgeInfo &edge) {
   if (!edge.dest)
+    return success();
+
+  if (!edge.dest->isMergeBlock)
     return success();
 
   normalizeEdgeForMerge(edge, *edge.dest);
@@ -2042,6 +2073,8 @@ StructuredCFGBuilder::ensureLoopMergeBlock(LoopInfo &loopInfo,
 
   if (!mergeBlock)
     llvm::report_fatal_error("loop merge block must exist after splitting");
+
+  mergeInfo.isMergeBlock = true;
 
   unsigned numResults = loopOp.getNumResults();
   unsigned currentArgs = mergeBlock->getNumArguments();
@@ -2165,6 +2198,8 @@ StructuredCFGBuilder::ensureIfMergeBlock(IfInfo &ifInfo,
 
   if (!mergeBlock)
     llvm::report_fatal_error("if merge block must exist after splitting");
+
+  mergeInfo.isMergeBlock = true;
 
   if (mergeInfo.owningIf && mergeInfo.owningIf != ifOperation) {
     ifOperation->emitOpError("attempted to reuse merge block owned by a different if");
