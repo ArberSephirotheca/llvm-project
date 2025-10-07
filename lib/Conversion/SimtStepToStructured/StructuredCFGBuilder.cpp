@@ -94,6 +94,53 @@ void StructuredCFGBuilder::normalizeEdgeForMerge(EdgeInfo &edge,
   }
 }
 
+LogicalResult StructuredCFGBuilder::materializeEdgeOperands(
+    EdgeInfo &edge, BlockInfo *succ, SmallVectorImpl<Value> &operands,
+    Operation *context) {
+  if (!succ || !succ->structuredBody) {
+    if (context)
+      context->emitError("structured successor missing body during lowering");
+    return failure();
+  }
+
+  Block *succBlock = succ->structuredBody;
+  unsigned expected = succBlock->getNumArguments();
+  if (edge.payload.size() != expected) {
+    if (context)
+      context->emitError("edge payload arity mismatch for structured branch")
+          << " (have " << edge.payload.size() << ", expected " << expected
+          << ")";
+    return failure();
+  }
+
+  operands.clear();
+  operands.reserve(expected);
+  for (unsigned i = 0; i < expected; ++i) {
+    Value payload = edge.payload[i];
+    if (payload && mapper)
+      if (Value mapped = mapper->lookupOrNull(payload))
+        payload = mapped;
+    if (!payload)
+      payload = succBlock->getArgument(i);
+    if (!payload) {
+      if (context)
+        context->emitError("unable to materialize operand for structured branch")
+            << " at index " << i;
+      return failure();
+    }
+    Value succArg = succBlock->getArgument(i);
+    if (payload.getType() != succArg.getType()) {
+      if (context)
+        context->emitError("payload type mismatch for structured branch")
+            << " at index " << i;
+      return failure();
+    }
+    operands.push_back(payload);
+  }
+
+  return success();
+}
+
 LogicalResult StructuredCFGBuilder::build() {
   mapper = std::make_unique<IRMapping>();
   domInfo = std::make_unique<DominanceInfo>(func);
@@ -356,31 +403,6 @@ LogicalResult StructuredCFGBuilder::computePayloads() {
                   ifInfo.elseYieldOp);
     else if (!ifInfo.mergeArgs.empty())
       ifInfo.elseImplicitYield = true;
-
-    SmallVector<mlir::Value, 8> parentPayload;
-    if (ifInfo.parent) {
-      parentPayload.assign(ifInfo.parent->payloadSeed.begin(),
-                           ifInfo.parent->payloadSeed.end());
-      if (parentPayload.empty())
-        parentPayload.assign(ifInfo.parent->blockArgs.begin(),
-                             ifInfo.parent->blockArgs.end());
-    }
-
-  auto setParentSeed = [&](BlockInfo *block) {
-    if (!block)
-      return;
-    block->payloadSeed.assign(parentPayload.begin(), parentPayload.end());
-    block->payloadBlockArgOffset = parentPayload.size();
-    if (ifInfo.parent &&
-        ifInfo.parent->payloadKinds.size() == block->payloadSeed.size())
-      block->payloadKinds = ifInfo.parent->payloadKinds;
-    else
-      block->payloadKinds.assign(block->payloadSeed.size(),
-                                 PayloadKind::Carried);
-  };
-
-    setParentSeed(ifInfo.thenBlock);
-    setParentSeed(ifInfo.elseBlock);
 
   if (BlockInfo *mergeBlock = ifInfo.mergeBlock) {
     mergeBlock->payloadSeed.assign(mergeBlock->blockArgs.begin(),
@@ -1161,27 +1183,6 @@ LogicalResult StructuredCFGBuilder::emitStructuredBlock(BlockInfo &info) {
     mapper->map(seed, arg);
   }
 
-  auto mapValueInline = [&](Value v, Operation *contextOp)
-                            -> std::optional<Value> {
-    if (!v)
-      return Value();
-    if (Value mapped = mapper->lookupOrNull(v))
-      return mapped;
-    if (contextOp)
-      contextOp->emitError("unable to remap operand during structured lowering");
-    return std::nullopt;
-  };
-  auto mapValuesInline = [&](ValueRange vals, Operation *contextOp,
-                             SmallVectorImpl<Value> &out) -> LogicalResult {
-    for (Value v : vals) {
-      auto mapped = mapValueInline(v, contextOp);
-      if (!mapped)
-        return failure();
-      out.push_back(*mapped);
-    }
-    return success();
-  };
-
   if (info.original) {
     for (Operation &op : info.original->without_terminator()) {
       if (isa<simt::structured::BlockOp>(&op))
@@ -1239,7 +1240,7 @@ LogicalResult StructuredCFGBuilder::emitStructuredBlock(BlockInfo &info) {
             return failure();
           }
           SmallVector<Value> operands;
-          if (failed(mapValuesInline(edge.payload, cont, operands)))
+          if (failed(materializeEdgeOperands(edge, edge.dest, operands, cont)))
             return failure();
           Value mask = info.currentMask ? info.currentMask : info.structuredMaskArg;
           if (info.requestsMaskPush) {
@@ -1278,7 +1279,7 @@ LogicalResult StructuredCFGBuilder::emitStructuredBlock(BlockInfo &info) {
             return failure();
           }
           SmallVector<Value> operands;
-          if (failed(mapValuesInline(edge.payload, brk, operands)))
+          if (failed(materializeEdgeOperands(edge, edge.dest, operands, brk)))
             return failure();
           Value mask = info.currentMask ? info.currentMask : info.structuredMaskArg;
           if (info.requestsMaskPush) {
@@ -1344,46 +1345,36 @@ LogicalResult StructuredCFGBuilder::emitStructuredIf(BlockInfo &header,
                                   block->structuredOp.getSymName());
   };
 
-  auto mapValue = [&](Value v, StringRef context) -> std::optional<Value> {
-    if (!v)
-      return Value();
-    if (Value mapped = mapper->lookupOrNull(v))
-      return mapped;
-    if (info.op) {
-      info.op->emitError() << "unable to map value in " << context;
-      if (Operation *def = v.getDefiningOp())
-        def->emitRemark() << "value defined here";
-    }
-    return std::nullopt;
-  };
+  Value condValue = nullptr;
+  if (!trueEdge.control.empty())
+    condValue = trueEdge.control.front();
+  else
+    condValue = trueEdge.condition;
 
-  auto mapPayload = [&](EdgeInfo &edge, StringRef context,
-                        llvm::SmallVectorImpl<Value> &out) -> LogicalResult {
-    for (Value v : edge.payload) {
-      auto mapped = mapValue(v, context);
-      if (!mapped)
-        return failure();
-      out.push_back(*mapped);
-    }
-    return success();
-  };
+  if (condValue && mapper)
+    if (Value mapped = mapper->lookupOrNull(condValue))
+      condValue = mapped;
+
+  if (!condValue) {
+    if (info.op)
+      info.op->emitError("conditional edge missing predicate during lowering");
+    return failure();
+  }
 
   SmallVector<Value> truePayload;
-  if (failed(mapPayload(trueEdge, "if true payload", truePayload)))
+  if (failed(materializeEdgeOperands(trueEdge, trueEdge.dest, truePayload,
+                                     info.op)))
     return failure();
 
   SmallVector<Value> falsePayload;
-  if (failed(mapPayload(falseEdge, "if false payload", falsePayload)))
-    return failure();
-
-  auto mappedCond = mapValue(info.condition, "if condition");
-  if (!mappedCond)
+  if (failed(materializeEdgeOperands(falseEdge, falseEdge.dest, falsePayload,
+                                     info.op)))
     return failure();
 
   Value mask = header.currentMask ? header.currentMask : header.structuredMaskArg;
 
   builder.create<simt::structured::CondBranchOp>(
-      info.op ? info.op->getLoc() : header.structuredOp.getLoc(), *mappedCond,
+      info.op ? info.op->getLoc() : header.structuredOp.getLoc(), condValue,
       mask, mask, getTargetAttr(trueEdge.dest), getTargetAttr(falseEdge.dest),
       truePayload, falsePayload, FlatSymbolRefAttr(),
       simt::structured::ReconvergencePolicyAttr());
@@ -1537,12 +1528,6 @@ LogicalResult StructuredCFGBuilder::emitStructuredTerminator(BlockInfo &source) 
   }
 
   auto buildBranch = [&](unsigned edgeIndex) -> LogicalResult {
-    if (edgeIndex != kInvalidEdge) {
-      EdgeInfo &edgeDbg = edges[edgeIndex];
-      if (origTerm) {
-        origTerm->emitRemark() << "building branch with payload size " << edgeDbg.payload.size();
-      }
-    }
     if (edgeIndex == kInvalidEdge)
       return failure();
     EdgeInfo &edge = edges[edgeIndex];
@@ -1552,11 +1537,8 @@ LogicalResult StructuredCFGBuilder::emitStructuredTerminator(BlockInfo &source) 
       return failure();
     }
     SmallVector<Value> operands;
-    if (failed(mapValues(edge.payload, operands, "branch payload")))
+    if (failed(materializeEdgeOperands(edge, edge.dest, operands, origTerm)))
       return failure();
-    if (llvm::any_of(edge.payload, [](Value v) { return !v; }))
-      if (origTerm)
-        origTerm->emitRemark() << "edge payload contains null value";
     Value mask = source.currentMask ? source.currentMask : source.structuredMaskArg;
     auto targetAttr = FlatSymbolRefAttr::get(builder.getContext(),
                                              edge.dest->structuredOp.getSymName());
@@ -1568,37 +1550,44 @@ LogicalResult StructuredCFGBuilder::emitStructuredTerminator(BlockInfo &source) 
   if (trueEdgeIdx != kInvalidEdge && falseEdgeIdx != kInvalidEdge) {
     EdgeInfo &trueEdge = edges[trueEdgeIdx];
     EdgeInfo &falseEdge = edges[falseEdgeIdx];
-    auto cond = mapValue(trueEdge.condition, "cond branch condition");
-    if (!cond) {
+    Value condValue = nullptr;
+    if (!trueEdge.control.empty())
+      condValue = trueEdge.control.front();
+    else
+      condValue = trueEdge.condition;
+
+    if (condValue && mapper)
+      if (Value mapped = mapper->lookupOrNull(condValue))
+        condValue = mapped;
+
+    if (!condValue) {
       if (origTerm)
         origTerm->emitError("conditional edge missing condition value");
       return failure();
     }
 
-    Value finalCond = *cond;
+    Value finalCond = condValue;
     if (trueEdge.isSwitchFallthrough) {
-      auto mappedDoneOpt = mapValue(trueEdge.switchDoneFlag,
-                                    "switch done flag");
-      if (!mappedDoneOpt)
+      Value doneVal = trueEdge.switchDoneFlag;
+      if (doneVal && mapper)
+        if (Value mapped = mapper->lookupOrNull(doneVal))
+          doneVal = mapped;
+      if (!doneVal)
         return failure();
-      Value doneVal = *mappedDoneOpt;
-      if (!doneVal) {
-        if (origTerm)
-          origTerm->emitError("switch fallthrough missing done flag");
-        return failure();
-      }
       auto constFalse = builder.create<arith::ConstantIntOp>(loc, 0, 1);
       Value notDone = builder.create<arith::CmpIOp>(
           loc, arith::CmpIPredicate::eq, doneVal, constFalse);
-      finalCond = builder.create<arith::AndIOp>(loc, *cond, notDone);
+      finalCond = builder.create<arith::AndIOp>(loc, condValue, notDone);
     }
 
     SmallVector<Value> truePayload;
+    if (failed(materializeEdgeOperands(trueEdge, trueEdge.dest, truePayload,
+                                       origTerm)))
+      return failure();
+
     SmallVector<Value> falsePayload;
-    if (failed(mapValues(trueEdge.payload, truePayload,
-                         "cond true payload")) ||
-        failed(mapValues(falseEdge.payload, falsePayload,
-                         "cond false payload")))
+    if (failed(materializeEdgeOperands(falseEdge, falseEdge.dest, falsePayload,
+                                       origTerm)))
       return failure();
 
     auto trueTarget = trueEdge.dest && trueEdge.dest->structuredOp
@@ -2042,27 +2031,16 @@ StructuredCFGBuilder::ensureIfMergeBlock(IfInfo &ifInfo,
   mergeInfo.blockArgs.clear();
   mergeInfo.carriedTypes.clear();
   mergeInfo.payloadSeed.clear();
-
-  if (BlockInfo *parent = ifInfo.parent) {
-    if (!parent->payloadSeed.empty())
-      mergeInfo.payloadSeed.append(parent->payloadSeed.begin(),
-                                   parent->payloadSeed.end());
-    else if (!parent->blockArgs.empty())
-      for (mlir::BlockArgument arg : parent->blockArgs)
-        mergeInfo.payloadSeed.push_back(arg);
-  }
+  mergeInfo.payloadKinds.clear();
 
   for (mlir::BlockArgument arg : mergeBlock->getArguments()) {
     mergeInfo.blockArgs.push_back(arg);
     mergeInfo.carriedTypes.push_back(arg.getType());
     mergeInfo.payloadSeed.push_back(arg);
+    mergeInfo.payloadKinds.push_back(PayloadKind::Result);
   }
 
-  mergeInfo.payloadBlockArgOffset = mergeInfo.payloadSeed.size() >=
-                                            mergeBlock->getNumArguments()
-                                        ? mergeInfo.payloadSeed.size() -
-                                              mergeBlock->getNumArguments()
-                                        : 0;
+  mergeInfo.payloadBlockArgOffset = 0;
 
   ifInfo.mergeArgs.clear();
   for (mlir::BlockArgument arg : mergeBlock->getArguments())
@@ -2077,6 +2055,10 @@ StructuredCFGBuilder::ensureIfMergeBlock(IfInfo &ifInfo,
   ifInfo.results.clear();
   for (mlir::BlockArgument arg : mergeBlock->getArguments())
     ifInfo.results.push_back(arg);
+
+  for (EdgeInfo &edge : edges)
+    if (edge.dest == &mergeInfo)
+      normalizeEdgeForMerge(edge, mergeInfo);
 
   return mergeInfo;
 }

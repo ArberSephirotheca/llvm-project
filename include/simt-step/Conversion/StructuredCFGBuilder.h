@@ -164,6 +164,9 @@ private:
   mlir::LogicalResult emitStructuredIf(BlockInfo &header, IfInfo &info,
                                        mlir::OpBuilder &builder);
   void normalizeEdgeForMerge(EdgeInfo &edge, BlockInfo &merge);
+  mlir::LogicalResult materializeEdgeOperands(EdgeInfo &edge, BlockInfo *succ,
+                                              llvm::SmallVectorImpl<mlir::Value> &operands,
+                                              mlir::Operation *context);
   mlir::LogicalResult stabilisePayloadSeeds();
 
   /// Helpers used while analysing structured control ops.
