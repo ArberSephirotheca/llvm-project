@@ -131,6 +131,9 @@ private:
     llvm::SmallVector<mlir::Value, 4> payloadSeed;
     llvm::SmallVector<mlir::BlockArgument, 4> blockArgs;
     llvm::SmallVector<mlir::Operation *, 4> controlOps;
+    llvm::SmallVector<mlir::Value, 4> capturedInputs;
+    llvm::SmallVector<mlir::BlockArgument, 4> capturedArgs;
+    llvm::DenseMap<mlir::Value, unsigned> capturedInputIndex;
 
     mlir::Operation *originalTerminator = nullptr;
 
@@ -168,6 +171,9 @@ private:
   static unsigned getDataArgCount(const BlockInfo &succ);
   static mlir::BlockArgument getDataArgAt(const BlockInfo &succ,
                                           unsigned index);
+  mlir::BlockArgument getCapturedArg(BlockInfo &succ, mlir::Value value);
+  void appendCapturedInputs(EdgeInfo &edge);
+  void computeCapturedInputs(BlockInfo &info);
   mlir::LogicalResult materializeEdgeOperands(EdgeInfo &edge, BlockInfo *succ,
                                               llvm::SmallVectorImpl<mlir::Value> &operands,
                                               mlir::Operation *context);

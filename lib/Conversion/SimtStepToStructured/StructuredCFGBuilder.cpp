@@ -49,6 +49,43 @@ signalUnimplemented(FunctionOpInterface func) {
 StructuredCFGBuilder::StructuredCFGBuilder(FunctionOpInterface func)
     : func(func) {}
 
+void StructuredCFGBuilder::computeCapturedInputs(BlockInfo &info) {
+  info.capturedInputs.clear();
+  info.capturedArgs.clear();
+  info.capturedInputIndex.clear();
+
+  if (!info.original)
+    return;
+
+  llvm::DenseSet<mlir::Value> seen;
+  auto record = [&](mlir::Value value) {
+    if (!value)
+      return;
+    if (!seen.insert(value).second)
+      return;
+    unsigned index = info.capturedInputs.size();
+    info.capturedInputs.push_back(value);
+    info.capturedInputIndex.try_emplace(value, index);
+  };
+
+  for (Operation &op : *info.original) {
+    for (mlir::Value operand : op.getOperands()) {
+      if (!operand)
+        continue;
+
+      bool definedLocally = false;
+      if (auto blockArg = mlir::dyn_cast<mlir::BlockArgument>(operand)) {
+        definedLocally = blockArg.getOwner() == info.original;
+      } else if (Operation *def = operand.getDefiningOp()) {
+        definedLocally = def->getBlock() == info.original;
+      }
+
+      if (!definedLocally)
+        record(operand);
+    }
+  }
+}
+
 Block *StructuredCFGBuilder::getSuccessorBody(const BlockInfo &succ) {
   if (succ.structuredBody)
     return succ.structuredBody;
@@ -73,6 +110,39 @@ BlockArgument StructuredCFGBuilder::getDataArgAt(const BlockInfo &succ,
   assert(index + offset < body->getNumArguments() &&
          "data argument index out of range");
   return body->getArgument(index + offset);
+}
+
+BlockArgument StructuredCFGBuilder::getCapturedArg(BlockInfo &succ,
+                                                   mlir::Value value) {
+  if (!value)
+    return mlir::BlockArgument();
+  auto it = succ.capturedInputIndex.find(value);
+  if (it == succ.capturedInputIndex.end())
+    return mlir::BlockArgument();
+  unsigned idx = it->second;
+  if (idx >= succ.capturedArgs.size())
+    return mlir::BlockArgument();
+  return succ.capturedArgs[idx];
+}
+
+void StructuredCFGBuilder::appendCapturedInputs(EdgeInfo &edge) {
+  if (!edge.dest)
+    return;
+  BlockInfo &dest = *edge.dest;
+  if (dest.capturedInputs.empty())
+    return;
+
+  llvm::SmallVector<mlir::Value, 8> reordered;
+  reordered.reserve(dest.capturedInputs.size() + edge.payload.size());
+  reordered.append(dest.capturedInputs.begin(), dest.capturedInputs.end());
+  reordered.append(edge.payload.begin(), edge.payload.end());
+  edge.payload.swap(reordered);
+
+  llvm::SmallVector<PayloadKind, 8> kind;
+  kind.reserve(dest.capturedInputs.size() + edge.payloadKinds.size());
+  kind.append(dest.capturedInputs.size(), PayloadKind::Carried);
+  kind.append(edge.payloadKinds.begin(), edge.payloadKinds.end());
+  edge.payloadKinds.swap(kind);
 }
 
 void StructuredCFGBuilder::normalizeEdgeForMerge(EdgeInfo &edge,
@@ -274,6 +344,9 @@ LogicalResult StructuredCFGBuilder::analyseBlocks() {
     info.payloadArgs.clear();
     info.payloadBlockArgOffset = 0;
     info.originalTerminator = nullptr;
+    info.capturedInputs.clear();
+    info.capturedArgs.clear();
+    info.capturedInputIndex.clear();
     if (index == 0)
       info.symbolName = "entry";
     else
@@ -640,6 +713,11 @@ LogicalResult StructuredCFGBuilder::computePayloads() {
       return failure();
   }
 
+  for (mlir::Block *block : blockOrder) {
+    BlockInfo &info = getOrCreateBlockInfo(block);
+    computeCapturedInputs(info);
+  }
+
   // TODO: tighten propagation by iterating until convergence once back-edge
   // payload materialisation lands.
   return success();
@@ -650,6 +728,10 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
 
   for (mlir::Block *block : blockOrder) {
     BlockInfo &info = getOrCreateBlockInfo(block);
+
+    auto addCapturedToEdge = [&](EdgeInfo &edge) {
+      appendCapturedInputs(edge);
+    };
 
     for (mlir::Operation *op : info.controlOps) {
       if (!op)
@@ -667,6 +749,7 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
         thenEdge.condition = ifInfo.condition;
         thenEdge.origin = op;
         thenEdge.control.push_back(ifInfo.condition);
+        addCapturedToEdge(thenEdge);
         if (thenEdge.dest && failed(ensurePayloadShape(thenEdge)))
           return failure();
         edges.push_back(std::move(thenEdge));
@@ -679,6 +762,7 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
         elseEdge.condition = ifInfo.condition;
         elseEdge.origin = op;
         elseEdge.control.push_back(ifInfo.condition);
+        addCapturedToEdge(elseEdge);
         if (elseEdge.dest && failed(ensurePayloadShape(elseEdge)))
           return failure();
         edges.push_back(std::move(elseEdge));
@@ -731,6 +815,7 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
         entryEdge.source = &info;
         entryEdge.dest = loopInfo.prepareBlock;
         entryEdge.kind = EdgeInfo::Plain;
+        addCapturedToEdge(entryEdge);
         if (entryEdge.dest && failed(ensurePayloadShape(entryEdge)))
           return failure();
         edges.push_back(std::move(entryEdge));
@@ -747,6 +832,7 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
                 trueEdge.payload.assign(loopInfo.forwardedToBody.begin(),
                                          loopInfo.forwardedToBody.end());
               trueEdge.condition = cond.getCondition();
+              addCapturedToEdge(trueEdge);
               if (trueEdge.dest && failed(ensurePayloadShape(trueEdge)))
                 return failure();
               edges.push_back(std::move(trueEdge));
@@ -760,6 +846,7 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
                 falseEdge.payload.assign(loopInfo.forwardedToExit.begin(),
                                           loopInfo.forwardedToExit.end());
               falseEdge.condition = cond.getCondition();
+              addCapturedToEdge(falseEdge);
               if (falseEdge.dest && failed(ensurePayloadShape(falseEdge)))
                 return failure();
               edges.push_back(std::move(falseEdge));
@@ -778,6 +865,7 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
               backEdge.origin = cont;
               backEdge.payload.assign(cont.getOperands().begin(),
                                       cont.getOperands().end());
+              addCapturedToEdge(backEdge);
               edges.push_back(std::move(backEdge));
               if (edges.back().dest && failed(ensurePayloadShape(edges.back())))
                 return failure();
@@ -792,6 +880,7 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
               exitEdge.origin = breakOp;
               exitEdge.payload.assign(breakOp->getOperands().begin(),
                                       breakOp->getOperands().end());
+              addCapturedToEdge(exitEdge);
               edges.push_back(std::move(exitEdge));
               if (edges.back().dest && failed(ensurePayloadShape(edges.back())))
                 return failure();
@@ -806,6 +895,7 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
               contEdge.origin = yieldOp;
               contEdge.payload.assign(yieldOp->getOperands().begin(),
                                       yieldOp->getOperands().end());
+              addCapturedToEdge(contEdge);
               edges.push_back(std::move(contEdge));
               if (edges.back().dest && failed(ensurePayloadShape(edges.back())))
                 return failure();
@@ -827,6 +917,7 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
           caseEntry.source = &info;
           caseEntry.dest = caseInfo;
           caseEntry.kind = EdgeInfo::Plain;
+          addCapturedToEdge(caseEntry);
           if (caseEntry.dest && failed(ensurePayloadShape(caseEntry)))
             return failure();
          edges.push_back(std::move(caseEntry));
@@ -854,6 +945,7 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
               exitEdge.control.push_back(record.switchDone);
             }
             exitEdge.origin = yieldOp;
+            addCapturedToEdge(exitEdge);
             if (exitEdge.dest && failed(ensurePayloadShape(exitEdge)))
               return failure();
            edges.push_back(std::move(exitEdge));
@@ -880,6 +972,7 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
                                      record.payloadValues.end());
             for (Value ctrl : record.controlValues)
               fallEdge.control.push_back(ctrl);
+            addCapturedToEdge(fallEdge);
             if (fallEdge.dest && failed(ensurePayloadShape(fallEdge)))
               return failure();
            edges.push_back(std::move(fallEdge));
@@ -899,6 +992,7 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
           defaultEntry.source = &info;
           defaultEntry.dest = switchInfo.defaultBlock;
           defaultEntry.kind = EdgeInfo::Plain;
+          addCapturedToEdge(defaultEntry);
           if (failed(ensurePayloadShape(defaultEntry)))
             return failure();
          edges.push_back(std::move(defaultEntry));
@@ -915,6 +1009,7 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
             exitEdge.payload.append(
                 switchInfo.defaultRecord.payloadValues.begin(),
                 switchInfo.defaultRecord.payloadValues.end());
+            addCapturedToEdge(exitEdge);
             if (exitEdge.dest && failed(ensurePayloadShape(exitEdge)))
               return failure();
            edges.push_back(std::move(exitEdge));
@@ -952,6 +1047,8 @@ LogicalResult StructuredCFGBuilder::emitStructuredBlocks() {
 
   // First pass: create structured block ops and map block arguments.
   for (BlockInfo *info : orderedInfos) {
+    computeCapturedInputs(*info);
+    // Debug hook can be enabled here if needed to inspect captured inputs.
     if (info->symbolName.empty()) {
       if (info == orderedInfos.front())
         info->symbolName = "entry";
@@ -979,6 +1076,16 @@ LogicalResult StructuredCFGBuilder::emitStructuredBlocks() {
                                                         origArg.getLoc());
         info->structuredArgs.push_back(newArg);
         mapper->map(origArg, newArg);
+      }
+    }
+
+    info->capturedArgs.clear();
+    if (!info->capturedInputs.empty()) {
+      info->capturedArgs.reserve(info->capturedInputs.size());
+      for (mlir::Value captured : info->capturedInputs) {
+        auto arg = info->structuredBody->addArgument(captured.getType(),
+                                                     func.getLoc());
+        info->capturedArgs.push_back(arg);
       }
     }
 
@@ -1205,6 +1312,18 @@ LogicalResult StructuredCFGBuilder::emitStructuredBlock(BlockInfo &info) {
     mapper->map(seed, arg);
   }
 
+  for (auto [index, captured] : llvm::enumerate(info.capturedInputs)) {
+    if (!captured)
+      continue;
+    if (index >= info.capturedArgs.size())
+      continue;
+    mlir::BlockArgument arg = info.capturedArgs[index];
+    if (!arg)
+      continue;
+    remappedSeeds.emplace_back(captured, mapper->lookupOrNull(captured));
+    mapper->map(captured, arg);
+  }
+
   if (info.original) {
     for (Operation &op : info.original->without_terminator()) {
       if (isa<simt::structured::BlockOp>(&op))
@@ -1373,9 +1492,13 @@ LogicalResult StructuredCFGBuilder::emitStructuredIf(BlockInfo &header,
   else
     condValue = trueEdge.condition;
 
+  Value condSource = condValue;
   if (condValue && mapper)
     if (Value mapped = mapper->lookupOrNull(condValue))
       condValue = mapped;
+  if (condValue == condSource)
+    if (auto capturedArg = getCapturedArg(header, condSource))
+      condValue = capturedArg;
 
   if (!condValue) {
     if (info.op)
@@ -1578,9 +1701,13 @@ LogicalResult StructuredCFGBuilder::emitStructuredTerminator(BlockInfo &source) 
     else
       condValue = trueEdge.condition;
 
+    Value condSource = condValue;
     if (condValue && mapper)
       if (Value mapped = mapper->lookupOrNull(condValue))
         condValue = mapped;
+    if (condValue == condSource)
+      if (auto captured = getCapturedArg(source, condSource))
+        condValue = captured;
 
     if (!condValue) {
       if (origTerm)
@@ -1591,9 +1718,13 @@ LogicalResult StructuredCFGBuilder::emitStructuredTerminator(BlockInfo &source) 
     Value finalCond = condValue;
     if (trueEdge.isSwitchFallthrough) {
       Value doneVal = trueEdge.switchDoneFlag;
+      Value doneSource = doneVal;
       if (doneVal && mapper)
         if (Value mapped = mapper->lookupOrNull(doneVal))
           doneVal = mapped;
+      if (doneVal == doneSource)
+        if (auto captured = getCapturedArg(source, doneSource))
+          doneVal = captured;
       if (!doneVal)
         return failure();
       auto constFalse = builder.create<arith::ConstantIntOp>(loc, 0, 1);
