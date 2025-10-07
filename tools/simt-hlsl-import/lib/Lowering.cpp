@@ -4553,8 +4553,8 @@ public:
 
     mlir::Block *entry = func.addEntryBlock();
     mlir::OpBuilder funcBuilder(entry, entry->begin());
-    funcBuilder.create<simt::dialect::ActiveMaskOp>(loc,
-                                                    funcBuilder.getI64Type());
+    // funcBuilder.create<simt::dialect::ActiveMaskOp>(loc,
+    //                                                 funcBuilder.getI64Type());
 
     const clang::ASTContext &astContext = decl->getASTContext();
     const clang::SourceManager &sourceManager = astContext.getSourceManager();

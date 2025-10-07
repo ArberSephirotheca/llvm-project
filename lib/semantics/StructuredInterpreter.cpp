@@ -169,8 +169,8 @@ StructuredInterpreter::evaluateMaskValue(Value value) const {
     if (auto constOp = value.getDefiningOp<arith::ConstantIntOp>())
         return static_cast<std::uint64_t>(constOp.value());
 
-    if (auto active = value.getDefiningOp<simt::dialect::ActiveMaskOp>())
-        return state_.getActiveMask();
+    // if (auto active = value.getDefiningOp<simt::dialect::ActiveMaskOp>())
+    //     return state_.getActiveMask();
 
     if (auto arg = mlir::dyn_cast<BlockArgument>(value)) {
         if (auto parent = llvm::dyn_cast<structured::BlockOp>(arg.getOwner()->getParentOp())) {

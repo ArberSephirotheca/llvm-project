@@ -1466,10 +1466,10 @@ LogicalResult StructuredCFGBuilder::emitStructuredBlock(BlockInfo &info) {
       }
       if (isa<cf::BranchOp, cf::CondBranchOp, func::ReturnOp>(&op))
         continue;
-      if (auto active = dyn_cast<simt::dialect::ActiveMaskOp>(&op)) {
-        mapper->map(active.getResult(), info.currentMask);
-        continue;
-      }
+      // if (auto active = dyn_cast<simt::dialect::ActiveMaskOp>(&op)) {
+      //   mapper->map(active.getResult(), info.currentMask);
+      //   continue;
+      // }
       Operation *cloned = bodyBuilder.clone(op, *mapper);
       mapper->map(op.getResults(), cloned->getResults());
     }
