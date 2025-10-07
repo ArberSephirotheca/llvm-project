@@ -1,4 +1,4 @@
-builtin.module {
+module {
   func.func @loop_break(%input: i32) {
     %zero = arith.constant 0 : i32
     %loop:2 = "simt_step.loop"(%zero, %input) (

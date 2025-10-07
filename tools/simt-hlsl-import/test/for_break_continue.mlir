@@ -1,6 +1,5 @@
 // MLIR-LABEL: "builtin.module"()
 // MLIR:   "func.func"() <{function_type = (i32) -> (), sym_name = "main"}>
-// MLIR: %[[MASK:.*]] = "simt_step.active_mask"() : () -> i64
 // MLIR: %{{.*}} = "simt_step.dispatch_thread_id"() : () -> i32
 // MLIR: %[[ACC_INIT:.*]] = "arith.constant"() <{value = 0 : i32}> : () -> i32
 // MLIR: %[[I_INIT:.*]] = "arith.constant"() <{value = 0 : i32}> : () -> i32

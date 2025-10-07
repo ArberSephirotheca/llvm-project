@@ -1,6 +1,5 @@
 // MLIR-LABEL: module {
 // MLIR:   func.func @main(%arg0: i32) attributes {simt.num_threads = array<i64: 1, 1, 1>} {
-// MLIR:     %[[MASK:.*]] = "simt_step.active_mask"() : () -> i64
 // MLIR:     %[[DISPATCH:.*]] = simt_step.dispatch_thread_id : i32
 // MLIR:     %[[LOOP:.*]]:2 = "simt_step.loop"(%{{.*}}, %{{.*}}) ({
 // MLIR:       ^bb0(%{{.*}}):

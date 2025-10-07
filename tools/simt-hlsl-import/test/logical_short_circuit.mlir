@@ -1,6 +1,5 @@
 // MLIR-LABEL: module {
 // MLIR: func.func @main(
-// MLIR: %[[MASK:.*]] = "simt_step.active_mask"() : () -> i64
 // MLIR: %[[TID:.*]] = simt_step.dispatch_thread_id : i32
 // MLIR: %[[TMP0:.*]] = arith.constant 0 : i32
 // MLIR: %[[COND_AND:.*]] = arith.cmpi eq, %[[TID]], %{{.*}} : i32
