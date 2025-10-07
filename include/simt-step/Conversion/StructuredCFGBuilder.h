@@ -163,6 +163,7 @@ private:
   mlir::LogicalResult emitStructuredTerminator(BlockInfo &source);
   mlir::LogicalResult emitStructuredIf(BlockInfo &header, IfInfo &info,
                                        mlir::OpBuilder &builder);
+  void normalizeEdgeForMerge(EdgeInfo &edge, BlockInfo &merge);
   mlir::LogicalResult stabilisePayloadSeeds();
 
   /// Helpers used while analysing structured control ops.
