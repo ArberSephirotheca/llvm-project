@@ -1380,6 +1380,8 @@ LogicalResult StructuredCFGBuilder::emitStructuredBlocks() {
         auto arg = info->structuredBody->addArgument(captured.getType(),
                                                      func.getLoc());
         info->capturedArgs.push_back(arg);
+        if (mapper)
+          mapper->map(captured, arg);
       }
     }
 
@@ -2547,13 +2549,63 @@ StructuredCFGBuilder::MaskExpr StructuredCFGBuilder::materializeMaskExpr(
     return simplified;
   }
   case MaskExpr::Kind::Value: {
-    Value v = simplified.getValue();
-    if (Value mapped = mapper->lookupOrNull(v))
-      v = mapped;
-    if (!v && current.capturedInputs.size() == 1)
-      if (auto captured = getCapturedArg(current, simplified.getValue()))
-        v = captured;
-    result = v;
+    Value original = simplified.getValue();
+    auto belongsToCurrentBlock = [&](Value candidate) -> bool {
+      if (!candidate)
+        return false;
+      if (auto arg = mlir::dyn_cast<BlockArgument>(candidate))
+        return arg.getOwner() == current.structuredBody;
+      if (Operation *def = candidate.getDefiningOp())
+        return def->getBlock() == current.structuredBody;
+      return false;
+    };
+
+    auto remapValueIntoBlock = [&](Value v) -> Value {
+      if (!v)
+        return Value();
+      if (belongsToCurrentBlock(v))
+        return v;
+      if (mapper)
+        if (Value mapped = mapper->lookupOrNull(v);
+            belongsToCurrentBlock(mapped))
+          return mapped;
+      if (auto captured = getCapturedArg(current, v))
+        return captured;
+      if (auto blockArg = mlir::dyn_cast<BlockArgument>(v)) {
+        if (blockArg.getOwner() == current.original) {
+          unsigned idx = blockArg.getArgNumber();
+          if (idx == 0 && current.structuredMaskArg)
+            return current.structuredMaskArg;
+          if (idx < current.structuredArgs.size() &&
+              belongsToCurrentBlock(current.structuredArgs[idx]))
+            return current.structuredArgs[idx];
+          if (idx < current.payloadArgs.size() &&
+              belongsToCurrentBlock(current.payloadArgs[idx]))
+            return current.payloadArgs[idx];
+        }
+      }
+      if (auto opRes = mlir::dyn_cast<OpResult>(v)) {
+        Operation *def = opRes.getOwner();
+        if (def && isMaterializableLocal(v)) {
+          Operation *cloned = builder.clone(*def);
+          if (mapper)
+            mapper->map(def->getResults(), cloned->getResults());
+          return cloned->getResult(opRes.getResultNumber());
+        }
+      }
+      if (mapper)
+        if (Value mapped = mapper->lookupOrNull(v))
+          if (auto captured = getCapturedArg(current, mapped))
+            return captured;
+      return Value();
+    };
+
+    Value local = remapValueIntoBlock(original);
+    if (!local) {
+      result = nullptr;
+      return MaskExpr();
+    }
+    result = local;
     return simplified;
   }
   case MaskExpr::Kind::And: {
