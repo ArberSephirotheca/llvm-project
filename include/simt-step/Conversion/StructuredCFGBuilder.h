@@ -72,7 +72,7 @@ private:
 
     /// Returns a simplified version of the expression (constant folds basic
     /// cases).
-    MaskExpr simplify() const;
+  MaskExpr simplify() const;
 
     bool isValid() const { return static_cast<bool>(node); }
     Kind getKind() const { return node ? node->kind : Kind::Invalid; }
@@ -93,6 +93,9 @@ private:
   struct IfInfo;
   struct LoopInfo;
   struct SwitchInfo;
+
+  MaskExpr materializeMaskExpr(mlir::Value &result, BlockInfo &current,
+                               const MaskExpr &expr, mlir::OpBuilder &builder);
 
   enum class PayloadKind : uint8_t { Unknown, Result, Carried, Mask };
 

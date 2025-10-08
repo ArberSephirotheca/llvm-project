@@ -1681,7 +1681,14 @@ LogicalResult StructuredCFGBuilder::emitStructuredBlock(BlockInfo &info) {
           SmallVector<Value> operands;
           if (failed(materializeEdgeOperands(edge, edge.dest, operands, cont)))
             return failure();
-          Value mask = info.structuredMaskArg;
+          MaskExpr srcMask = info.incomingMask.isValid()
+                                 ? info.incomingMask
+                                 : MaskExpr::full();
+          MaskExpr edgeMask = edge.guardMask.isValid()
+                                  ? MaskExpr::makeAnd(srcMask, edge.guardMask)
+                                  : srcMask;
+          Value mask;
+          materializeMaskExpr(mask, info, edgeMask, bodyBuilder);
           auto targetAttr = FlatSymbolRefAttr::get(
               func.getContext(), edge.dest->structuredOp.getSymName());
           bodyBuilder.create<simt::structured::BranchOp>(cont.getLoc(), mask,
@@ -1714,7 +1721,14 @@ LogicalResult StructuredCFGBuilder::emitStructuredBlock(BlockInfo &info) {
           SmallVector<Value> operands;
           if (failed(materializeEdgeOperands(edge, edge.dest, operands, brk)))
             return failure();
-          Value mask = info.structuredMaskArg;
+          MaskExpr srcMask = info.incomingMask.isValid()
+                                 ? info.incomingMask
+                                 : MaskExpr::full();
+          MaskExpr edgeMask = edge.guardMask.isValid()
+                                  ? MaskExpr::makeAnd(srcMask, edge.guardMask)
+                                  : srcMask;
+          Value mask;
+          materializeMaskExpr(mask, info, edgeMask, bodyBuilder);
           auto targetAttr = FlatSymbolRefAttr::get(
               func.getContext(), edge.dest->structuredOp.getSymName());
           bodyBuilder.create<simt::structured::BranchOp>(brk.getLoc(), mask,
@@ -1802,13 +1816,25 @@ LogicalResult StructuredCFGBuilder::emitStructuredIf(BlockInfo &header,
                                      info.op)))
     return failure();
 
-  Value mask = header.structuredMaskArg;
+  MaskExpr srcMask = header.incomingMask.isValid()
+                         ? header.incomingMask
+                         : MaskExpr::full();
+  MaskExpr trueMaskExpr = trueEdge.guardMask.isValid()
+                              ? MaskExpr::makeAnd(srcMask, trueEdge.guardMask)
+                              : srcMask;
+  MaskExpr falseMaskExpr = falseEdge.guardMask.isValid()
+                               ? MaskExpr::makeAnd(srcMask, falseEdge.guardMask)
+                               : srcMask;
+  Value trueMaskValue;
+  materializeMaskExpr(trueMaskValue, header, trueMaskExpr, builder);
+  Value falseMaskValue;
+  materializeMaskExpr(falseMaskValue, header, falseMaskExpr, builder);
 
   builder.create<simt::structured::CondBranchOp>(
       info.op ? info.op->getLoc() : header.structuredOp.getLoc(), condValue,
-      mask, mask, getTargetAttr(trueEdge.dest), getTargetAttr(falseEdge.dest),
-      truePayload, falsePayload, FlatSymbolRefAttr(),
-      simt::structured::ReconvergencePolicyAttr());
+      trueMaskValue, falseMaskValue, getTargetAttr(trueEdge.dest),
+      getTargetAttr(falseEdge.dest), truePayload, falsePayload,
+      FlatSymbolRefAttr(), simt::structured::ReconvergencePolicyAttr());
 
   auto removeEdgeFromHeader = [&](unsigned index) {
     if (index == kInvalidEdge)
@@ -1895,6 +1921,18 @@ LogicalResult StructuredCFGBuilder::emitStructuredTerminator(BlockInfo &source) 
     return FlatSymbolRefAttr();
   };
 
+  auto computeMaskForEdge = [&](EdgeInfo &edge) -> Value {
+    MaskExpr srcMask = source.incomingMask.isValid()
+                           ? source.incomingMask
+                           : MaskExpr::full();
+    MaskExpr maskExpr = edge.guardMask.isValid()
+                            ? MaskExpr::makeAnd(srcMask, edge.guardMask)
+                            : srcMask;
+    Value maskValue;
+    materializeMaskExpr(maskValue, source, maskExpr, builder);
+    return maskValue ? maskValue : source.structuredMaskArg;
+  };
+
   if (source.outgoingEdges.empty()) {
     if (!origTerm)
       return success();
@@ -1905,8 +1943,11 @@ LogicalResult StructuredCFGBuilder::emitStructuredTerminator(BlockInfo &source) 
                            "branch payload")))
         return failure();
       auto targetAttr = getTargetAttr(branch.getDest());
-      builder.create<simt::structured::BranchOp>(loc, source.structuredMaskArg,
-                                                 targetAttr, destOperands);
+      EdgeInfo tempEdge;
+      tempEdge.guardMask = MaskExpr::full();
+      Value maskValue = computeMaskForEdge(tempEdge);
+      builder.create<simt::structured::BranchOp>(loc, maskValue, targetAttr,
+                                                 destOperands);
       return success();
     }
 
@@ -1924,10 +1965,16 @@ LogicalResult StructuredCFGBuilder::emitStructuredTerminator(BlockInfo &source) 
 
       auto trueTarget = getTargetAttr(cond.getTrueDest());
       auto falseTarget = getTargetAttr(cond.getFalseDest());
+      EdgeInfo trueEdge;
+      trueEdge.guardMask = MaskExpr::value(cond.getCondition());
+      EdgeInfo falseEdge;
+      falseEdge.guardMask = MaskExpr::makeNot(MaskExpr::value(cond.getCondition()));
+      Value trueMask = computeMaskForEdge(trueEdge);
+      Value falseMask = computeMaskForEdge(falseEdge);
       builder.create<simt::structured::CondBranchOp>(
-          loc, *condition, source.structuredMaskArg, source.structuredMaskArg,
-          trueTarget, falseTarget, trueOperands, falseOperands,
-          FlatSymbolRefAttr(), simt::structured::ReconvergencePolicyAttr());
+          loc, *condition, trueMask, falseMask, trueTarget, falseTarget,
+          trueOperands, falseOperands, FlatSymbolRefAttr(),
+          simt::structured::ReconvergencePolicyAttr());
       return success();
     }
 
@@ -1968,7 +2015,7 @@ LogicalResult StructuredCFGBuilder::emitStructuredTerminator(BlockInfo &source) 
     SmallVector<Value> operands;
     if (failed(materializeEdgeOperands(edge, edge.dest, operands, origTerm)))
       return failure();
-    Value mask = source.structuredMaskArg;
+    Value mask = computeMaskForEdge(edge);
     auto targetAttr = FlatSymbolRefAttr::get(builder.getContext(),
                                              edge.dest->structuredOp.getSymName());
     builder.create<simt::structured::BranchOp>(loc, mask, targetAttr,
@@ -2038,8 +2085,8 @@ LogicalResult StructuredCFGBuilder::emitStructuredTerminator(BlockInfo &source) 
                                  falseEdge.dest->structuredOp.getSymName())
                            : FlatSymbolRefAttr();
 
-    Value trueMask = source.structuredMaskArg;
-    Value falseMask = source.structuredMaskArg;
+    Value trueMask = computeMaskForEdge(trueEdge);
+    Value falseMask = computeMaskForEdge(falseEdge);
 
     builder.create<simt::structured::CondBranchOp>(
         loc, finalCond, trueMask, falseMask, trueTarget, falseTarget,
@@ -2477,6 +2524,86 @@ StructuredCFGBuilder::ensureIfMergeBlock(IfInfo &ifInfo,
 LogicalResult StructuredCFGBuilder::materialiseMaskExit(BlockInfo &info) {
   // No-op in the SSA mask model.
   return success();
+}
+
+StructuredCFGBuilder::MaskExpr StructuredCFGBuilder::materializeMaskExpr(
+    Value &result, BlockInfo &current, const MaskExpr &expr,
+    OpBuilder &builder) {
+  MaskExpr simplified = expr.simplify();
+  if (!simplified.isValid())
+    return MaskExpr();
+
+  switch (simplified.getKind()) {
+  case MaskExpr::Kind::Full:
+    result = current.structuredMaskArg;
+    return simplified;
+  case MaskExpr::Kind::Empty: {
+    auto maskTy = current.structuredMaskArg ? current.structuredMaskArg.getType()
+                                            : builder.getI64Type();
+    auto intTy = maskTy.cast<IntegerType>();
+    auto constZero = builder.create<arith::ConstantIntOp>(
+        current.structuredOp.getLoc(), 0, intTy.getWidth());
+    result = constZero;
+    return simplified;
+  }
+  case MaskExpr::Kind::Value: {
+    Value v = simplified.getValue();
+    if (Value mapped = mapper->lookupOrNull(v))
+      v = mapped;
+    if (!v && current.capturedInputs.size() == 1)
+      if (auto captured = getCapturedArg(current, simplified.getValue()))
+        v = captured;
+    result = v;
+    return simplified;
+  }
+  case MaskExpr::Kind::And: {
+    Value lhsValue;
+    Value rhsValue;
+    materializeMaskExpr(lhsValue, current, simplified.getLHS(), builder);
+    materializeMaskExpr(rhsValue, current, simplified.getRHS(), builder);
+    if (!lhsValue || !rhsValue) {
+      result = nullptr;
+      return MaskExpr();
+    }
+    auto andOp = builder.create<arith::AndIOp>(current.structuredOp.getLoc(),
+                                               lhsValue, rhsValue);
+    result = andOp.getResult();
+    return simplified;
+  }
+  case MaskExpr::Kind::Or: {
+    Value lhsValue;
+    Value rhsValue;
+    materializeMaskExpr(lhsValue, current, simplified.getLHS(), builder);
+    materializeMaskExpr(rhsValue, current, simplified.getRHS(), builder);
+    if (!lhsValue || !rhsValue) {
+      result = nullptr;
+      return MaskExpr();
+    }
+    auto orOp = builder.create<arith::OrIOp>(current.structuredOp.getLoc(),
+                                             lhsValue, rhsValue);
+    result = orOp.getResult();
+    return simplified;
+  }
+  case MaskExpr::Kind::Not: {
+    Value operandValue;
+    materializeMaskExpr(operandValue, current, simplified.getLHS(), builder);
+    if (!operandValue) {
+      result = nullptr;
+      return MaskExpr();
+    }
+    auto intTy = operandValue.getType().cast<IntegerType>();
+    auto allOnes = builder.create<arith::ConstantIntOp>(
+        current.structuredOp.getLoc(), -1, intTy.getWidth());
+    auto xorOp = builder.create<arith::XOrIOp>(current.structuredOp.getLoc(),
+                                               operandValue, allOnes);
+    result = xorOp.getResult();
+    return simplified;
+  }
+  case MaskExpr::Kind::Invalid:
+    result = nullptr;
+    return MaskExpr();
+  }
+  llvm_unreachable("unhandled mask expr kind");
 }
 
 } // namespace simt::conversion
