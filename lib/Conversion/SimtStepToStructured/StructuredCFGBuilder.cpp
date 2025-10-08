@@ -179,6 +179,31 @@ StructuredCFGBuilder::MaskExpr::getRHS() const {
   return MaskExpr(node ? node->rhs : nullptr);
 }
 
+bool StructuredCFGBuilder::MaskExpr::equals(const MaskExpr &other) const {
+  if (node == other.node)
+    return true;
+  if (!node || !other.node)
+    return false;
+  if (node->kind != other.node->kind)
+    return false;
+  switch (node->kind) {
+  case Kind::Full:
+  case Kind::Empty:
+    return true;
+  case Kind::Value:
+    return node->value == other.node->value;
+  case Kind::Not:
+    return MaskExpr(node->lhs).equals(MaskExpr(other.node->lhs));
+  case Kind::And:
+  case Kind::Or:
+    return MaskExpr(node->lhs).equals(MaskExpr(other.node->lhs)) &&
+           MaskExpr(node->rhs).equals(MaskExpr(other.node->rhs));
+  case Kind::Invalid:
+    return !other.node || other.node->kind == Kind::Invalid;
+  }
+  llvm_unreachable("unknown mask expression kind");
+}
+
 namespace {
 
 constexpr llvm::StringLiteral kUnimplementedMsg(
@@ -428,6 +453,8 @@ LogicalResult StructuredCFGBuilder::build() {
     return failStage("computePayloads");
   if (failed(enumerateEdges()))
     return failStage("enumerateEdges");
+  if (failed(computeMasks()))
+    return failStage("computeMasks");
   if (failed(stabilisePayloadSeeds()))
     return failStage("stabilisePayloadSeeds");
   if (failed(emitStructuredBlocks()))
@@ -555,6 +582,89 @@ LogicalResult StructuredCFGBuilder::analyseBlocks() {
     llvm::errs() << "[analyse] block '" << info.symbolName
                  << "' captured=" << info.capturedInputs.size() << "\n";
     llvm::errs().flush();
+  }
+
+  return success();
+}
+
+LogicalResult StructuredCFGBuilder::computeMasks() {
+  for (mlir::Block *block : blockOrder) {
+    BlockInfo &info = getOrCreateBlockInfo(block);
+    info.incomingMask = MaskExpr();
+    info.maskKnown = false;
+  }
+
+  if (blockOrder.empty())
+    return success();
+
+  BlockInfo &entryInfo = getOrCreateBlockInfo(blockOrder.front());
+  entryInfo.incomingMask = MaskExpr::full();
+  entryInfo.maskKnown = true;
+
+  llvm::SmallVector<BlockInfo *, 16> worklist;
+  worklist.push_back(&entryInfo);
+
+  auto ensureGuard = [&](EdgeInfo &edge) -> MaskExpr {
+    if (edge.guardMask.isValid())
+      return edge.guardMask;
+    switch (edge.kind) {
+    case EdgeInfo::ConditionalTrue:
+      if (edge.condition)
+        edge.guardMask = MaskExpr::value(edge.condition);
+      else
+        edge.guardMask = MaskExpr::full();
+      break;
+    case EdgeInfo::ConditionalFalse:
+      if (edge.condition)
+        edge.guardMask =
+            MaskExpr::makeNot(MaskExpr::value(edge.condition));
+      else
+        edge.guardMask = MaskExpr::full();
+      break;
+    case EdgeInfo::LoopBackEdge:
+    case EdgeInfo::Plain:
+    default:
+      edge.guardMask = MaskExpr::full();
+      break;
+    }
+    return edge.guardMask;
+  };
+
+  while (!worklist.empty()) {
+    BlockInfo *source = worklist.pop_back_val();
+    if (!source || !source->maskKnown)
+      continue;
+
+    MaskExpr srcMask = source->incomingMask.simplify();
+    source->incomingMask = srcMask;
+
+    for (unsigned edgeIndex : source->outgoingEdges) {
+      if (edgeIndex >= edges.size())
+        continue;
+      EdgeInfo &edge = edges[edgeIndex];
+      BlockInfo *dest = edge.dest;
+      if (!dest)
+        continue;
+
+      MaskExpr guard = ensureGuard(edge).simplify();
+      MaskExpr flow = MaskExpr::makeAnd(srcMask, guard).simplify();
+      if (!flow.isValid())
+        continue;
+
+      if (!dest->maskKnown) {
+        dest->incomingMask = flow;
+        dest->maskKnown = true;
+        worklist.push_back(dest);
+        continue;
+      }
+
+      MaskExpr combined =
+          MaskExpr::makeOr(dest->incomingMask, flow).simplify();
+      if (!combined.equals(dest->incomingMask)) {
+        dest->incomingMask = combined;
+        worklist.push_back(dest);
+      }
+    }
   }
 
   return success();

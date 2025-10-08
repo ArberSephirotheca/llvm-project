@@ -84,6 +84,10 @@ private:
     const MaskExpr getLHS() const;
     const MaskExpr getRHS() const;
 
+    bool equals(const MaskExpr &other) const;
+    bool operator==(const MaskExpr &other) const { return equals(other); }
+    bool operator!=(const MaskExpr &other) const { return !equals(other); }
+
     std::shared_ptr<const Node> node;
   };
 
@@ -200,6 +204,7 @@ private:
   };
 
   mlir::LogicalResult analyseBlocks();
+  mlir::LogicalResult computeMasks();
   mlir::LogicalResult computePayloads();
   mlir::LogicalResult enumerateEdges();
   mlir::LogicalResult emitStructuredBlocks();
