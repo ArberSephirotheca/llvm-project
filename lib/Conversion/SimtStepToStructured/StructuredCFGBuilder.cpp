@@ -1579,9 +1579,7 @@ LogicalResult StructuredCFGBuilder::emitStructuredBlock(BlockInfo &info) {
   else
     blockOp->removeAttr(blockOp.getContinueTargetAttrName());
 
-  if (failed(materialiseMaskEntry(info)))
-    return failure();
-
+  // TODO: replace mask entry materialisation with SSA mask handling.
   OpBuilder bodyBuilder(info.structuredBody, info.structuredBody->begin());
 
   SmallVector<std::pair<Value, Value>, 4> remappedSeeds;
@@ -1683,13 +1681,7 @@ LogicalResult StructuredCFGBuilder::emitStructuredBlock(BlockInfo &info) {
           SmallVector<Value> operands;
           if (failed(materializeEdgeOperands(edge, edge.dest, operands, cont)))
             return failure();
-          Value mask = info.currentMask ? info.currentMask : info.structuredMaskArg;
-          if (info.requestsMaskPush) {
-            auto pop = bodyBuilder.create<simt::structured::MaskPopOp>(
-                cont.getLoc(), mask.getType());
-            mask = pop.getResult();
-            info.currentMask = mask;
-          }
+          Value mask = info.structuredMaskArg;
           auto targetAttr = FlatSymbolRefAttr::get(
               func.getContext(), edge.dest->structuredOp.getSymName());
           bodyBuilder.create<simt::structured::BranchOp>(cont.getLoc(), mask,
@@ -1722,13 +1714,7 @@ LogicalResult StructuredCFGBuilder::emitStructuredBlock(BlockInfo &info) {
           SmallVector<Value> operands;
           if (failed(materializeEdgeOperands(edge, edge.dest, operands, brk)))
             return failure();
-          Value mask = info.currentMask ? info.currentMask : info.structuredMaskArg;
-          if (info.requestsMaskPush) {
-            auto pop = bodyBuilder.create<simt::structured::MaskPopOp>(
-                brk.getLoc(), mask.getType());
-            mask = pop.getResult();
-            info.currentMask = mask;
-          }
+          Value mask = info.structuredMaskArg;
           auto targetAttr = FlatSymbolRefAttr::get(
               func.getContext(), edge.dest->structuredOp.getSymName());
           bodyBuilder.create<simt::structured::BranchOp>(brk.getLoc(), mask,
@@ -2266,49 +2252,10 @@ LogicalResult StructuredCFGBuilder::propagatePayload(
 }
 
 LogicalResult StructuredCFGBuilder::materialiseMaskEntry(BlockInfo &info) {
-  if (!info.structuredBody)
-    return success();
-
-  OpBuilder builder(info.structuredBody, info.structuredBody->begin());
-  Location loc = func.getLoc();
-  if (info.original && !info.original->empty())
-    loc = info.original->front().getLoc();
-
-  Value mask = info.currentMask ? info.currentMask : info.structuredMaskArg;
-  Operation *lastOp = nullptr;
-
-  if (info.requestsMaskPop) {
-    auto pop = builder.create<simt::structured::MaskPopOp>(loc,
-                                                           mask.getType());
-    lastOp = pop.getOperation();
-    auto merge = builder.create<simt::structured::MaskMergeOp>(
-        loc, mask.getType(), info.structuredMaskArg);
-    mask = merge.getMerged();
-    lastOp = merge.getOperation();
-  }
-
-  auto getTargetAttr = [&](mlir::Block *target) -> FlatSymbolRefAttr {
-    if (!target)
-      return FlatSymbolRefAttr();
-    if (BlockInfo *targetInfo = lookupBlockInfo(target))
-      if (targetInfo->structuredOp)
-        return FlatSymbolRefAttr::get(builder.getContext(),
-                                      targetInfo->structuredOp.getSymName());
-    return FlatSymbolRefAttr();
-  };
-
-  if (info.requestsMaskPush) {
-    if (lastOp)
-      builder.setInsertionPointAfter(lastOp);
-    else
-      builder.setInsertionPointToStart(info.structuredBody);
-    auto mergeAttr = getTargetAttr(info.mergeTarget);
-    auto continueAttr = getTargetAttr(info.continueTarget);
-    builder.create<simt::structured::MaskPushOp>(loc, mask, mergeAttr,
-                                                 continueAttr, IntegerAttr());
-  }
-
-  info.currentMask = mask;
+  // With SSA mask propagation in place this helper becomes a no-op. The block
+  // entry mask is provided as the first block argument and the computed mask
+  // expression for each block is threaded separately. The legacy mask push/pop
+  // scaffolding will be removed once terminators consume SSA masks directly.
   return success();
 }
 
