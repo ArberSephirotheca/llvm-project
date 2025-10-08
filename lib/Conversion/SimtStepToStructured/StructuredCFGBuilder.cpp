@@ -1802,7 +1802,7 @@ LogicalResult StructuredCFGBuilder::emitStructuredIf(BlockInfo &header,
                                      info.op)))
     return failure();
 
-  Value mask = header.currentMask ? header.currentMask : header.structuredMaskArg;
+  Value mask = header.structuredMaskArg;
 
   builder.create<simt::structured::CondBranchOp>(
       info.op ? info.op->getLoc() : header.structuredOp.getLoc(), condValue,
@@ -1899,16 +1899,14 @@ LogicalResult StructuredCFGBuilder::emitStructuredTerminator(BlockInfo &source) 
     if (!origTerm)
       return success();
 
-    Value mask = source.currentMask ? source.currentMask : source.structuredMaskArg;
-
     if (auto branch = dyn_cast<cf::BranchOp>(origTerm)) {
       SmallVector<Value> destOperands;
       if (failed(mapValues(branch.getDestOperands(), destOperands,
                            "branch payload")))
         return failure();
       auto targetAttr = getTargetAttr(branch.getDest());
-      builder.create<simt::structured::BranchOp>(loc, mask, targetAttr,
-                                                 destOperands);
+      builder.create<simt::structured::BranchOp>(loc, source.structuredMaskArg,
+                                                 targetAttr, destOperands);
       return success();
     }
 
@@ -1927,9 +1925,9 @@ LogicalResult StructuredCFGBuilder::emitStructuredTerminator(BlockInfo &source) 
       auto trueTarget = getTargetAttr(cond.getTrueDest());
       auto falseTarget = getTargetAttr(cond.getFalseDest());
       builder.create<simt::structured::CondBranchOp>(
-          loc, *condition, mask, mask, trueTarget, falseTarget, trueOperands,
-          falseOperands, FlatSymbolRefAttr(),
-          simt::structured::ReconvergencePolicyAttr());
+          loc, *condition, source.structuredMaskArg, source.structuredMaskArg,
+          trueTarget, falseTarget, trueOperands, falseOperands,
+          FlatSymbolRefAttr(), simt::structured::ReconvergencePolicyAttr());
       return success();
     }
 
@@ -1970,7 +1968,7 @@ LogicalResult StructuredCFGBuilder::emitStructuredTerminator(BlockInfo &source) 
     SmallVector<Value> operands;
     if (failed(materializeEdgeOperands(edge, edge.dest, operands, origTerm)))
       return failure();
-    Value mask = source.currentMask ? source.currentMask : source.structuredMaskArg;
+    Value mask = source.structuredMaskArg;
     auto targetAttr = FlatSymbolRefAttr::get(builder.getContext(),
                                              edge.dest->structuredOp.getSymName());
     builder.create<simt::structured::BranchOp>(loc, mask, targetAttr,
@@ -2040,9 +2038,8 @@ LogicalResult StructuredCFGBuilder::emitStructuredTerminator(BlockInfo &source) 
                                  falseEdge.dest->structuredOp.getSymName())
                            : FlatSymbolRefAttr();
 
-    Value trueMask = source.currentMask ? source.currentMask
-                                        : source.structuredMaskArg;
-    Value falseMask = trueMask;
+    Value trueMask = source.structuredMaskArg;
+    Value falseMask = source.structuredMaskArg;
 
     builder.create<simt::structured::CondBranchOp>(
         loc, finalCond, trueMask, falseMask, trueTarget, falseTarget,
