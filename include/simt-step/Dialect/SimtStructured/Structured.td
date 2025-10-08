@@ -123,8 +123,8 @@ def SimtStruct_MaskPushOp : Op<SimtStruct_Dialect, "mask_push",
   let summary = "Push a mask and continuation target";
   let arguments = (ins MaskLikeType:$mask,
                        OptionalAttr<FlatSymbolRefAttr>:$merge_target,
-    OptionalAttr<FlatSymbolRefAttr>:$continue_target,
-    OptionalAttr<I64Attr>:$loop_mask);
+                       OptionalAttr<FlatSymbolRefAttr>:$continue_target,
+                       OptionalAttr<I64Attr>:$loop_mask);
 }
 
 def SimtStruct_MaskPopOp : Op<SimtStruct_Dialect, "mask_pop",

@@ -2475,21 +2475,7 @@ StructuredCFGBuilder::ensureIfMergeBlock(IfInfo &ifInfo,
 }
 
 LogicalResult StructuredCFGBuilder::materialiseMaskExit(BlockInfo &info) {
-  if (!info.structuredBody)
-    return success();
-
-  if (!info.requestsMaskPush)
-    return success();
-
-  Location loc = info.originalTerminator ? info.originalTerminator->getLoc()
-                                          : func.getLoc();
-  Value current = info.currentMask ? info.currentMask : info.structuredMaskArg;
-  if (!current)
-    return success();
-
-  OpBuilder builder(info.structuredBody, info.structuredBody->end());
-  auto pop = builder.create<simt::structured::MaskPopOp>(loc, current.getType());
-  info.currentMask = pop.getResult();
+  // No-op in the SSA mask model.
   return success();
 }
 

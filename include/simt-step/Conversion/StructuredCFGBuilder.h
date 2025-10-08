@@ -28,9 +28,6 @@ class BlockOp;
 class BranchOp;
 class CondBranchOp;
 class ReturnOp;
-class MaskPushOp;
-class MaskPopOp;
-class MaskMergeOp;
 } // namespace simt::structured
 
 namespace simt::conversion {
