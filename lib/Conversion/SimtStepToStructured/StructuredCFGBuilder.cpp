@@ -34,6 +34,151 @@ using namespace mlir;
 
 namespace simt::conversion {
 
+StructuredCFGBuilder::MaskExpr StructuredCFGBuilder::MaskExpr::full() {
+  auto node = std::make_shared<Node>();
+  node->kind = Kind::Full;
+  return MaskExpr(node);
+}
+
+StructuredCFGBuilder::MaskExpr StructuredCFGBuilder::MaskExpr::empty() {
+  auto node = std::make_shared<Node>();
+  node->kind = Kind::Empty;
+  return MaskExpr(node);
+}
+
+StructuredCFGBuilder::MaskExpr
+StructuredCFGBuilder::MaskExpr::value(mlir::Value v) {
+  if (!v)
+    return MaskExpr();
+  auto node = std::make_shared<Node>();
+  node->kind = Kind::Value;
+  node->value = v;
+  return MaskExpr(node);
+}
+
+StructuredCFGBuilder::MaskExpr StructuredCFGBuilder::MaskExpr::makeAnd(
+    const MaskExpr &lhs, const MaskExpr &rhs) {
+  if (!lhs.node || !rhs.node)
+    return MaskExpr();
+  auto node = std::make_shared<Node>();
+  node->kind = Kind::And;
+  node->lhs = lhs.node;
+  node->rhs = rhs.node;
+  return MaskExpr(node).simplify();
+}
+
+StructuredCFGBuilder::MaskExpr StructuredCFGBuilder::MaskExpr::makeOr(
+    const MaskExpr &lhs, const MaskExpr &rhs) {
+  if (!lhs.node)
+    return rhs;
+  if (!rhs.node)
+    return lhs;
+  auto node = std::make_shared<Node>();
+  node->kind = Kind::Or;
+  node->lhs = lhs.node;
+  node->rhs = rhs.node;
+  return MaskExpr(node).simplify();
+}
+
+StructuredCFGBuilder::MaskExpr StructuredCFGBuilder::MaskExpr::makeNot(
+    const MaskExpr &arg) {
+  if (!arg.node)
+    return MaskExpr();
+  auto node = std::make_shared<Node>();
+  node->kind = Kind::Not;
+  node->lhs = arg.node;
+  return MaskExpr(node).simplify();
+}
+
+StructuredCFGBuilder::MaskExpr StructuredCFGBuilder::MaskExpr::simplify() const {
+  if (!node)
+    return MaskExpr();
+
+  switch (node->kind) {
+  case Kind::Full:
+  case Kind::Empty:
+  case Kind::Value:
+    return *this;
+  case Kind::Not: {
+    MaskExpr operand(node->lhs);
+    operand = operand.simplify();
+    if (!operand.node)
+      return MaskExpr();
+    switch (operand.getKind()) {
+    case Kind::Full:
+      return empty();
+    case Kind::Empty:
+      return full();
+    case Kind::Not:
+      return MaskExpr(operand.node->lhs);
+    default: {
+      auto newNode = std::make_shared<Node>();
+      newNode->kind = Kind::Not;
+      newNode->lhs = operand.node;
+      return MaskExpr(newNode);
+    }
+    }
+  }
+  case Kind::And: {
+    MaskExpr lhs(node->lhs);
+    MaskExpr rhs(node->rhs);
+    lhs = lhs.simplify();
+    rhs = rhs.simplify();
+    if (!lhs.node || !rhs.node)
+      return MaskExpr();
+    if (lhs.getKind() == Kind::Empty || rhs.getKind() == Kind::Empty)
+      return empty();
+    if (lhs.getKind() == Kind::Full)
+      return rhs;
+    if (rhs.getKind() == Kind::Full)
+      return lhs;
+    if (lhs.node == rhs.node)
+      return lhs;
+    auto newNode = std::make_shared<Node>();
+    newNode->kind = Kind::And;
+    newNode->lhs = lhs.node;
+    newNode->rhs = rhs.node;
+    return MaskExpr(newNode);
+  }
+  case Kind::Or: {
+    MaskExpr lhs(node->lhs);
+    MaskExpr rhs(node->rhs);
+    lhs = lhs.simplify();
+    rhs = rhs.simplify();
+    if (!lhs.node)
+      return rhs;
+    if (!rhs.node)
+      return lhs;
+    if (lhs.getKind() == Kind::Full || rhs.getKind() == Kind::Full)
+      return full();
+    if (lhs.getKind() == Kind::Empty)
+      return rhs;
+    if (rhs.getKind() == Kind::Empty)
+      return lhs;
+    if (lhs.node == rhs.node)
+      return lhs;
+    auto newNode = std::make_shared<Node>();
+    newNode->kind = Kind::Or;
+    newNode->lhs = lhs.node;
+    newNode->rhs = rhs.node;
+    return MaskExpr(newNode);
+  }
+  case Kind::Invalid:
+    return MaskExpr();
+  }
+  llvm_unreachable("unknown mask expression kind");
+}
+
+const StructuredCFGBuilder::MaskExpr
+StructuredCFGBuilder::MaskExpr::getLHS() const {
+  return MaskExpr(node ? node->lhs : nullptr);
+}
+
+const StructuredCFGBuilder::MaskExpr
+StructuredCFGBuilder::MaskExpr::getRHS() const {
+  return MaskExpr(node ? node->rhs : nullptr);
+}
+
 namespace {
 
 constexpr llvm::StringLiteral kUnimplementedMsg(

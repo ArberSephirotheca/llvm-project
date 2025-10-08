@@ -50,6 +50,43 @@ public:
   mlir::LogicalResult build();
 
 private:
+  /// Lightweight expression tree modelling lane masks.  Mask expressions are
+  /// built during analysis and propagated alongside the structured CFG so we
+  /// can reason about dynamic blocks without relying on push/pop scaffolding.
+  struct MaskExpr {
+    enum class Kind : uint8_t { Invalid, Full, Empty, Value, And, Or, Not };
+
+    struct Node {
+      Kind kind = Kind::Invalid;
+      mlir::Value value;
+      std::shared_ptr<const Node> lhs;
+      std::shared_ptr<const Node> rhs;
+    };
+
+    MaskExpr() = default;
+    explicit MaskExpr(std::shared_ptr<const Node> node) : node(std::move(node)) {}
+
+    static MaskExpr full();
+    static MaskExpr empty();
+    static MaskExpr value(mlir::Value v);
+    static MaskExpr makeAnd(const MaskExpr &lhs, const MaskExpr &rhs);
+    static MaskExpr makeOr(const MaskExpr &lhs, const MaskExpr &rhs);
+    static MaskExpr makeNot(const MaskExpr &arg);
+
+    /// Returns a simplified version of the expression (constant folds basic
+    /// cases).
+    MaskExpr simplify() const;
+
+    bool isValid() const { return static_cast<bool>(node); }
+    Kind getKind() const { return node ? node->kind : Kind::Invalid; }
+
+    mlir::Value getValue() const { return node ? node->value : mlir::Value(); }
+    const MaskExpr getLHS() const;
+    const MaskExpr getRHS() const;
+
+    std::shared_ptr<const Node> node;
+  };
+
   struct BlockInfo;
   struct EdgeInfo;
   struct IfInfo;
@@ -65,6 +102,7 @@ private:
     llvm::SmallVector<PayloadKind, 8> payloadKinds;
     llvm::SmallVector<mlir::Value, 4> control;
     llvm::SmallVector<mlir::Value, 4> maskValues;
+    MaskExpr guardMask;
     enum Kind { Plain, ConditionalTrue, ConditionalFalse, LoopBackEdge } kind =
         Plain;
     mlir::Value condition;
@@ -131,6 +169,9 @@ private:
     llvm::SmallVector<mlir::Value, 4> payloadSeed;
     llvm::SmallVector<mlir::BlockArgument, 4> blockArgs;
     llvm::SmallVector<mlir::Operation *, 4> controlOps;
+
+    MaskExpr incomingMask;
+    bool maskKnown = false;
 
     mlir::Operation *originalTerminator = nullptr;
 

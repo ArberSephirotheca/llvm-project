@@ -525,7 +525,7 @@ def SimtStep_DispatchThreadIdOp : Op<SimtStep_Dialect, "dispatch_thread_id",
 
   let results = (outs AnyType:$id);
 
-  let hasCustomAssemblyFormat = 1;
+  // let hasCustomAssemblyFormat = 1;
 }
 
 def SimtStep_GroupThreadIdOp : Op<SimtStep_Dialect, "group_thread_id",
@@ -576,15 +576,15 @@ def SimtStep_LaneIdOp : Op<SimtStep_Dialect, "lane_id"> {
   let assemblyFormat = "attr-dict";
 }
 
-def SimtStep_ActiveMaskOp : Op<SimtStep_Dialect, "active_mask"> {
-  let summary = "Expose the current active lane mask";
-  let description = [{
-    Returns an `i64` mask representing currently active lanes. Planned future
-    work will make the bit-width configurable via attributes.
-  }];
+// def SimtStep_ActiveMaskOp : Op<SimtStep_Dialect, "active_mask"> {
+//   let summary = "Expose the current active lane mask";
+//   let description = [{
+//     Returns an `i64` mask representing currently active lanes. Planned future
+//     work will make the bit-width configurable via attributes.
+//   }];
 
-  let results = (outs I64:$mask);
-}
+//   let results = (outs I64:$mask);
+// }
 
 def SimtStep_MemLoadOp : Op<SimtStep_Dialect, "mem_load"> {
   let summary = "Load a value from memory";
