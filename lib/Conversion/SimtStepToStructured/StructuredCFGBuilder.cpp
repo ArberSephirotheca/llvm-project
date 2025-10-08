@@ -256,6 +256,7 @@ LogicalResult StructuredCFGBuilder::materializeEdgeOperands(
 }
 
 LogicalResult StructuredCFGBuilder::build() {
+  llvm::errs() << "[build] starting structured CFG build\n";
   mapper = std::make_unique<IRMapping>();
   domInfo = std::make_unique<DominanceInfo>(func);
   functionReturnValues.clear();
@@ -2094,7 +2095,8 @@ StructuredCFGBuilder::ensureLoopMergeBlock(LoopInfo &loopInfo,
     mergeBlock = mergeInfo.original;
 
   if (!mergeBlock)
-    llvm::report_fatal_error("loop merge block must exist after splitting");
+    loopOperation->emitOpError("loop merge block must exist after splitting");
+
 
   mergeInfo.isMergeBlock = true;
 
@@ -2103,7 +2105,7 @@ StructuredCFGBuilder::ensureLoopMergeBlock(LoopInfo &loopInfo,
   if (currentArgs > numResults) {
     loopOperation->emitOpError(
         "loop merge block already has more arguments than loop results");
-    llvm::report_fatal_error("invalid loop merge configuration");
+    // llvm::report_fatal_error("invalid loop merge configuration");
   }
 
   Location loopLoc = loopOp.getLoc();
@@ -2115,7 +2117,7 @@ StructuredCFGBuilder::ensureLoopMergeBlock(LoopInfo &loopInfo,
   if (mergeBlock->getNumArguments() != numResults) {
     loopOperation->emitOpError(
         "loop merge block argument count must match loop results");
-    llvm::report_fatal_error("mismatched loop merge arity");
+    // llvm::report_fatal_error("mismatched loop merge arity");
   }
 
   mergeInfo.blockArgs.clear();
@@ -2219,13 +2221,13 @@ StructuredCFGBuilder::ensureIfMergeBlock(IfInfo &ifInfo,
     mergeBlock = mergeInfo.original;
 
   if (!mergeBlock)
-    llvm::report_fatal_error("if merge block must exist after splitting");
+    ifOperation->emitOpError("if merge block must exist after splitting");
 
   mergeInfo.isMergeBlock = true;
 
   if (mergeInfo.owningIf && mergeInfo.owningIf != ifOperation) {
     ifOperation->emitOpError("attempted to reuse merge block owned by a different if");
-    llvm::report_fatal_error("merge block ownership mismatch");
+    // llvm::report_fatal_error("merge block ownership mismatch");
   }
 
   mergeInfo.owningIf = ifOperation;
