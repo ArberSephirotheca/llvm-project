@@ -1108,6 +1108,17 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
         entryEdge.source = &info;
         entryEdge.dest = loopInfo.prepareBlock;
         entryEdge.kind = EdgeInfo::Plain;
+        if (entryEdge.dest) {
+          BlockInfo &prepareInfo = *entryEdge.dest;
+          unsigned offset = prepareInfo.payloadBlockArgOffset;
+          if (offset <= prepareInfo.payloadSeed.size()) {
+            auto begin = prepareInfo.payloadSeed.begin();
+            std::advance(begin, static_cast<ptrdiff_t>(offset));
+            entryEdge.payload.assign(begin, prepareInfo.payloadSeed.end());
+          }
+          entryEdge.payloadKinds.assign(entryEdge.payload.size(),
+                                        PayloadKind::Carried);
+        }
         addCapturedToEdge(entryEdge);
         if (entryEdge.dest && failed(ensurePayloadShape(entryEdge)))
           return failure();
@@ -1121,6 +1132,7 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
               trueEdge.source = loopInfo.prepareBlock;
               trueEdge.dest = loopInfo.bodyBlock;
               trueEdge.kind = EdgeInfo::ConditionalTrue;
+              trueEdge.origin = cond;
               if (!loopInfo.forwardedToBody.empty())
                 trueEdge.payload.assign(loopInfo.forwardedToBody.begin(),
                                          loopInfo.forwardedToBody.end());
@@ -1135,6 +1147,7 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
               falseEdge.source = loopInfo.prepareBlock;
               falseEdge.dest = loopInfo.mergeBlock;
               falseEdge.kind = EdgeInfo::ConditionalFalse;
+              falseEdge.origin = cond;
               if (!loopInfo.forwardedToExit.empty())
                 falseEdge.payload.assign(loopInfo.forwardedToExit.begin(),
                                           loopInfo.forwardedToExit.end());
@@ -1362,14 +1375,13 @@ LogicalResult StructuredCFGBuilder::emitStructuredBlocks() {
                                               : nullptr;
     structuredOpsInOrder.push_back(blockOp);
 
-    bool isEntry = (info == orderedInfos.front());
-    // if (info->original && (isEntry || info->isMergeBlock)) {
-    if (info->original && isEntry) {
+    if (info->original) {
       for (mlir::BlockArgument origArg : info->original->getArguments()) {
         auto newArg = info->structuredBody->addArgument(origArg.getType(),
                                                         origArg.getLoc());
         info->structuredArgs.push_back(newArg);
-        mapper->map(origArg, newArg);
+        if (mapper)
+          mapper->map(origArg, newArg);
       }
     }
 
