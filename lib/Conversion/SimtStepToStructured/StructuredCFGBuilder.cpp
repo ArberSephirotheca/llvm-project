@@ -1935,6 +1935,41 @@ LogicalResult StructuredCFGBuilder::emitStructuredTerminator(BlockInfo &source) 
     return maskValue ? maskValue : source.structuredMaskArg;
   };
 
+  if (auto loopYield = dyn_cast_or_null<simt::dialect::YieldOp>(origTerm)) {
+    SmallVector<unsigned, 4> yieldEdges;
+    for (unsigned edgeIndex : source.outgoingEdges) {
+      EdgeInfo &edge = edges[edgeIndex];
+      if (edge.origin == origTerm)
+        yieldEdges.push_back(edgeIndex);
+    }
+    if (yieldEdges.empty()) {
+      origTerm->emitError("missing structured edges for loop yield");
+      return failure();
+    }
+
+    for (unsigned edgeIndex : yieldEdges) {
+      EdgeInfo &edge = edges[edgeIndex];
+      if (edge.dest && edge.dest->isMergeBlock)
+        if (failed(ensurePayloadShape(edge)))
+          return failure();
+
+      SmallVector<Value> operands;
+      if (failed(materializeEdgeOperands(edge, edge.dest, operands, origTerm)))
+        return failure();
+
+      Value mask = computeMaskForEdge(edge);
+      auto targetAttr = getTargetAttr(edge.dest ? edge.dest->original : nullptr);
+      builder.create<simt::structured::BranchOp>(loc, mask, targetAttr,
+                                                 operands);
+
+      auto it = llvm::find(source.outgoingEdges, edgeIndex);
+      if (it != source.outgoingEdges.end())
+        source.outgoingEdges.erase(it);
+    }
+
+    return success();
+  }
+
   if (source.outgoingEdges.empty()) {
     if (!origTerm)
       return success();
@@ -2047,6 +2082,10 @@ LogicalResult StructuredCFGBuilder::emitStructuredTerminator(BlockInfo &source) 
         origTerm->emitError("conditional edge missing condition value");
       return failure();
     }
+
+    if (falseEdge.dest && falseEdge.dest->isMergeBlock)
+      if (failed(ensurePayloadShape(falseEdge)))
+        return failure();
 
     Value finalCond = condValue;
     if (trueEdge.isSwitchFallthrough) {
