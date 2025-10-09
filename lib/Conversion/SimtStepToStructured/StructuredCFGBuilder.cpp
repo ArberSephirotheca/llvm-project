@@ -2542,7 +2542,7 @@ StructuredCFGBuilder::MaskExpr StructuredCFGBuilder::materializeMaskExpr(
   case MaskExpr::Kind::Empty: {
     auto maskTy = current.structuredMaskArg ? current.structuredMaskArg.getType()
                                             : builder.getI64Type();
-    auto intTy = maskTy.cast<IntegerType>();
+    auto intTy = mlir::cast<IntegerType>(maskTy);
     auto constZero = builder.create<arith::ConstantIntOp>(
         current.structuredOp.getLoc(), 0, intTy.getWidth());
     result = constZero;
@@ -2617,8 +2617,8 @@ StructuredCFGBuilder::MaskExpr StructuredCFGBuilder::materializeMaskExpr(
       result = nullptr;
       return MaskExpr();
     }
-    auto andOp = builder.create<arith::AndIOp>(current.structuredOp.getLoc(),
-                                               lhsValue, rhsValue);
+    auto andOp = builder.create<simt::structured::MaskAndOp>(
+        current.structuredOp.getLoc(), lhsValue, rhsValue);
     result = andOp.getResult();
     return simplified;
   }
@@ -2631,8 +2631,8 @@ StructuredCFGBuilder::MaskExpr StructuredCFGBuilder::materializeMaskExpr(
       result = nullptr;
       return MaskExpr();
     }
-    auto orOp = builder.create<arith::OrIOp>(current.structuredOp.getLoc(),
-                                             lhsValue, rhsValue);
+    auto orOp = builder.create<simt::structured::MaskOrOp>(
+        current.structuredOp.getLoc(), lhsValue, rhsValue);
     result = orOp.getResult();
     return simplified;
   }
@@ -2643,12 +2643,9 @@ StructuredCFGBuilder::MaskExpr StructuredCFGBuilder::materializeMaskExpr(
       result = nullptr;
       return MaskExpr();
     }
-    auto intTy = operandValue.getType().cast<IntegerType>();
-    auto allOnes = builder.create<arith::ConstantIntOp>(
-        current.structuredOp.getLoc(), -1, intTy.getWidth());
-    auto xorOp = builder.create<arith::XOrIOp>(current.structuredOp.getLoc(),
-                                               operandValue, allOnes);
-    result = xorOp.getResult();
+    auto notOp = builder.create<simt::structured::MaskNotOp>(
+        current.structuredOp.getLoc(), operandValue);
+    result = notOp.getResult();
     return simplified;
   }
   case MaskExpr::Kind::Invalid:

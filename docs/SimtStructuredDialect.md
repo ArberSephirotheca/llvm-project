@@ -50,6 +50,16 @@ These operations correspond to the merge-stack management performed by the HLSL
 interpreter. `mask_pop`/`mask_merge` now appear at reconvergence points to feed
 the block’s mask argument before any user operations execute.
 
+### Mask logic helpers
+- `simt_struct.mask_and %lhs, %rhs` – internal bitwise AND used while
+  materialising SSA mask expressions.
+- `simt_struct.mask_or %lhs, %rhs` – internal bitwise OR for mask propagation.
+- `simt_struct.mask_not %mask` – internal bitwise complement of a mask value.
+
+These helper ops are produced by the structured CFG builder to keep mask
+computation distinct from user-visible instructions. They should not carry
+direct semantic meaning outside of the lowering pipeline.
+
 ### Example lowering (work-in-progress)
 
 ```

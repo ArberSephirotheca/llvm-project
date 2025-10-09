@@ -143,4 +143,57 @@ def SimtStruct_MaskMergeOp : Op<SimtStruct_Dialect, "mask_merge",
   let hasVerifier = 1;
 }
 
+def SimtStruct_MaskAndOp : Op<SimtStruct_Dialect, "mask_and",
+    [HasParent<"BlockOp">]> {
+  let summary = "Internal mask AND";
+  let description = [{
+    Computes the bitwise conjunction of two mask-like values. This operation is
+    internal to the structured CFG builder and carries no standalone semantics
+    beyond mask bookkeeping.
+  }];
+  let arguments = (ins MaskLikeType:$lhs, MaskLikeType:$rhs);
+  let results = (outs MaskLikeType:$result);
+  let builders = [OpBuilder<
+      (ins "mlir::Value":$lhs, "mlir::Value":$rhs), [{
+        assert(lhs.getType() == rhs.getType() &&
+               "mask_and operands must have matching types");
+        $_state.addOperands({lhs, rhs});
+        $_state.addTypes(lhs.getType());
+      }]>];
+}
+
+def SimtStruct_MaskOrOp : Op<SimtStruct_Dialect, "mask_or",
+    [HasParent<"BlockOp">]> {
+  let summary = "Internal mask OR";
+  let description = [{
+    Computes the bitwise disjunction of two mask-like values. Used internally by
+    SSA mask propagation.
+  }];
+  let arguments = (ins MaskLikeType:$lhs, MaskLikeType:$rhs);
+  let results = (outs MaskLikeType:$result);
+  let builders = [OpBuilder<
+      (ins "mlir::Value":$lhs, "mlir::Value":$rhs), [{
+        assert(lhs.getType() == rhs.getType() &&
+               "mask_or operands must have matching types");
+        $_state.addOperands({lhs, rhs});
+        $_state.addTypes(lhs.getType());
+      }]>];
+}
+
+def SimtStruct_MaskNotOp : Op<SimtStruct_Dialect, "mask_not",
+    [HasParent<"BlockOp">]> {
+  let summary = "Internal mask NOT";
+  let description = [{
+    Computes the bitwise complement of a mask-like value. Used internally while
+    materialising SSA mask expressions.
+  }];
+  let arguments = (ins MaskLikeType:$input);
+  let results = (outs MaskLikeType:$result);
+  let builders = [OpBuilder<
+      (ins "mlir::Value":$input), [{
+        $_state.addOperands(input);
+        $_state.addTypes(input.getType());
+      }]>];
+}
+
 #endif // SIMT_STRUCTURED_DIALECT_TD
