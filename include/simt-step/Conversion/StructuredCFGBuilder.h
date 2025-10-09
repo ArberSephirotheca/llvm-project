@@ -214,6 +214,8 @@ private:
   mlir::LogicalResult emitStructuredTerminator(BlockInfo &source);
   mlir::LogicalResult emitStructuredIf(BlockInfo &header, IfInfo &info,
                                        mlir::OpBuilder &builder);
+  mlir::LogicalResult emitStructuredLoop(BlockInfo &enclosing, LoopInfo &info,
+                                         mlir::OpBuilder &builder);
   void normalizeEdgeForMerge(EdgeInfo &edge, BlockInfo &merge);
   static mlir::Block *getSuccessorBody(const BlockInfo &succ);
   static unsigned getDataArgCount(const BlockInfo &succ);
