@@ -1658,6 +1658,18 @@ LogicalResult StructuredCFGBuilder::emitStructuredBlock(BlockInfo &info) {
           continue;
         }
       }
+      if (auto nestedLoop = dyn_cast<simt::dialect::LoopOp>(&op)) {
+        if (auto it = loopInfos.find(nestedLoop.getOperation());
+            it != loopInfos.end()) {
+          LoopInfo &nestedInfo = it->second;
+          ensureLoopMergeBlock(nestedInfo, nestedLoop.getOperation());
+          OpBuilder::InsertionGuard guard(bodyBuilder);
+          bodyBuilder.setInsertionPointToEnd(info.structuredBody);
+          if (failed(emitStructuredLoop(info, nestedInfo, bodyBuilder)))
+            return failure();
+          continue;
+        }
+      }
       if (auto cont = dyn_cast<simt::dialect::ContinueOp>(&op)) {
         SmallVector<unsigned, 2> edgesForContinue;
         auto &outgoing = info.outgoingEdges;
@@ -1852,6 +1864,66 @@ LogicalResult StructuredCFGBuilder::emitStructuredIf(BlockInfo &header,
   return success();
 }
 
+LogicalResult StructuredCFGBuilder::emitStructuredLoop(BlockInfo &enclosing,
+                                                       LoopInfo &info,
+                                                       OpBuilder &builder) {
+  constexpr unsigned kInvalidEdge = std::numeric_limits<unsigned>::max();
+  unsigned entryEdgeIdx = kInvalidEdge;
+
+  for (unsigned idx : enclosing.outgoingEdges) {
+    EdgeInfo &edge = edges[idx];
+    if (edge.dest == info.prepareBlock && edge.kind == EdgeInfo::Plain) {
+      entryEdgeIdx = idx;
+      break;
+    }
+  }
+
+  if (entryEdgeIdx == kInvalidEdge) {
+    if (info.op)
+      info.op->emitError("missing entry edge to loop prepare block");
+    return failure();
+  }
+
+  if (!info.prepareBlock || !info.prepareBlock->structuredOp) {
+    if (info.op)
+      info.op->emitError("loop prepare block missing structured form");
+    return failure();
+  }
+
+  EdgeInfo &entryEdge = edges[entryEdgeIdx];
+
+  SmallVector<Value> payload;
+  if (failed(materializeEdgeOperands(entryEdge, entryEdge.dest, payload,
+                                     info.op)))
+    return failure();
+
+  MaskExpr srcMask = enclosing.incomingMask.isValid()
+                         ? enclosing.incomingMask
+                         : MaskExpr::full();
+  MaskExpr guardMask = entryEdge.guardMask.isValid()
+                            ? entryEdge.guardMask
+                            : MaskExpr::full();
+  MaskExpr edgeMask = MaskExpr::makeAnd(srcMask, guardMask).simplify();
+
+  Value maskValue;
+  materializeMaskExpr(maskValue, enclosing, edgeMask, builder);
+  if (!maskValue)
+    maskValue = enclosing.structuredMaskArg;
+
+  Location loc = info.op ? info.op->getLoc() : enclosing.structuredOp.getLoc();
+  auto targetAttr = FlatSymbolRefAttr::get(
+      builder.getContext(), info.prepareBlock->structuredOp.getSymName());
+
+  builder.create<simt::structured::BranchOp>(loc, maskValue, targetAttr,
+                                             payload);
+
+  auto it = llvm::find(enclosing.outgoingEdges, entryEdgeIdx);
+  if (it != enclosing.outgoingEdges.end())
+    enclosing.outgoingEdges.erase(it);
+
+  return success();
+}
+
 LogicalResult StructuredCFGBuilder::emitStructuredTerminator(BlockInfo &source) {
   if (!source.structuredBody)
     return success();
@@ -1862,6 +1934,7 @@ LogicalResult StructuredCFGBuilder::emitStructuredTerminator(BlockInfo &source) 
   Operation *origTerm = source.originalTerminator;
   OpBuilder builder(source.structuredBody, source.structuredBody->end());
   Location loc = origTerm ? origTerm->getLoc() : func.getLoc();
+  constexpr unsigned kInvalidEdge = std::numeric_limits<unsigned>::max();
 
   auto mapValue = [&](Value v, StringRef context) -> std::optional<Value> {
     if (!v)
@@ -1934,6 +2007,72 @@ LogicalResult StructuredCFGBuilder::emitStructuredTerminator(BlockInfo &source) 
     materializeMaskExpr(maskValue, source, maskExpr, builder);
     return maskValue ? maskValue : source.structuredMaskArg;
   };
+
+  if (auto condTerm = dyn_cast_or_null<simt::dialect::ConditionOp>(origTerm)) {
+    unsigned trueEdgeIdx = kInvalidEdge;
+    unsigned falseEdgeIdx = kInvalidEdge;
+
+    for (unsigned edgeIndex : source.outgoingEdges) {
+      EdgeInfo &edge = edges[edgeIndex];
+      if (edge.origin != origTerm)
+        continue;
+      if (edge.kind == EdgeInfo::ConditionalTrue)
+        trueEdgeIdx = edgeIndex;
+      else if (edge.kind == EdgeInfo::ConditionalFalse)
+        falseEdgeIdx = edgeIndex;
+    }
+
+    if (trueEdgeIdx == kInvalidEdge || falseEdgeIdx == kInvalidEdge) {
+      origTerm->emitError("missing structured edges for loop header");
+      return failure();
+    }
+
+    EdgeInfo &trueEdge = edges[trueEdgeIdx];
+    EdgeInfo &falseEdge = edges[falseEdgeIdx];
+
+    Value condValue = condTerm.getCondition();
+    Value condSource = condValue;
+    if (condValue && mapper)
+      if (Value mapped = mapper->lookupOrNull(condValue))
+        condValue = mapped;
+    if (condValue == condSource)
+      if (auto captured = getCapturedArg(source, condSource))
+        condValue = captured;
+    if (!condValue) {
+      origTerm->emitError("loop condition value unavailable");
+      return failure();
+    }
+
+    SmallVector<Value> truePayload;
+    SmallVector<Value> falsePayload;
+    if (failed(materializeEdgeOperands(trueEdge, trueEdge.dest, truePayload,
+                                       origTerm)) ||
+        failed(materializeEdgeOperands(falseEdge, falseEdge.dest, falsePayload,
+                                       origTerm)))
+      return failure();
+
+    Value trueMask = computeMaskForEdge(trueEdge);
+    Value falseMask = computeMaskForEdge(falseEdge);
+
+    auto trueTarget =
+        getTargetAttr(trueEdge.dest ? trueEdge.dest->original : nullptr);
+    auto falseTarget =
+        getTargetAttr(falseEdge.dest ? falseEdge.dest->original : nullptr);
+
+    builder.create<simt::structured::CondBranchOp>(
+        loc, condValue, trueMask, falseMask, trueTarget, falseTarget,
+        truePayload, falsePayload, FlatSymbolRefAttr(),
+        simt::structured::ReconvergencePolicyAttr());
+
+    auto eraseEdge = [&](unsigned edgeIndex) {
+      auto it = llvm::find(source.outgoingEdges, edgeIndex);
+      if (it != source.outgoingEdges.end())
+        source.outgoingEdges.erase(it);
+    };
+    eraseEdge(trueEdgeIdx);
+    eraseEdge(falseEdgeIdx);
+    return success();
+  }
 
   if (auto loopYield = dyn_cast_or_null<simt::dialect::YieldOp>(origTerm)) {
     SmallVector<unsigned, 4> yieldEdges;
@@ -2018,8 +2157,6 @@ LogicalResult StructuredCFGBuilder::emitStructuredTerminator(BlockInfo &source) 
     origTerm->emitError("unable to synthesize structured terminator");
     return failure();
   }
-
-  constexpr unsigned kInvalidEdge = std::numeric_limits<unsigned>::max();
   unsigned trueEdgeIdx = kInvalidEdge;
   unsigned falseEdgeIdx = kInvalidEdge;
   SmallVector<unsigned, 4> plainEdgeIdxs;
