@@ -228,6 +228,70 @@ static bool isMaterializableLocal(Value v) {
 StructuredCFGBuilder::StructuredCFGBuilder(FunctionOpInterface func)
     : func(func) {}
 
+Value StructuredCFGBuilder::localizeOperandIntoBlock(Value value,
+                                                     BlockInfo &info,
+                                                     OpBuilder &builder) {
+  if (!value)
+    return Value();
+
+  auto belongsHere = [&](Value candidate) -> bool {
+    if (!candidate)
+      return false;
+    if (auto arg = dyn_cast<BlockArgument>(candidate))
+      return arg.getOwner() == info.structuredBody;
+    Operation *def = candidate.getDefiningOp();
+    return def && def->getBlock() == info.structuredBody;
+  };
+
+  if (belongsHere(value))
+    return value;
+
+  if (mapper)
+    if (Value mapped = mapper->lookupOrNull(value);
+        mapped && belongsHere(mapped))
+      return mapped;
+
+  if (Value captured = getCapturedArg(info, value);
+      captured && belongsHere(captured))
+    return captured;
+
+  if (auto barg = dyn_cast<BlockArgument>(value);
+      barg && barg.getOwner() == info.original) {
+    unsigned idx = barg.getArgNumber();
+    if (info.structuredMaskArg && idx == 0)
+      return info.structuredMaskArg;
+    if (idx < info.structuredArgs.size()) {
+      Value candidate = info.structuredArgs[idx];
+      if (belongsHere(candidate))
+        return candidate;
+    }
+    if (idx < info.payloadArgs.size()) {
+      Value candidate = info.payloadArgs[idx];
+      if (belongsHere(candidate))
+        return candidate;
+    }
+  }
+
+  if (isMaterializableLocal(value)) {
+    Operation *def = value.getDefiningOp();
+    OpBuilder::InsertionGuard guard(builder);
+    builder.setInsertionPointToStart(info.structuredBody);
+    Operation *clone = builder.clone(*def);
+    if (mapper)
+      mapper->map(def->getResults(), clone->getResults());
+    auto res = llvm::cast<OpResult>(value);
+    return clone->getResult(res.getResultNumber());
+  }
+
+  if (mapper)
+    if (Value mapped = mapper->lookupOrNull(value))
+      if (Value captured = getCapturedArg(info, mapped);
+          captured && belongsHere(captured))
+        return captured;
+
+  return Value();
+}
+
 void StructuredCFGBuilder::computeCapturedInputs(BlockInfo &info) {
   info.capturedInputs.clear();
   info.capturedArgs.clear();
@@ -1162,62 +1226,47 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
         }
 
         if (loopInfo.bodyBlock && loopInfo.bodyBlock->original) {
-          auto walkBlock = [&](auto &&self,
-                               mlir::Block *block) -> LogicalResult {
-            BlockInfo &sourceInfo = getOrCreateBlockInfo(block);
+          auto processTerminator = [&](mlir::Block &block,
+                                       mlir::Operation *terminator) -> LogicalResult {
+            BlockInfo &sourceInfo = getOrCreateBlockInfo(&block);
 
-            for (Operation &nested : *block) {
-              if (auto cont = dyn_cast<simt::dialect::ContinueOp>(&nested)) {
-                EdgeInfo backEdge;
-                backEdge.source = &sourceInfo;
-                backEdge.dest = loopInfo.prepareBlock;
-                backEdge.kind = EdgeInfo::LoopBackEdge;
-                backEdge.origin = cont;
-                backEdge.payload.assign(cont.getOperands().begin(),
-                                        cont.getOperands().end());
-                addCapturedToEdge(backEdge);
-                edges.push_back(std::move(backEdge));
-                if (edges.back().dest &&
-                    failed(ensurePayloadShape(edges.back())))
-                  return failure();
-                sourceInfo.outgoingEdges.push_back(edges.size() - 1);
-                continue;
-              }
-              if (auto breakOp = dyn_cast<simt::dialect::BreakOp>(&nested)) {
-                EdgeInfo exitEdge;
-                exitEdge.source = &sourceInfo;
-                exitEdge.dest = loopInfo.mergeBlock;
-                exitEdge.kind = EdgeInfo::Plain;
-                exitEdge.origin = breakOp;
-                exitEdge.payload.assign(breakOp->getOperands().begin(),
-                                        breakOp->getOperands().end());
-                addCapturedToEdge(exitEdge);
-                edges.push_back(std::move(exitEdge));
-                if (edges.back().dest &&
-                    failed(ensurePayloadShape(edges.back())))
-                  return failure();
-                sourceInfo.outgoingEdges.push_back(edges.size() - 1);
-                continue;
-              }
-
-              if (isa<simt::dialect::LoopOp>(&nested))
-                continue;
-
-              for (mlir::Region &region : nested.getRegions())
-                for (mlir::Block &regionBlock : region)
-                  if (failed(self(self, &regionBlock)))
-                    return failure();
+            if (auto cont = dyn_cast<simt::dialect::ContinueOp>(terminator)) {
+              EdgeInfo backEdge;
+              backEdge.source = &sourceInfo;
+              backEdge.dest = loopInfo.prepareBlock;
+              backEdge.kind = EdgeInfo::LoopBackEdge;
+              backEdge.origin = cont;
+              backEdge.payload.assign(cont.getOperands().begin(),
+                                      cont.getOperands().end());
+              addCapturedToEdge(backEdge);
+              edges.push_back(std::move(backEdge));
+              if (edges.back().dest &&
+                  failed(ensurePayloadShape(edges.back())))
+                return failure();
+              sourceInfo.outgoingEdges.push_back(edges.size() - 1);
+              return success();
             }
-            return mlir::success();
-          };
 
-          if (failed(walkBlock(walkBlock, loopInfo.bodyBlock->original)))
-            return failure();
+            if (auto breakOp = dyn_cast<simt::dialect::BreakOp>(terminator)) {
+              EdgeInfo exitEdge;
+              exitEdge.source = &sourceInfo;
+              exitEdge.dest = loopInfo.mergeBlock;
+              exitEdge.kind = EdgeInfo::Plain;
+              exitEdge.origin = breakOp;
+              exitEdge.payload.assign(breakOp->getOperands().begin(),
+                                      breakOp->getOperands().end());
+              addCapturedToEdge(exitEdge);
+              edges.push_back(std::move(exitEdge));
+              if (edges.back().dest &&
+                  failed(ensurePayloadShape(edges.back())))
+                return failure();
+              sourceInfo.outgoingEdges.push_back(edges.size() - 1);
+              return success();
+            }
 
-          for (Operation &nested : *loopInfo.bodyBlock->original) {
-            if (auto yieldOp = dyn_cast<simt::dialect::YieldOp>(&nested)) {
+            if (auto yieldOp = dyn_cast<simt::dialect::YieldOp>(terminator)) {
               EdgeInfo contEdge;
-              contEdge.source = loopInfo.bodyBlock;
+              contEdge.source = &sourceInfo;
               contEdge.dest = loopInfo.prepareBlock;
               contEdge.kind = EdgeInfo::LoopBackEdge;
               contEdge.origin = yieldOp;
@@ -1228,8 +1277,24 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
               if (edges.back().dest &&
                   failed(ensurePayloadShape(edges.back())))
                 return failure();
-              loopInfo.bodyBlock->outgoingEdges.push_back(edges.size() - 1);
+              sourceInfo.outgoingEdges.push_back(edges.size() - 1);
+              return success();
             }
+
+            return success();
+          };
+
+          mlir::Region *bodyRegion = loopInfo.bodyBlock->original->getParent();
+          if (bodyRegion) {
+            for (mlir::Block &block : *bodyRegion)
+              if (mlir::Operation *term = block.getTerminator())
+                if (failed(processTerminator(block, term)))
+                  return failure();
+          } else {
+            mlir::Block *bodyBlock = loopInfo.bodyBlock->original;
+            if (mlir::Operation *term = bodyBlock->getTerminator())
+              if (failed(processTerminator(*bodyBlock, term)))
+                return failure();
           }
         }
 
@@ -1726,9 +1791,18 @@ LogicalResult StructuredCFGBuilder::emitStructuredBlock(BlockInfo &info) {
             cont.emitError("missing destination for structured continue");
             return failure();
           }
-          SmallVector<Value> operands;
-          if (failed(materializeEdgeOperands(edge, edge.dest, operands, cont)))
-            return failure();
+      SmallVector<Value> operands;
+      if (failed(materializeEdgeOperands(edge, edge.dest, operands, cont)))
+        return failure();
+
+      for (Value &operand : operands) {
+        Value localized = localizeOperandIntoBlock(operand, info, bodyBuilder);
+        if (!localized) {
+          cont.emitError("unable to materialize continue operand");
+          return failure();
+        }
+        operand = localized;
+      }
           MaskExpr srcMask = info.incomingMask.isValid()
                                  ? info.incomingMask
                                  : MaskExpr::full();
@@ -1766,9 +1840,18 @@ LogicalResult StructuredCFGBuilder::emitStructuredBlock(BlockInfo &info) {
             brk.emitError("missing destination for structured break");
             return failure();
           }
-          SmallVector<Value> operands;
-          if (failed(materializeEdgeOperands(edge, edge.dest, operands, brk)))
-            return failure();
+      SmallVector<Value> operands;
+      if (failed(materializeEdgeOperands(edge, edge.dest, operands, brk)))
+        return failure();
+
+      for (Value &operand : operands) {
+        Value localized = localizeOperandIntoBlock(operand, info, bodyBuilder);
+        if (!localized) {
+          brk.emitError("unable to materialize break operand");
+          return failure();
+        }
+        operand = localized;
+      }
           MaskExpr srcMask = info.incomingMask.isValid()
                                  ? info.incomingMask
                                  : MaskExpr::full();
@@ -1864,6 +1947,25 @@ LogicalResult StructuredCFGBuilder::emitStructuredIf(BlockInfo &header,
                                      info.op)))
     return failure();
 
+  auto localizeAll = [&](SmallVectorImpl<Value> &values) -> LogicalResult {
+    for (Value &operand : values) {
+      Value localized = localizeOperandIntoBlock(operand, header, builder);
+      if (!localized) {
+        if (info.op)
+          info.op->emitError("unable to materialize structured edge operand");
+        else
+          header.structuredOp.emitError(
+              "unable to materialize structured edge operand");
+        return failure();
+      }
+      operand = localized;
+    }
+    return success();
+  };
+
+  if (failed(localizeAll(truePayload)) || failed(localizeAll(falsePayload)))
+    return failure();
+
   MaskExpr srcMask = header.incomingMask.isValid()
                          ? header.incomingMask
                          : MaskExpr::full();
@@ -1925,6 +2027,9 @@ LogicalResult StructuredCFGBuilder::emitStructuredIf(BlockInfo &header,
     if (failed(materializeEdgeOperands(edge, edge.dest, operands, edge.origin)))
       return failure();
 
+    if (failed(localizeAll(operands)))
+      return failure();
+
     mlir::Value nestedMask = inThen ? trueMaskValue : falseMaskValue;
     auto targetAttr = FlatSymbolRefAttr::get(
         builder.getContext(), edge.dest->structuredOp.getSymName());
@@ -1936,6 +2041,12 @@ LogicalResult StructuredCFGBuilder::emitStructuredIf(BlockInfo &header,
       removeEdgeFromList(edge.source->outgoingEdges, edgeIndex);
     removeEdgeFromList(header.outgoingEdges, edgeIndex);
     edge.origin = nullptr;
+  }
+
+  if (!info.mergeArgs.empty()) {
+    for (auto [idx, result] : llvm::enumerate(info.op->getResults()))
+      if (idx < info.mergeArgs.size() && info.mergeArgs[idx])
+        mapper->map(result, info.mergeArgs[idx]);
   }
 
   return success();
@@ -1973,6 +2084,16 @@ LogicalResult StructuredCFGBuilder::emitStructuredLoop(BlockInfo &enclosing,
   if (failed(materializeEdgeOperands(entryEdge, entryEdge.dest, payload,
                                      info.op)))
     return failure();
+
+  for (Value &operand : payload) {
+    Value localized = localizeOperandIntoBlock(operand, enclosing, builder);
+    if (!localized) {
+      (info.op ? info.op : enclosing.structuredOp.getOperation())
+          ->emitError("unable to materialize loop entry operand");
+      return failure();
+    }
+    operand = localized;
+  }
 
   MaskExpr srcMask = enclosing.incomingMask.isValid()
                          ? enclosing.incomingMask
@@ -2128,6 +2249,23 @@ LogicalResult StructuredCFGBuilder::emitStructuredTerminator(BlockInfo &source) 
                                        origTerm)))
       return failure();
 
+    auto localizePayloads = [&](SmallVectorImpl<Value> &vals,
+                                const char *what) -> LogicalResult {
+      for (Value &operand : vals) {
+        Value localized = localizeOperandIntoBlock(operand, source, builder);
+        if (!localized) {
+          origTerm->emitError() << "unable to materialize " << what;
+          return failure();
+        }
+        operand = localized;
+      }
+      return success();
+    };
+
+    if (failed(localizePayloads(truePayload, "loop true payload")) ||
+        failed(localizePayloads(falsePayload, "loop false payload")))
+      return failure();
+
     Value trueMask = computeMaskForEdge(trueEdge);
     Value falseMask = computeMaskForEdge(falseEdge);
 
@@ -2172,6 +2310,16 @@ LogicalResult StructuredCFGBuilder::emitStructuredTerminator(BlockInfo &source) 
       SmallVector<Value> operands;
       if (failed(materializeEdgeOperands(edge, edge.dest, operands, origTerm)))
         return failure();
+
+      for (Value &operand : operands) {
+        Value localized =
+            localizeOperandIntoBlock(operand, source, builder);
+        if (!localized) {
+          origTerm->emitError("unable to materialize loop yield operand");
+          return failure();
+        }
+        operand = localized;
+      }
 
       Value mask = computeMaskForEdge(edge);
       auto targetAttr = getTargetAttr(edge.dest ? edge.dest->original : nullptr);
@@ -2266,6 +2414,18 @@ LogicalResult StructuredCFGBuilder::emitStructuredTerminator(BlockInfo &source) 
     SmallVector<Value> operands;
     if (failed(materializeEdgeOperands(edge, edge.dest, operands, origTerm)))
       return failure();
+
+    for (Value &operand : operands) {
+      Value localized = localizeOperandIntoBlock(operand, source, builder);
+      if (!localized) {
+        if (origTerm)
+          origTerm->emitError("unable to materialize branch operand");
+        else
+          source.structuredOp.emitError("unable to materialize branch operand");
+        return failure();
+      }
+      operand = localized;
+    }
     Value mask = computeMaskForEdge(edge);
     auto targetAttr = FlatSymbolRefAttr::get(builder.getContext(),
                                              edge.dest->structuredOp.getSymName());
@@ -2328,6 +2488,26 @@ LogicalResult StructuredCFGBuilder::emitStructuredTerminator(BlockInfo &source) 
     if (failed(materializeEdgeOperands(falseEdge, falseEdge.dest, falsePayload,
                                        origTerm)))
       return failure();
+
+    for (Value &operand : truePayload) {
+      Value localized = localizeOperandIntoBlock(operand, source, builder);
+      if (!localized) {
+        if (origTerm)
+          origTerm->emitError("unable to materialize conditional true operand");
+        return failure();
+      }
+      operand = localized;
+    }
+
+    for (Value &operand : falsePayload) {
+      Value localized = localizeOperandIntoBlock(operand, source, builder);
+      if (!localized) {
+        if (origTerm)
+          origTerm->emitError("unable to materialize conditional false operand");
+        return failure();
+      }
+      operand = localized;
+    }
 
     auto trueTarget = trueEdge.dest && trueEdge.dest->structuredOp
                           ? FlatSymbolRefAttr::get(

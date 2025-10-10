@@ -95,7 +95,9 @@ private:
   struct SwitchInfo;
 
   MaskExpr materializeMaskExpr(mlir::Value &result, BlockInfo &current,
-                               const MaskExpr &expr, mlir::OpBuilder &builder);
+                              const MaskExpr &expr, mlir::OpBuilder &builder);
+  mlir::Value localizeOperandIntoBlock(mlir::Value value, BlockInfo &current,
+                                       mlir::OpBuilder &builder);
 
   enum class PayloadKind : uint8_t { Unknown, Result, Carried, Mask };
 
