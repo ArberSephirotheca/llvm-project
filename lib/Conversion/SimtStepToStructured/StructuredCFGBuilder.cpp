@@ -1162,38 +1162,60 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
         }
 
         if (loopInfo.bodyBlock && loopInfo.bodyBlock->original) {
+          auto walkBlock = [&](auto &&self,
+                               mlir::Block *block) -> LogicalResult {
+            BlockInfo &sourceInfo = getOrCreateBlockInfo(block);
+
+            for (Operation &nested : *block) {
+              if (auto cont = dyn_cast<simt::dialect::ContinueOp>(&nested)) {
+                EdgeInfo backEdge;
+                backEdge.source = &sourceInfo;
+                backEdge.dest = loopInfo.prepareBlock;
+                backEdge.kind = EdgeInfo::LoopBackEdge;
+                backEdge.origin = cont;
+                backEdge.payload.assign(cont.getOperands().begin(),
+                                        cont.getOperands().end());
+                addCapturedToEdge(backEdge);
+                edges.push_back(std::move(backEdge));
+                if (edges.back().dest &&
+                    failed(ensurePayloadShape(edges.back())))
+                  return failure();
+                sourceInfo.outgoingEdges.push_back(edges.size() - 1);
+                continue;
+              }
+              if (auto breakOp = dyn_cast<simt::dialect::BreakOp>(&nested)) {
+                EdgeInfo exitEdge;
+                exitEdge.source = &sourceInfo;
+                exitEdge.dest = loopInfo.mergeBlock;
+                exitEdge.kind = EdgeInfo::Plain;
+                exitEdge.origin = breakOp;
+                exitEdge.payload.assign(breakOp->getOperands().begin(),
+                                        breakOp->getOperands().end());
+                addCapturedToEdge(exitEdge);
+                edges.push_back(std::move(exitEdge));
+                if (edges.back().dest &&
+                    failed(ensurePayloadShape(edges.back())))
+                  return failure();
+                sourceInfo.outgoingEdges.push_back(edges.size() - 1);
+                continue;
+              }
+
+              if (isa<simt::dialect::LoopOp>(&nested))
+                continue;
+
+              for (mlir::Region &region : nested.getRegions())
+                for (mlir::Block &regionBlock : region)
+                  if (failed(self(self, &regionBlock)))
+                    return failure();
+            }
+            return mlir::success();
+          };
+
+          if (failed(walkBlock(walkBlock, loopInfo.bodyBlock->original)))
+            return failure();
+
           for (Operation &nested : *loopInfo.bodyBlock->original) {
-            if (auto cont = llvm::dyn_cast<simt::dialect::ContinueOp>(&nested)) {
-              EdgeInfo backEdge;
-              backEdge.source = loopInfo.bodyBlock;
-              backEdge.dest = loopInfo.prepareBlock;
-              backEdge.kind = EdgeInfo::LoopBackEdge;
-              backEdge.origin = cont;
-              backEdge.payload.assign(cont.getOperands().begin(),
-                                      cont.getOperands().end());
-              addCapturedToEdge(backEdge);
-              edges.push_back(std::move(backEdge));
-              if (edges.back().dest && failed(ensurePayloadShape(edges.back())))
-                return failure();
-              loopInfo.bodyBlock->outgoingEdges.push_back(edges.size() - 1);
-              continue;
-            }
-            if (auto breakOp = llvm::dyn_cast<simt::dialect::BreakOp>(&nested)) {
-              EdgeInfo exitEdge;
-              exitEdge.source = loopInfo.bodyBlock;
-              exitEdge.dest = loopInfo.mergeBlock;
-              exitEdge.kind = EdgeInfo::Plain;
-              exitEdge.origin = breakOp;
-              exitEdge.payload.assign(breakOp->getOperands().begin(),
-                                      breakOp->getOperands().end());
-              addCapturedToEdge(exitEdge);
-              edges.push_back(std::move(exitEdge));
-              if (edges.back().dest && failed(ensurePayloadShape(edges.back())))
-                return failure();
-              loopInfo.bodyBlock->outgoingEdges.push_back(edges.size() - 1);
-              continue;
-            }
-            if (auto yieldOp = llvm::dyn_cast<simt::dialect::YieldOp>(&nested)) {
+            if (auto yieldOp = dyn_cast<simt::dialect::YieldOp>(&nested)) {
               EdgeInfo contEdge;
               contEdge.source = loopInfo.bodyBlock;
               contEdge.dest = loopInfo.prepareBlock;
@@ -1203,10 +1225,10 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
                                       yieldOp->getOperands().end());
               addCapturedToEdge(contEdge);
               edges.push_back(std::move(contEdge));
-              if (edges.back().dest && failed(ensurePayloadShape(edges.back())))
+              if (edges.back().dest &&
+                  failed(ensurePayloadShape(edges.back())))
                 return failure();
               loopInfo.bodyBlock->outgoingEdges.push_back(edges.size() - 1);
-              continue;
             }
           }
         }
@@ -1862,16 +1884,59 @@ LogicalResult StructuredCFGBuilder::emitStructuredIf(BlockInfo &header,
       getTargetAttr(falseEdge.dest), truePayload, falsePayload,
       FlatSymbolRefAttr(), simt::structured::ReconvergencePolicyAttr());
 
-  auto removeEdgeFromHeader = [&](unsigned index) {
-    if (index == kInvalidEdge)
-      return;
-    auto it = llvm::find(header.outgoingEdges, index);
-    if (it != header.outgoingEdges.end())
-      header.outgoingEdges.erase(it);
+  auto removeEdgeFromList = [](llvm::SmallVectorImpl<unsigned> &list,
+                               unsigned index) {
+    auto it = llvm::find(list, index);
+    if (it != list.end())
+      list.erase(it);
   };
 
-  removeEdgeFromHeader(trueEdgeIdx);
-  removeEdgeFromHeader(falseEdgeIdx);
+  removeEdgeFromList(header.outgoingEdges, trueEdgeIdx);
+  removeEdgeFromList(header.outgoingEdges, falseEdgeIdx);
+
+  // Emit branches for any nested continue/break that reside in the if regions.
+  mlir::Region &thenRegion = info.op->getRegion(0);
+  mlir::Region *elseRegion = info.op->getNumRegions() > 1
+                                 ? &info.op->getRegion(1)
+                                 : nullptr;
+
+  auto originInRegion = [&](mlir::Operation *op, mlir::Region &region) {
+    return op && op->getBlock() && op->getBlock()->getParent() == &region;
+  };
+
+  for (unsigned edgeIndex = 0, e = edges.size(); edgeIndex != e; ++edgeIndex) {
+    EdgeInfo &edge = edges[edgeIndex];
+    if (!edge.origin)
+      continue;
+    if (edge.kind != EdgeInfo::LoopBackEdge && edge.kind != EdgeInfo::Plain)
+      continue;
+
+    const bool inThen = originInRegion(edge.origin, thenRegion);
+    const bool inElse = elseRegion && originInRegion(edge.origin, *elseRegion);
+    if (!inThen && !inElse)
+      continue;
+
+    if (!edge.dest || !edge.dest->structuredOp) {
+      edge.origin->emitError("missing structured destination for control edge");
+      return failure();
+    }
+
+    llvm::SmallVector<mlir::Value, 8> operands;
+    if (failed(materializeEdgeOperands(edge, edge.dest, operands, edge.origin)))
+      return failure();
+
+    mlir::Value nestedMask = inThen ? trueMaskValue : falseMaskValue;
+    auto targetAttr = FlatSymbolRefAttr::get(
+        builder.getContext(), edge.dest->structuredOp.getSymName());
+
+    builder.create<simt::structured::BranchOp>(edge.origin->getLoc(),
+                                               nestedMask, targetAttr, operands);
+
+    if (edge.source)
+      removeEdgeFromList(edge.source->outgoingEdges, edgeIndex);
+    removeEdgeFromList(header.outgoingEdges, edgeIndex);
+    edge.origin = nullptr;
+  }
 
   return success();
 }

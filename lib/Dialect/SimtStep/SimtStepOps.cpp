@@ -1,8 +1,10 @@
 #include "simt-step/Dialect/SimtStep/SimtStepDialect.h"
 
+#include <llvm/ADT/STLExtras.h>
 #include <llvm/ADT/SmallVector.h>
 #include <llvm/Support/raw_ostream.h>
 #include <mlir/IR/Builders.h>
+#include <mlir/IR/BuiltinOps.h>
 #include <mlir/IR/OpImplementation.h>
 #include <mlir/IR/PatternMatch.h>
 
@@ -251,15 +253,19 @@ void IfOp::build(mlir::OpBuilder &builder, mlir::OperationState &state,
 
   mlir::OpBuilder::InsertionGuard guard(builder);
   auto *thenRegion = state.addRegion();
-  builder.createBlock(thenRegion);
-  if (resultTypes.empty())
-    IfOp::ensureTerminator(*thenRegion, builder, state.location);
+  auto *thenBlock = builder.createBlock(thenRegion);
+  if (resultTypes.empty()) {
+    builder.setInsertionPointToEnd(thenBlock);
+    builder.create<simt::dialect::YieldOp>(state.location);
+  }
 
   auto *elseRegion = state.addRegion();
   if (withElseRegion) {
-    builder.createBlock(elseRegion);
-    if (resultTypes.empty())
-      IfOp::ensureTerminator(*elseRegion, builder, state.location);
+    auto *elseBlock = builder.createBlock(elseRegion);
+    if (resultTypes.empty()) {
+      builder.setInsertionPointToEnd(elseBlock);
+      builder.create<simt::dialect::YieldOp>(state.location);
+    }
   }
 }
 
@@ -271,7 +277,96 @@ void IfOp::build(mlir::OpBuilder &builder, mlir::OperationState &state,
 mlir::LogicalResult IfOp::verify() {
   if (getNumResults() != 0 && getElseRegion().empty())
     return emitOpError("must have an else block if defining values");
+
+  auto checkRegion = [&](mlir::Region &region, llvm::StringRef name)
+      -> mlir::LogicalResult {
+    if (region.empty())
+      return emitOpError() << name << " region must not be empty";
+    if (!region.hasOneBlock())
+      return emitOpError() << name << " region must contain exactly one block";
+    return mlir::success();
+  };
+
+  if (failed(checkRegion(getThenRegion(), "then")))
+    return mlir::failure();
+  if (!getElseRegion().empty() &&
+      failed(checkRegion(getElseRegion(), "else")))
+    return mlir::failure();
+
+  bool withinLoop = false;
+  for (mlir::Operation *parent = getOperation()->getParentOp(); parent;
+       parent = parent->getParentOp()) {
+    if (llvm::isa<simt::dialect::LoopOp>(parent)) {
+      withinLoop = true;
+      break;
+    }
+  }
+
+  auto checkTerminator = [&](mlir::Block &block) -> mlir::LogicalResult {
+    mlir::Operation *terminator = block.getTerminator();
+    if (!terminator)
+      return emitOpError("region must terminate with a structured terminator");
+    const bool isYield = llvm::isa<simt::dialect::YieldOp>(terminator);
+    const bool isContinue = llvm::isa<simt::dialect::ContinueOp>(terminator);
+    const bool isBreak = llvm::isa<simt::dialect::BreakOp>(terminator);
+
+    if (isYield)
+      return mlir::success();
+    if ((isContinue || isBreak) && withinLoop)
+      return mlir::success();
+    return emitOpError()
+           << "region must terminate with simt_step.yield or, when nested in a "
+              "simt_step.loop, with simt_step.continue/simt_step.break";
+  };
+
+  if (failed(checkTerminator(getThenRegion().front())))
+    return mlir::failure();
+  if (!getElseRegion().empty() &&
+      failed(checkTerminator(getElseRegion().front())))
+    return mlir::failure();
+
+  auto checkYieldResults = [&](mlir::Block &block) -> mlir::LogicalResult {
+    if (getNumResults() == 0)
+      return mlir::success();
+    mlir::Operation *terminator = block.getTerminator();
+    auto yield = llvm::dyn_cast_or_null<simt::dialect::YieldOp>(terminator);
+    if (!yield)
+      return mlir::success();
+    if (yield.getOperands().size() != getNumResults())
+      return emitOpError("yield arity must match if results");
+    for (auto [operand, type] : llvm::zip(yield.getOperands(), getResultTypes()))
+      if (operand.getType() != type)
+        return emitOpError("yield types must match if results");
+    return mlir::success();
+  };
+
+  if (failed(checkYieldResults(getThenRegion().front())))
+    return mlir::failure();
+  if (!getElseRegion().empty() &&
+      failed(checkYieldResults(getElseRegion().front())))
+    return mlir::failure();
+
   return mlir::success();
+}
+
+static mlir::LogicalResult
+verifyLoopAncestor(mlir::Operation *op, llvm::StringRef opName) {
+  for (mlir::Operation *parent = op->getParentOp(); parent;
+       parent = parent->getParentOp()) {
+    if (llvm::isa<simt::dialect::LoopOp>(parent))
+      return mlir::success();
+    if (llvm::isa<mlir::ModuleOp>(parent))
+      break;
+  }
+  return op->emitError() << opName << " must be nested inside 'simt_step.loop'";
+}
+
+mlir::LogicalResult ContinueOp::verify() {
+  return verifyLoopAncestor(getOperation(), "simt_step.continue");
+}
+
+mlir::LogicalResult BreakOp::verify() {
+  return verifyLoopAncestor(getOperation(), "simt_step.break");
 }
 
 void BufferLoadOp::build(mlir::OpBuilder &builder, mlir::OperationState &state,

@@ -422,12 +422,14 @@ def SimtStep_YieldOp : Op<SimtStep_Dialect, "yield",
 }
 
 def SimtStep_IfOp : Op<SimtStep_Dialect, "if",
-    [SingleBlockImplicitTerminator<"YieldOp">,
-     NoRegionArguments]> {
+    [NoRegionArguments]> {
   let summary = "SIMT if-then-else";
   let description = [{
     Control flow construct with optional else region producing SSA results.
-    Each region terminates with `simt_step.yield` to forward per-lane values.
+    Each region contains a single block. Regions normally terminate with
+    `simt_step.yield` to forward per-lane values. When the `if` is nested
+    inside a `simt_step.loop`, regions are also permitted to terminate with
+    `simt_step.continue` or `simt_step.break`, allowing early loop exits.
   }];
 
   let arguments = (ins I1:$condition);
@@ -476,15 +478,17 @@ def SimtStep_LoopOp : Op<SimtStep_Dialect, "loop",
 }
 
 def SimtStep_BreakOp : Op<SimtStep_Dialect, "break",
-    [Terminator, HasParent<"LoopOp">]> {
+    [Terminator]> {
   let summary = "Structured break from simt.loop";
   let arguments = (ins Variadic<AnyType>:$results);
+  let hasVerifier = 1;
 }
 
 def SimtStep_ContinueOp : Op<SimtStep_Dialect, "continue",
-    [Terminator, HasParent<"LoopOp">]> {
+    [Terminator]> {
   let summary = "Structured continue within simt.loop";
   let arguments = (ins Variadic<AnyType>:$results);
+  let hasVerifier = 1;
 }
 
 def SimtStep_BarrierOp : Op<SimtStep_Dialect, "barrier"> {
