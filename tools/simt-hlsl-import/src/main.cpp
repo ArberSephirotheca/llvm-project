@@ -1,4 +1,5 @@
 #include "simt-hlsl-import/Lowering.h"
+#include "simt-step/Dialect/SimtStep/Transforms.h"
 
 #include "clang/Driver/Driver.h"
 #include "clang/Frontend/CompilerInvocation.h"
@@ -8,6 +9,7 @@
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/DialectRegistry.h"
 #include "mlir/IR/MLIRContext.h"
+#include "mlir/Pass/PassManager.h"
 
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/InitLLVM.h"
@@ -91,31 +93,36 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  if (failed(result.value()->verify())) {
-    llvm::errs() << "simt-hlsl-import: generated IR failed to verify\n";
-    result.value()->dump();
+  mlir::ModuleOp module = result.value().get();
+
+  mlir::PassManager pm(&context);
+  pm.addNestedPass<mlir::func::FuncOp>(
+      simt::dialect::createNormalizeLoopTerminatorsPass());
+  if (mlir::failed(pm.run(module))) {
+    llvm::errs() << "simt-hlsl-import: failed to normalize loop terminators\n";
+    module.dump();
     return 1;
   }
 
-  if (failed(result.value()->verify())) {
-    llvm::errs() << "simt-hlsl-import: verification failed\n";
-    result.value()->dump();
+  if (failed(module.verify())) {
+    llvm::errs() << "simt-hlsl-import: generated IR failed to verify\n";
+    module.dump();
     return 1;
   }
 
   bool hasDanglingBlock = false;
-  result.value()->walk([&](mlir::Operation *op) {
+  module.walk([&](mlir::Operation *op) {
     if (mlir::Block *block = op->getBlock())
       if (!block->getParentOp())
         hasDanglingBlock = true;
   });
   if (hasDanglingBlock) {
     llvm::errs() << "simt-hlsl-import: found operation in block without parent\n";
-    result.value()->dump();
+    module.dump();
     return 1;
   }
 
-  result.value()->print(llvm::outs());
+  module.print(llvm::outs());
   llvm::outs() << "\n";
   return 0;
 }

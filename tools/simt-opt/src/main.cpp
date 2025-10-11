@@ -1,5 +1,6 @@
 #include "simt-step/Conversion/SimtStepToStructured.h"
 #include "simt-step/Dialect/SimtStep/SimtStepDialect.h"
+#include "simt-step/Dialect/SimtStep/Transforms.h"
 #include "simt-step/Dialect/SimtStructured/StructuredDialect.h"
 #include "simt-step/semantics/StructuredProgram.h"
 
@@ -27,6 +28,7 @@ int main(int argc, char **argv) {
                   mlir::vector::VectorDialect>();
   simt::dialect::registerSimtStepDialect(registry);
   llvm::errs() << "Registered simt-step dialect\n";
+  simt::dialect::registerNormalizeLoopTerminatorsPass();
   simt::structured::registerSimtStructuredDialect(registry);
   llvm::errs() << "Registered simt-structured dialect\n";
   simt::conversion::registerSimtStepToStructuredPass();

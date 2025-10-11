@@ -12,20 +12,34 @@
 // MLIR:   ^bb0(%[[ACC_BODY:.*]]: i32, %[[I_BODY:.*]]: i32):
 // MLIR:     %[[ONE:.*]] = "arith.constant"() <{value = 1 : i32}> : () -> i32
 // MLIR:     %[[IS_CONT:.*]] = "arith.cmpi"(%[[I_BODY]], %[[ONE]]) <{predicate = 0 : i64}> : (i32, i32) -> i1
-// MLIR:     %[[CONT:.*]]:2 = "simt_step.if"(%[[IS_CONT]]) ({
-// MLIR:       "simt_step.continue"(%[[ACC_BODY]], %[[I_BODY]]) : (i32, i32) -> ()
+// MLIR:     %[[CONT_STAGE1:.*]]:3 = "simt_step.if"(%[[IS_CONT]]) ({
+// MLIR:       %[[CONT_TRUE:.*]] = "arith.constant"() <{value = true}> : () -> i1
+// MLIR:       "simt_step.yield"(%[[CONT_TRUE]], %[[ACC_BODY]], %[[I_BODY]]) : (i1, i32, i32) -> ()
 // MLIR:     }, {
-// MLIR:       "simt_step.yield"(%[[ACC_BODY]], %[[I_BODY]]) : (i32, i32) -> ()
-// MLIR:     }) : (i1) -> (i32, i32)
+// MLIR:       %[[CONT_FALSE:.*]] = "arith.constant"() <{value = false}> : () -> i1
+// MLIR:       "simt_step.yield"(%[[CONT_FALSE]], %[[ACC_BODY]], %[[I_BODY]]) : (i1, i32, i32) -> ()
+// MLIR:     }) : (i1) -> (i1, i32, i32)
+// MLIR:     %[[CONT_STAGE2:.*]]:2 = "simt_step.if"(%[[CONT_STAGE1]]#0) ({
+// MLIR:       "simt_step.continue"(%[[CONT_STAGE1]]#1, %[[CONT_STAGE1]]#2) : (i32, i32) -> ()
+// MLIR:     }, {
+// MLIR:       "simt_step.yield"(%[[CONT_STAGE1]]#1, %[[CONT_STAGE1]]#2) : (i32, i32) -> ()
+// MLIR:     }) {simt.normalized.loop_terminators} : (i1) -> (i32, i32)
 // MLIR:     %[[THREE:.*]] = "arith.constant"() <{value = 3 : i32}> : () -> i32
-// MLIR:     %[[IS_BREAK:.*]] = "arith.cmpi"(%[[CONT]]#1, %[[THREE]]) <{predicate = 0 : i64}> : (i32, i32) -> i1
-// MLIR:     %[[AFTER_BREAK:.*]]:2 = "simt_step.if"(%[[IS_BREAK]]) ({
-// MLIR:       "simt_step.break"(%[[CONT]]#0, %[[CONT]]#1) : (i32, i32) -> ()
+// MLIR:     %[[IS_BREAK:.*]] = "arith.cmpi"(%[[CONT_STAGE2]]#1, %[[THREE]]) <{predicate = 0 : i64}> : (i32, i32) -> i1
+// MLIR:     %[[BREAK_STAGE1:.*]]:3 = "simt_step.if"(%[[IS_BREAK]]) ({
+// MLIR:       %[[BREAK_TRUE:.*]] = "arith.constant"() <{value = true}> : () -> i1
+// MLIR:       "simt_step.yield"(%[[BREAK_TRUE]], %[[CONT_STAGE2]]#0, %[[CONT_STAGE2]]#1) : (i1, i32, i32) -> ()
 // MLIR:     }, {
-// MLIR:       "simt_step.yield"(%[[CONT]]#0, %[[CONT]]#1) : (i32, i32) -> ()
-// MLIR:     }) : (i1) -> (i32, i32)
-// MLIR:     %[[ACC_NEXT:.*]] = "arith.addi"(%[[AFTER_BREAK]]#0, %[[AFTER_BREAK]]#1) {{.*}}
-// MLIR:     %[[I_NEXT:.*]] = "arith.addi"(%[[AFTER_BREAK]]#1, %{{.*}}) {{.*}}
+// MLIR:       %[[BREAK_FALSE:.*]] = "arith.constant"() <{value = false}> : () -> i1
+// MLIR:       "simt_step.yield"(%[[BREAK_FALSE]], %[[CONT_STAGE2]]#0, %[[CONT_STAGE2]]#1) : (i1, i32, i32) -> ()
+// MLIR:     }) : (i1) -> (i1, i32, i32)
+// MLIR:     %[[BREAK_STAGE2:.*]]:2 = "simt_step.if"(%[[BREAK_STAGE1]]#0) ({
+// MLIR:       "simt_step.break"(%[[BREAK_STAGE1]]#1, %[[BREAK_STAGE1]]#2) : (i32, i32) -> ()
+// MLIR:     }, {
+// MLIR:       "simt_step.yield"(%[[BREAK_STAGE1]]#1, %[[BREAK_STAGE1]]#2) : (i32, i32) -> ()
+// MLIR:     }) {simt.normalized.loop_terminators} : (i1) -> (i32, i32)
+// MLIR:     %[[ACC_NEXT:.*]] = "arith.addi"(%[[BREAK_STAGE2]]#0, %[[BREAK_STAGE2]]#1) {{.*}}
+// MLIR:     %[[I_NEXT:.*]] = "arith.addi"(%[[BREAK_STAGE2]]#1, %{{.*}}) {{.*}}
 // MLIR:     "simt_step.yield"(%[[ACC_NEXT]], %[[I_NEXT]]) : (i32, i32) -> ()
 // MLIR: }) : (i32, i32) -> (i32, i32)
 // MLIR:   "func.return"() : () -> ()
