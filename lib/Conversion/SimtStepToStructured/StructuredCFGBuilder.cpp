@@ -20,6 +20,7 @@
 #include <llvm/Support/ErrorHandling.h>
 #include <algorithm>
 #include <cstdio>
+#include <llvm/ADT/ArrayRef.h>
 #include <llvm/ADT/ScopeExit.h>
 
 #include <cassert>
@@ -460,24 +461,23 @@ bool StructuredCFGBuilder::getSourceTupleForEdge(
       return getDataArgCount(*edge.dest);
     };
 
-    if (edge.kind == EdgeInfo::ConditionalTrue) {
-      if (!info.thenYieldValues.empty()) {
-        values.append(info.thenYieldValues.begin(), info.thenYieldValues.end());
-        return true;
+    if (destIsThen || destIsElse) {
+      if (values.empty()) {
+        ArrayRef<Value> tuple;
+        if (destIsThen && !info.thenYieldValues.empty())
+          tuple = info.thenYieldValues;
+        else if (destIsElse && !info.elseYieldValues.empty())
+          tuple = info.elseYieldValues;
+        else if (destIsElse && info.elseImplicitYield && !info.results.empty())
+          tuple = info.results;
+        if (!tuple.empty()) {
+          values.append(tuple.begin(), tuple.end());
+          return true;
+        }
+        appendHeaderTuple();
       }
-    } else if (edge.kind == EdgeInfo::ConditionalFalse) {
-      if (!info.elseYieldValues.empty()) {
-        values.append(info.elseYieldValues.begin(), info.elseYieldValues.end());
-        return true;
-      }
-      if (destIsMerge && info.elseImplicitYield && !info.results.empty()) {
-        values.append(info.results.begin(), info.results.end());
-        return true;
-      }
+      return !values.empty() || expectedCount() == 0;
     }
-
-    if (destIsThen || destIsElse)
-      return expectedCount() == 0;
 
     return false;
   }
