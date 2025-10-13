@@ -389,6 +389,15 @@ void StructuredCFGBuilder::appendCapturedInputs(EdgeInfo &edge) {
   if (dest.capturedInputs.empty() || dest.isMergeBlock)
     return;
 
+  if (edge.origin)
+    if (auto ifOp = llvm::dyn_cast<simt::dialect::IfOp>(edge.origin))
+      if (auto it = ifInfos.find(ifOp.getOperation()); it != ifInfos.end()) {
+        const IfInfo &info = it->second;
+        if ((info.thenBlock && edge.dest == info.thenBlock) ||
+            (info.elseBlock && edge.dest == info.elseBlock))
+          return;
+      }
+
   llvm::SmallPtrSet<mlir::Value, 8> seen;
   llvm::SmallVector<mlir::Value, 8> combined;
   llvm::SmallVector<PayloadKind, 8> combinedKinds;
@@ -467,8 +476,15 @@ bool StructuredCFGBuilder::getSourceTupleForEdge(
       }
     }
 
-    if ((destIsThen || destIsElse) && values.empty())
-      return false;
+    if (destIsThen || destIsElse) {
+      if (values.empty()) {
+        if (edge.condition)
+          values.push_back(edge.condition);
+        appendHeaderTuple();
+      }
+      return !values.empty() || expectedCount() == 0;
+    }
+
     return false;
   }
 
