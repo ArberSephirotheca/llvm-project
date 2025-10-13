@@ -27,6 +27,7 @@
 #include <limits>
 
 #include <llvm/ADT/STLExtras.h>
+#include <llvm/ADT/SmallPtrSet.h>
 #include <llvm/ADT/StringRef.h>
 #include <llvm/ADT/DenseSet.h>
 
@@ -341,12 +342,21 @@ Block *StructuredCFGBuilder::getSuccessorBody(const BlockInfo &succ) {
 
 unsigned StructuredCFGBuilder::getDataArgCount(const BlockInfo &succ) {
   Block *body = getSuccessorBody(succ);
-  if (!body)
+  if (body) {
+    unsigned total = body->getNumArguments();
+    if (succ.structuredMaskArg)
+      return total > 0 ? total - 1 : 0;
+    return total;
+  }
+
+  if (succ.payloadSeed.empty())
     return 0;
-  unsigned total = body->getNumArguments();
-  if (succ.structuredMaskArg)
-    return total > 0 ? total - 1 : 0;
-  return total;
+
+  unsigned payloadCount = succ.payloadSeed.size();
+  if (succ.payloadBlockArgOffset > payloadCount)
+    return 0;
+  payloadCount -= succ.payloadBlockArgOffset;
+  return payloadCount;
 }
 
 BlockArgument StructuredCFGBuilder::getDataArgAt(const BlockInfo &succ,
@@ -379,21 +389,131 @@ void StructuredCFGBuilder::appendCapturedInputs(EdgeInfo &edge) {
   if (dest.capturedInputs.empty() || dest.isMergeBlock)
     return;
 
-  std::fprintf(stderr, "[appendCaptured] dest=%s inputs=%zu\n",
-               dest.symbolName.c_str(),
-               static_cast<size_t>(dest.capturedInputs.size()));
+  llvm::SmallPtrSet<mlir::Value, 8> seen;
+  llvm::SmallVector<mlir::Value, 8> combined;
+  llvm::SmallVector<PayloadKind, 8> combinedKinds;
 
-  llvm::SmallVector<mlir::Value, 8> reordered;
-  reordered.reserve(dest.capturedInputs.size() + edge.payload.size());
-  reordered.append(dest.capturedInputs.begin(), dest.capturedInputs.end());
-  reordered.append(edge.payload.begin(), edge.payload.end());
-  edge.payload.swap(reordered);
+  combined.reserve(dest.capturedInputs.size() + edge.payload.size());
+  combinedKinds.reserve(dest.capturedInputs.size() + edge.payloadKinds.size());
 
-  llvm::SmallVector<PayloadKind, 8> kind;
-  kind.reserve(dest.capturedInputs.size() + edge.payloadKinds.size());
-  kind.append(dest.capturedInputs.size(), PayloadKind::Carried);
-  kind.append(edge.payloadKinds.begin(), edge.payloadKinds.end());
-  edge.payloadKinds.swap(kind);
+  for (mlir::Value captured : dest.capturedInputs) {
+    if (!captured || !seen.insert(captured).second)
+      continue;
+    combined.push_back(captured);
+    combinedKinds.push_back(PayloadKind::Carried);
+  }
+
+  for (auto [index, value] : llvm::enumerate(edge.payload)) {
+    if (!value || !seen.insert(value).second)
+      continue;
+    combined.push_back(value);
+    PayloadKind kind = PayloadKind::Unknown;
+    if (index < edge.payloadKinds.size())
+      kind = edge.payloadKinds[index];
+    combinedKinds.push_back(kind);
+  }
+
+  edge.payload.swap(combined);
+  edge.payloadKinds.swap(combinedKinds);
+}
+
+bool StructuredCFGBuilder::getSourceTupleForEdge(
+    EdgeInfo &edge, llvm::SmallVectorImpl<mlir::Value> &values) {
+  values.clear();
+  mlir::Operation *origin = edge.origin;
+  if (!origin)
+    return false;
+
+  if (auto ifOp = llvm::dyn_cast<simt::dialect::IfOp>(origin)) {
+    auto it = ifInfos.find(ifOp.getOperation());
+    if (it == ifInfos.end())
+      return false;
+    IfInfo &info = it->second;
+    const bool destIsThen = info.thenBlock && edge.dest == info.thenBlock;
+    const bool destIsElse = info.elseBlock && edge.dest == info.elseBlock;
+    const bool destIsMerge = info.mergeBlock && edge.dest == info.mergeBlock;
+
+    BlockInfo *headerInfo = info.parent ? info.parent : edge.source;
+    auto appendHeaderTuple = [&]() {
+      if (!headerInfo)
+        return;
+      if (!headerInfo->payloadSeed.empty()) {
+        values.append(headerInfo->payloadSeed.begin(),
+                      headerInfo->payloadSeed.end());
+      } else {
+        values.append(headerInfo->blockArgs.begin(),
+                      headerInfo->blockArgs.end());
+      }
+    };
+    auto expectedCount = [&]() -> unsigned {
+      if (!edge.dest)
+        return 0;
+      return getDataArgCount(*edge.dest);
+    };
+
+    if (edge.kind == EdgeInfo::ConditionalTrue) {
+      if (!info.thenYieldValues.empty()) {
+        values.append(info.thenYieldValues.begin(), info.thenYieldValues.end());
+        return true;
+      }
+    } else if (edge.kind == EdgeInfo::ConditionalFalse) {
+      if (!info.elseYieldValues.empty()) {
+        values.append(info.elseYieldValues.begin(), info.elseYieldValues.end());
+        return true;
+      }
+      if (destIsMerge && info.elseImplicitYield && !info.results.empty()) {
+        values.append(info.results.begin(), info.results.end());
+        return true;
+      }
+    }
+
+    if ((destIsThen || destIsElse) && values.empty())
+      return false;
+    return false;
+  }
+
+  if (auto condOp = llvm::dyn_cast<simt::dialect::ConditionOp>(origin)) {
+    mlir::ValueRange forwarded = condOp.getForwarded();
+    values.append(forwarded.begin(), forwarded.end());
+    return !values.empty();
+  }
+
+  if (auto cont = llvm::dyn_cast<simt::dialect::ContinueOp>(origin)) {
+    values.append(cont.getOperands().begin(), cont.getOperands().end());
+    return !values.empty();
+  }
+
+  if (auto brk = llvm::dyn_cast<simt::dialect::BreakOp>(origin)) {
+    values.append(brk->operand_begin(), brk->operand_end());
+    return !values.empty();
+  }
+
+  if (auto yield = llvm::dyn_cast<simt::dialect::YieldOp>(origin)) {
+    values.append(yield.getOperands().begin(), yield.getOperands().end());
+    return !values.empty();
+  }
+
+  return false;
+}
+
+void StructuredCFGBuilder::seedEdgePayloadFromSource(EdgeInfo &edge) {
+  if (!edge.dest || edge.dest->isMergeBlock)
+    return;
+
+  unsigned expected = getDataArgCount(*edge.dest);
+  if (expected == 0 || edge.payload.size() >= expected)
+    return;
+
+  llvm::SmallVector<mlir::Value, 8> sourceValues;
+  if (!getSourceTupleForEdge(edge, sourceValues))
+    return;
+
+  for (mlir::Value value : sourceValues) {
+    if (edge.payload.size() >= expected)
+      break;
+    edge.payload.push_back(value);
+    edge.payloadKinds.push_back(PayloadKind::Carried);
+  }
 }
 
 void StructuredCFGBuilder::normalizeEdgeForMerge(EdgeInfo &edge,
@@ -456,6 +576,17 @@ LogicalResult StructuredCFGBuilder::materializeEdgeOperands(
       context->emitError("edge payload arity mismatch for structured branch")
           << " (have " << edge.payload.size() << ", expected " << expected
           << ", dest=\"" << succ->symbolName << "\")";
+    std::fprintf(stderr, "[materializeEdgeOperands] dest=%s expected=%u have=%zu\n",
+                 succ->symbolName.c_str(), expected,
+                 static_cast<size_t>(edge.payload.size()));
+    for (auto [idx, val] : llvm::enumerate(edge.payload)) {
+      std::fprintf(stderr, "  payload[%zu] = ", static_cast<size_t>(idx));
+      if (val)
+        val.print(llvm::errs());
+      else
+        std::fprintf(stderr, "<null>");
+      std::fprintf(stderr, "\n");
+    }
     return failure();
   }
 
@@ -490,7 +621,6 @@ LogicalResult StructuredCFGBuilder::materializeEdgeOperands(
 }
 
 LogicalResult StructuredCFGBuilder::build() {
-  llvm::errs() << "[build] starting structured CFG build\n";
   mapper = std::make_unique<IRMapping>();
   domInfo = std::make_unique<DominanceInfo>(func);
   functionReturnValues.clear();
@@ -583,7 +713,6 @@ StructuredCFGBuilder::lookupBlockInfo(mlir::Block *block) const {
 }
 
 LogicalResult StructuredCFGBuilder::analyseBlocks() {
-  llvm::errs() << "[analyse] starting block analysis\n";
   blockInfos.clear();
   ifInfos.clear();
   loopInfos.clear();
@@ -643,9 +772,6 @@ LogicalResult StructuredCFGBuilder::analyseBlocks() {
     }
 
     computeCapturedInputs(info);
-    llvm::errs() << "[analyse] block '" << info.symbolName
-                 << "' captured=" << info.capturedInputs.size() << "\n";
-    llvm::errs().flush();
   }
 
   return success();
@@ -838,9 +964,21 @@ LogicalResult StructuredCFGBuilder::computePayloads() {
       out.clear();
       for (Block &block : region) {
         Operation *terminator = block.getTerminator();
+        if (!terminator)
+          continue;
         if (auto yield = llvm::dyn_cast<simt::dialect::YieldOp>(terminator)) {
           out.assign(yield.getOperands().begin(), yield.getOperands().end());
           yieldOp = yield;
+          return;
+        }
+        if (auto cont = llvm::dyn_cast<simt::dialect::ContinueOp>(terminator)) {
+          out.assign(cont.getOperands().begin(), cont.getOperands().end());
+          yieldOp = cont;
+          return;
+        }
+        if (auto brk = llvm::dyn_cast<simt::dialect::BreakOp>(terminator)) {
+          out.assign(brk.getOperands().begin(), brk.getOperands().end());
+          yieldOp = brk;
           return;
         }
       }
@@ -854,18 +992,32 @@ LogicalResult StructuredCFGBuilder::computePayloads() {
     else if (!ifInfo.mergeArgs.empty())
       ifInfo.elseImplicitYield = true;
 
-  if (BlockInfo *mergeBlock = ifInfo.mergeBlock) {
-    mergeBlock->payloadSeed.assign(mergeBlock->blockArgs.begin(),
-                                   mergeBlock->blockArgs.end());
-    mergeBlock->payloadKinds.assign(mergeBlock->payloadSeed.size(),
-                                    PayloadKind::Result);
-    mergeBlock->payloadBlockArgOffset = 0;
+    auto seedBlockPayloadToFormals = [&](BlockInfo *block) {
+      if (!block)
+        return;
+      block->payloadSeed.assign(block->blockArgs.begin(),
+                                block->blockArgs.end());
+      block->payloadBlockArgOffset = 0;
+      block->payloadKinds.assign(block->payloadSeed.size(),
+                                 PayloadKind::Carried);
+    };
 
-    for (EdgeInfo &edge : edges) {
-      if (edge.dest == mergeBlock)
-        normalizeEdgeForMerge(edge, *mergeBlock);
+    seedBlockPayloadToFormals(ifInfo.thenBlock);
+    if (ifInfo.elseBlock)
+      seedBlockPayloadToFormals(ifInfo.elseBlock);
+
+    if (BlockInfo *mergeBlock = ifInfo.mergeBlock) {
+      mergeBlock->payloadSeed.assign(mergeBlock->blockArgs.begin(),
+                                     mergeBlock->blockArgs.end());
+      mergeBlock->payloadKinds.assign(mergeBlock->payloadSeed.size(),
+                                      PayloadKind::Result);
+      mergeBlock->payloadBlockArgOffset = 0;
+
+      for (EdgeInfo &edge : edges) {
+        if (edge.dest == mergeBlock)
+          normalizeEdgeForMerge(edge, *mergeBlock);
+      }
     }
-  }
 
     return success();
   };
@@ -1079,10 +1231,8 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
   for (mlir::Block *block : blockOrder) {
     BlockInfo &info = getOrCreateBlockInfo(block);
 
-    auto addCapturedToEdge = [&](EdgeInfo &edge) {
-      if (!edge.dest || edge.dest->isMergeBlock)
-        return;
-      // computeCapturedInputs(*edge.dest);
+    auto seedAndCapture = [&](EdgeInfo &edge) {
+      seedEdgePayloadFromSource(edge);
       appendCapturedInputs(edge);
     };
 
@@ -1094,10 +1244,6 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
         const IfInfo &ifInfo = ifIt->second;
 
         BlockInfo *mergeDest = ifInfo.mergeBlock;
-        if (ifInfo.thenBlock && ifInfo.thenBlock->capturedInputs.empty())
-          std::fprintf(stderr, "[warn] then block has no captured inputs\n");
-        if (ifInfo.elseBlock && ifInfo.elseBlock->capturedInputs.empty())
-          std::fprintf(stderr, "[warn] else block has no captured inputs\n");
 
         EdgeInfo thenEdge;
         thenEdge.source = &info;
@@ -1106,7 +1252,7 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
         thenEdge.condition = ifInfo.condition;
         thenEdge.origin = op;
         thenEdge.control.push_back(ifInfo.condition);
-        addCapturedToEdge(thenEdge);
+        seedAndCapture(thenEdge);
         if (thenEdge.dest && failed(ensurePayloadShape(thenEdge)))
           return failure();
         edges.push_back(std::move(thenEdge));
@@ -1119,7 +1265,7 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
         elseEdge.condition = ifInfo.condition;
         elseEdge.origin = op;
         elseEdge.control.push_back(ifInfo.condition);
-        addCapturedToEdge(elseEdge);
+        seedAndCapture(elseEdge);
         if (elseEdge.dest && failed(ensurePayloadShape(elseEdge)))
           return failure();
         edges.push_back(std::move(elseEdge));
@@ -1145,6 +1291,7 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
           mergeEdge.origin = origin;
 
           mergeEdge.payload.assign(values.begin(), values.end());
+          seedAndCapture(mergeEdge);
           if (failed(ensurePayloadShape(mergeEdge)))
             return failure();
           normalizeEdgeForMerge(mergeEdge, *mergeDest);
@@ -1167,23 +1314,20 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
 
       if (auto loopIt = loopInfos.find(op); loopIt != loopInfos.end()) {
         const LoopInfo &loopInfo = loopIt->second;
+        auto loopOp = llvm::dyn_cast<simt::dialect::LoopOp>(op);
 
         EdgeInfo entryEdge;
         entryEdge.source = &info;
         entryEdge.dest = loopInfo.prepareBlock;
         entryEdge.kind = EdgeInfo::Plain;
-        if (entryEdge.dest) {
-          BlockInfo &prepareInfo = *entryEdge.dest;
-          unsigned offset = prepareInfo.payloadBlockArgOffset;
-          if (offset <= prepareInfo.payloadSeed.size()) {
-            auto begin = prepareInfo.payloadSeed.begin();
-            std::advance(begin, static_cast<ptrdiff_t>(offset));
-            entryEdge.payload.assign(begin, prepareInfo.payloadSeed.end());
-          }
+        entryEdge.origin = op;
+        if (loopOp) {
+          entryEdge.payload.assign(loopOp.getInits().begin(),
+                                   loopOp.getInits().end());
           entryEdge.payloadKinds.assign(entryEdge.payload.size(),
                                         PayloadKind::Carried);
         }
-        addCapturedToEdge(entryEdge);
+        seedAndCapture(entryEdge);
         if (entryEdge.dest && failed(ensurePayloadShape(entryEdge)))
           return failure();
         edges.push_back(std::move(entryEdge));
@@ -1201,7 +1345,7 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
                 trueEdge.payload.assign(loopInfo.forwardedToBody.begin(),
                                          loopInfo.forwardedToBody.end());
               trueEdge.condition = cond.getCondition();
-              addCapturedToEdge(trueEdge);
+              seedAndCapture(trueEdge);
               if (trueEdge.dest && failed(ensurePayloadShape(trueEdge)))
                 return failure();
               edges.push_back(std::move(trueEdge));
@@ -1216,7 +1360,7 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
                 falseEdge.payload.assign(loopInfo.forwardedToExit.begin(),
                                           loopInfo.forwardedToExit.end());
               falseEdge.condition = cond.getCondition();
-              addCapturedToEdge(falseEdge);
+              seedAndCapture(falseEdge);
               if (falseEdge.dest && failed(ensurePayloadShape(falseEdge)))
                 return failure();
               edges.push_back(std::move(falseEdge));
@@ -1238,7 +1382,7 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
               backEdge.origin = cont;
               backEdge.payload.assign(cont.getOperands().begin(),
                                       cont.getOperands().end());
-              addCapturedToEdge(backEdge);
+              seedAndCapture(backEdge);
               edges.push_back(std::move(backEdge));
               if (edges.back().dest &&
                   failed(ensurePayloadShape(edges.back())))
@@ -1255,7 +1399,7 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
               exitEdge.origin = breakOp;
               exitEdge.payload.assign(breakOp->getOperands().begin(),
                                       breakOp->getOperands().end());
-              addCapturedToEdge(exitEdge);
+              seedAndCapture(exitEdge);
               edges.push_back(std::move(exitEdge));
               if (edges.back().dest &&
                   failed(ensurePayloadShape(edges.back())))
@@ -1272,7 +1416,7 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
               contEdge.origin = yieldOp;
               contEdge.payload.assign(yieldOp->getOperands().begin(),
                                       yieldOp->getOperands().end());
-              addCapturedToEdge(contEdge);
+              seedAndCapture(contEdge);
               edges.push_back(std::move(contEdge));
               if (edges.back().dest &&
                   failed(ensurePayloadShape(edges.back())))
@@ -1307,13 +1451,13 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
         for (const auto &record : switchInfo.caseRecords) {
           BlockInfo *caseInfo = record.block;
           EdgeInfo caseEntry;
-          caseEntry.source = &info;
-          caseEntry.dest = caseInfo;
-          caseEntry.kind = EdgeInfo::Plain;
-          addCapturedToEdge(caseEntry);
+         caseEntry.source = &info;
+         caseEntry.dest = caseInfo;
+         caseEntry.kind = EdgeInfo::Plain;
+          seedAndCapture(caseEntry);
           if (caseEntry.dest && failed(ensurePayloadShape(caseEntry)))
             return failure();
-         edges.push_back(std::move(caseEntry));
+          edges.push_back(std::move(caseEntry));
           info.outgoingEdges.push_back(edges.size() - 1);
 
           mlir::Operation *yieldOp = nullptr;
@@ -1330,19 +1474,19 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
                                      record.carriedValues.end());
             exitEdge.payload.append(record.payloadValues.begin(),
                                      record.payloadValues.end());
-            if (kind != EdgeInfo::Plain) {
-              exitEdge.isSwitchFallthrough = true;
-              exitEdge.condition = record.fallthrough;
-              exitEdge.switchDoneFlag = record.switchDone;
-              exitEdge.control.push_back(record.fallthrough);
-              exitEdge.control.push_back(record.switchDone);
-            }
-            exitEdge.origin = yieldOp;
-            addCapturedToEdge(exitEdge);
+           if (kind != EdgeInfo::Plain) {
+             exitEdge.isSwitchFallthrough = true;
+             exitEdge.condition = record.fallthrough;
+             exitEdge.switchDoneFlag = record.switchDone;
+             exitEdge.control.push_back(record.fallthrough);
+             exitEdge.control.push_back(record.switchDone);
+           }
+           exitEdge.origin = yieldOp;
+            seedAndCapture(exitEdge);
             if (exitEdge.dest && failed(ensurePayloadShape(exitEdge)))
               return failure();
-           edges.push_back(std::move(exitEdge));
-           if (caseInfo)
+            edges.push_back(std::move(exitEdge));
+            if (caseInfo)
               caseInfo->outgoingEdges.push_back(edges.size() - 1);
             return success();
           };
@@ -1361,14 +1505,15 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
             fallEdge.isSwitchFallthrough = true;
             fallEdge.payload.append(record.carriedValues.begin(),
                                      record.carriedValues.end());
-            fallEdge.payload.append(record.payloadValues.begin(),
-                                     record.payloadValues.end());
-            for (Value ctrl : record.controlValues)
-              fallEdge.control.push_back(ctrl);
-            addCapturedToEdge(fallEdge);
+           fallEdge.payload.append(record.payloadValues.begin(),
+                                    record.payloadValues.end());
+           for (Value ctrl : record.controlValues)
+             fallEdge.control.push_back(ctrl);
+            seedEdgePayloadFromSource(fallEdge);
+            appendCapturedInputs(fallEdge);
             if (fallEdge.dest && failed(ensurePayloadShape(fallEdge)))
               return failure();
-           edges.push_back(std::move(fallEdge));
+            edges.push_back(std::move(fallEdge));
             if (caseInfo)
               caseInfo->outgoingEdges.push_back(edges.size() - 1);
 
@@ -1382,13 +1527,13 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
 
         if (switchInfo.defaultBlock) {
           EdgeInfo defaultEntry;
-          defaultEntry.source = &info;
-          defaultEntry.dest = switchInfo.defaultBlock;
-          defaultEntry.kind = EdgeInfo::Plain;
-          addCapturedToEdge(defaultEntry);
+         defaultEntry.source = &info;
+         defaultEntry.dest = switchInfo.defaultBlock;
+         defaultEntry.kind = EdgeInfo::Plain;
+          seedAndCapture(defaultEntry);
           if (failed(ensurePayloadShape(defaultEntry)))
             return failure();
-         edges.push_back(std::move(defaultEntry));
+          edges.push_back(std::move(defaultEntry));
           info.outgoingEdges.push_back(edges.size() - 1);
 
           if (switchInfo.defaultBlock) {
@@ -1402,10 +1547,10 @@ LogicalResult StructuredCFGBuilder::enumerateEdges() {
             exitEdge.payload.append(
                 switchInfo.defaultRecord.payloadValues.begin(),
                 switchInfo.defaultRecord.payloadValues.end());
-            addCapturedToEdge(exitEdge);
+            seedAndCapture(exitEdge);
             if (exitEdge.dest && failed(ensurePayloadShape(exitEdge)))
               return failure();
-           edges.push_back(std::move(exitEdge));
+            edges.push_back(std::move(exitEdge));
             if (switchInfo.defaultBlock)
               switchInfo.defaultBlock->outgoingEdges.push_back(edges.size() - 1);
           }
@@ -1721,10 +1866,6 @@ LogicalResult StructuredCFGBuilder::emitStructuredBlock(BlockInfo &info) {
 
   if (info.original) {
     for (Operation &op : info.original->without_terminator()) {
-      llvm::errs() << "[emitStructuredBlock] visiting ";
-      op.print(llvm::errs());
-      llvm::errs() << "\n";
-
       if (isa<simt::structured::BlockOp>(&op))
         continue;
       if (auto nestedIf = dyn_cast<simt::dialect::IfOp>(&op)) {
@@ -1791,18 +1932,19 @@ LogicalResult StructuredCFGBuilder::emitStructuredBlock(BlockInfo &info) {
             cont.emitError("missing destination for structured continue");
             return failure();
           }
-      SmallVector<Value> operands;
-      if (failed(materializeEdgeOperands(edge, edge.dest, operands, cont)))
-        return failure();
+          SmallVector<Value> operands;
+          seedEdgePayloadFromSource(edge);
+          if (failed(materializeEdgeOperands(edge, edge.dest, operands, cont)))
+            return failure();
 
-      for (Value &operand : operands) {
-        Value localized = localizeOperandIntoBlock(operand, info, bodyBuilder);
-        if (!localized) {
-          cont.emitError("unable to materialize continue operand");
-          return failure();
-        }
-        operand = localized;
-      }
+          for (Value &operand : operands) {
+            Value localized = localizeOperandIntoBlock(operand, info, bodyBuilder);
+            if (!localized) {
+              cont.emitError("unable to materialize continue operand");
+              return failure();
+            }
+            operand = localized;
+          }
           MaskExpr srcMask = info.incomingMask.isValid()
                                  ? info.incomingMask
                                  : MaskExpr::full();
@@ -1840,18 +1982,19 @@ LogicalResult StructuredCFGBuilder::emitStructuredBlock(BlockInfo &info) {
             brk.emitError("missing destination for structured break");
             return failure();
           }
-      SmallVector<Value> operands;
-      if (failed(materializeEdgeOperands(edge, edge.dest, operands, brk)))
-        return failure();
+          SmallVector<Value> operands;
+          seedEdgePayloadFromSource(edge);
+          if (failed(materializeEdgeOperands(edge, edge.dest, operands, brk)))
+            return failure();
 
-      for (Value &operand : operands) {
-        Value localized = localizeOperandIntoBlock(operand, info, bodyBuilder);
-        if (!localized) {
-          brk.emitError("unable to materialize break operand");
-          return failure();
-        }
-        operand = localized;
-      }
+          for (Value &operand : operands) {
+            Value localized = localizeOperandIntoBlock(operand, info, bodyBuilder);
+            if (!localized) {
+              brk.emitError("unable to materialize break operand");
+              return failure();
+            }
+            operand = localized;
+          }
           MaskExpr srcMask = info.incomingMask.isValid()
                                  ? info.incomingMask
                                  : MaskExpr::full();
@@ -1938,11 +2081,13 @@ LogicalResult StructuredCFGBuilder::emitStructuredIf(BlockInfo &header,
   }
 
   SmallVector<Value> truePayload;
+  seedEdgePayloadFromSource(trueEdge);
   if (failed(materializeEdgeOperands(trueEdge, trueEdge.dest, truePayload,
                                      info.op)))
     return failure();
 
   SmallVector<Value> falsePayload;
+  seedEdgePayloadFromSource(falseEdge);
   if (failed(materializeEdgeOperands(falseEdge, falseEdge.dest, falsePayload,
                                      info.op)))
     return failure();
@@ -2024,6 +2169,7 @@ LogicalResult StructuredCFGBuilder::emitStructuredIf(BlockInfo &header,
     }
 
     llvm::SmallVector<mlir::Value, 8> operands;
+    seedEdgePayloadFromSource(edge);
     if (failed(materializeEdgeOperands(edge, edge.dest, operands, edge.origin)))
       return failure();
 
@@ -2081,6 +2227,7 @@ LogicalResult StructuredCFGBuilder::emitStructuredLoop(BlockInfo &enclosing,
   EdgeInfo &entryEdge = edges[entryEdgeIdx];
 
   SmallVector<Value> payload;
+  seedEdgePayloadFromSource(entryEdge);
   if (failed(materializeEdgeOperands(entryEdge, entryEdge.dest, payload,
                                      info.op)))
     return failure();
@@ -2243,6 +2390,8 @@ LogicalResult StructuredCFGBuilder::emitStructuredTerminator(BlockInfo &source) 
 
     SmallVector<Value> truePayload;
     SmallVector<Value> falsePayload;
+    seedEdgePayloadFromSource(trueEdge);
+    seedEdgePayloadFromSource(falseEdge);
     if (failed(materializeEdgeOperands(trueEdge, trueEdge.dest, truePayload,
                                        origTerm)) ||
         failed(materializeEdgeOperands(falseEdge, falseEdge.dest, falsePayload,
@@ -2308,6 +2457,7 @@ LogicalResult StructuredCFGBuilder::emitStructuredTerminator(BlockInfo &source) 
           return failure();
 
       SmallVector<Value> operands;
+      seedEdgePayloadFromSource(edge);
       if (failed(materializeEdgeOperands(edge, edge.dest, operands, origTerm)))
         return failure();
 

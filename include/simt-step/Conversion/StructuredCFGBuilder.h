@@ -225,6 +225,9 @@ private:
                                           unsigned index);
   mlir::BlockArgument getCapturedArg(BlockInfo &succ, mlir::Value value);
   void appendCapturedInputs(EdgeInfo &edge);
+  bool getSourceTupleForEdge(EdgeInfo &edge,
+                             llvm::SmallVectorImpl<mlir::Value> &values);
+  void seedEdgePayloadFromSource(EdgeInfo &edge);
   void computeCapturedInputs(BlockInfo &info);
   mlir::LogicalResult materializeEdgeOperands(EdgeInfo &edge, BlockInfo *succ,
                                               llvm::SmallVectorImpl<mlir::Value> &operands,
