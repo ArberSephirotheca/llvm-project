@@ -249,6 +249,7 @@ public:
                                                /*withElseRegion=*/true);
 
       auto &thenBlock = stage2If.getThenRegion().front();
+      thenBlock.clear();
       rewriter.setInsertionPointToStart(&thenBlock);
       llvm::SmallVector<mlir::Value> terminatorOperands;
       terminatorOperands.append(tupleValues.begin(), tupleValues.end());
@@ -259,6 +260,7 @@ public:
         rewriter.create<simt::dialect::BreakOp>(loc, terminatorOperands);
 
       auto &elseBlock = stage2If.getElseRegion().front();
+      elseBlock.clear();
       rewriter.setInsertionPointToStart(&elseBlock);
       rewriter.create<simt::dialect::YieldOp>(loc);
 
