@@ -242,6 +242,10 @@ public:
       mlir::ValueRange payloadValues(stage1If.getResults().drop_front());
       mlir::ValueRange tupleValues(payloadValues.take_front(resultCount));
       mlir::ValueRange extraPayload(payloadValues.drop_front(resultCount));
+      llvm::SmallVector<mlir::Value> tupleVec(tupleValues.begin(),
+                                              tupleValues.end());
+      llvm::SmallVector<mlir::Value> extraVec(extraPayload.begin(),
+                                              extraPayload.end());
 
       rewriter.setInsertionPointAfter(stage1If);
       auto stage2If =
@@ -252,8 +256,9 @@ public:
       thenBlock.clear();
       rewriter.setInsertionPointToStart(&thenBlock);
       llvm::SmallVector<mlir::Value> terminatorOperands;
-      terminatorOperands.append(tupleValues.begin(), tupleValues.end());
-      terminatorOperands.append(extraPayload.begin(), extraPayload.end());
+      terminatorOperands.reserve(tupleVec.size() + extraVec.size());
+      terminatorOperands.append(tupleVec.begin(), tupleVec.end());
+      terminatorOperands.append(extraVec.begin(), extraVec.end());
       if (earlyKind == ExitKind::Continue)
         rewriter.create<simt::dialect::ContinueOp>(loc, terminatorOperands);
       else
@@ -262,7 +267,7 @@ public:
       auto &elseBlock = stage2If.getElseRegion().front();
       elseBlock.clear();
       rewriter.setInsertionPointToStart(&elseBlock);
-      rewriter.create<simt::dialect::YieldOp>(loc);
+      rewriter.create<simt::dialect::YieldOp>(loc, tupleVec);
 
       stage2If->setAttr(kNormalizedAttrName, rewriter.getUnitAttr());
 
