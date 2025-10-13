@@ -470,10 +470,23 @@ bool StructuredCFGBuilder::getSourceTupleForEdge(
           tuple = info.elseYieldValues;
         else if (destIsElse && info.elseImplicitYield && !info.results.empty())
           tuple = info.results;
+
         if (!tuple.empty()) {
-          values.append(tuple.begin(), tuple.end());
-          return true;
+          unsigned carried = 0;
+          if (info.parent)
+            carried = getDataArgCount(*info.parent);
+          if (!carried && !info.resultTypes.empty())
+            carried = info.resultTypes.size() > 0 ? info.resultTypes.size() - 1
+                                                  : 0;
+          if (!carried && tuple.size() > 0)
+            carried = tuple.size() > 0 ? tuple.size() - 1 : 0;
+
+          if (carried && tuple.size() >= carried) {
+            values.append(tuple.end() - carried, tuple.end());
+            return true;
+          }
         }
+
         appendHeaderTuple();
       }
       return !values.empty() || expectedCount() == 0;
@@ -511,12 +524,22 @@ void StructuredCFGBuilder::seedEdgePayloadFromSource(EdgeInfo &edge) {
     return;
 
   unsigned expected = getDataArgCount(*edge.dest);
-  if (expected == 0 || edge.payload.size() >= expected)
+  if (expected != 0 && edge.payload.size() >= expected)
     return;
 
   llvm::SmallVector<mlir::Value, 8> sourceValues;
   if (!getSourceTupleForEdge(edge, sourceValues))
     return;
+
+  if (expected == 0 && !sourceValues.empty())
+    expected = sourceValues.size();
+
+  if (expected == 0)
+    return;
+
+  if (sourceValues.size() > expected)
+    sourceValues.erase(sourceValues.begin(),
+                       sourceValues.begin() + (sourceValues.size() - expected));
 
   for (mlir::Value value : sourceValues) {
     if (edge.payload.size() >= expected)
