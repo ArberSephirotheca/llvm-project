@@ -58,6 +58,7 @@ struct LoopMetadata {
   llvm::SmallVector<const clang::ValueDecl *, 8> carriedVars;
   llvm::DenseMap<const clang::ValueDecl *, SymValue> symInfo;
   llvm::DenseMap<const clang::ValueDecl *, LoopMutationSummary> mutationInfo;
+  const clang::Stmt *increment = nullptr;
   bool hasFirstIterFlag = false;
   SymValue firstIterSym;
   bool bodyHasBreak = false;

@@ -3393,7 +3393,9 @@ static bool collectLoopMutations(
     LoweringContext &ctx, const clang::Stmt *body,
     llvm::function_ref<bool(LoweringContext &)> extraWork,
     LoopMetadata &metadata) {
+  const clang::Stmt *recordedIncrement = metadata.increment;
   metadata = LoopMetadata();
+  metadata.increment = recordedIncrement;
 
   mlir::Region analysisRegion;
   analysisRegion.emplaceBlock();
@@ -3546,8 +3548,22 @@ static bool lowerStatement(const clang::Stmt *stmt, LoweringContext &ctx,
   }
 
   if (llvm::isa<clang::ContinueStmt>(stmt)) {
-    if (LoopFrame *loopFrame = getInnermostLoop(ctx))
-      return interp.emitLoopContinue(*loopFrame, makeSourceLoc(stmt, ctx));
+    if (LoopFrame *loopFrame = getInnermostLoop(ctx)) {
+      auto src = makeSourceLoc(stmt, ctx);
+      if (LoopMetadata *metadata = loopFrame->metadata) {
+        if (const clang::Stmt *inc = metadata->increment) {
+          if (const auto *incExpr = llvm::dyn_cast<clang::Expr>(inc)) {
+            (void)lowerExprInterp(incExpr, ctx, interp);
+          } else {
+            if (!lowerStatement(inc, ctx, interp))
+              return false;
+          }
+          if (ctx.failed)
+            return false;
+        }
+      }
+      return interp.emitLoopContinue(*loopFrame, src);
+    }
     return true;
   }
 
@@ -3680,6 +3696,7 @@ static bool lowerForStmt(const clang::ForStmt *forStmt, LoweringContext &ctx,
 
   LoopMetadata loopMeta;
   const clang::Stmt *incStmt = forStmt->getInc();
+  loopMeta.increment = incStmt;
   auto analyzeIncrement = [&](LoweringContext &analysisCtx) -> bool {
     if (!incStmt)
       return true;

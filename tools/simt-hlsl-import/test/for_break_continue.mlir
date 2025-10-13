@@ -13,8 +13,10 @@
 // MLIR:     %[[ONE:.*]] = "arith.constant"() <{value = 1 : i32}> : () -> i32
 // MLIR:     %[[IS_CONT:.*]] = "arith.cmpi"(%[[I_BODY]], %[[ONE]]) <{predicate = 0 : i64}> : (i32, i32) -> i1
 // MLIR:     %[[CONT_STAGE1:.*]]:3 = "simt_step.if"(%[[IS_CONT]]) ({
+// MLIR:       %[[INC_ONE:.*]] = "arith.constant"() <{value = 1 : i32}> : () -> i32
+// MLIR:       %[[I_CONT_NEXT:.*]] = "arith.addi"(%[[I_BODY]], %[[INC_ONE]]) {{.*}}
 // MLIR:       %[[CONT_TRUE:.*]] = "arith.constant"() <{value = true}> : () -> i1
-// MLIR:       "simt_step.yield"(%[[CONT_TRUE]], %[[ACC_BODY]], %[[I_BODY]]) : (i1, i32, i32) -> ()
+// MLIR:       "simt_step.yield"(%[[CONT_TRUE]], %[[ACC_BODY]], %[[I_CONT_NEXT]]) : (i1, i32, i32) -> ()
 // MLIR:     }, {
 // MLIR:       %[[CONT_FALSE:.*]] = "arith.constant"() <{value = false}> : () -> i1
 // MLIR:       "simt_step.yield"(%[[CONT_FALSE]], %[[ACC_BODY]], %[[I_BODY]]) : (i1, i32, i32) -> ()
