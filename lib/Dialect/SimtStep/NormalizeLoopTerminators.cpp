@@ -244,8 +244,9 @@ public:
       mlir::ValueRange extraPayload(payloadValues.drop_front(resultCount));
 
       rewriter.setInsertionPointAfter(stage1If);
-      auto stage2If = rewriter.create<simt::dialect::IfOp>(
-          loc, ifOp.getResultTypes(), flag, /*withElseRegion=*/true);
+      auto stage2If =
+          rewriter.create<simt::dialect::IfOp>(loc, mlir::TypeRange{}, flag,
+                                               /*withElseRegion=*/true);
 
       auto &thenBlock = stage2If.getThenRegion().front();
       rewriter.setInsertionPointToStart(&thenBlock);
@@ -259,11 +260,11 @@ public:
 
       auto &elseBlock = stage2If.getElseRegion().front();
       rewriter.setInsertionPointToStart(&elseBlock);
-      rewriter.create<simt::dialect::YieldOp>(loc, tupleValues);
+      rewriter.create<simt::dialect::YieldOp>(loc);
 
       stage2If->setAttr(kNormalizedAttrName, rewriter.getUnitAttr());
 
-      rewriter.replaceOp(ifOp, stage2If.getResults());
+      rewriter.replaceOp(ifOp, tupleValues);
     }
   }
 };

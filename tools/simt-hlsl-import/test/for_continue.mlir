@@ -21,14 +21,14 @@ module {
         %false = arith.constant false
         "simt_step.yield"(%false, %arg1, %arg2) : (i1, i32, i32) -> ()
       }) : (i1) -> (i1, i32, i32)
-      %4:2 = "simt_step.if"(%3#0) ({
+      "simt_step.if"(%3#0) ({
         "simt_step.continue"(%3#1, %3#2) : (i32, i32) -> ()
       }, {
-        "simt_step.yield"(%3#1, %3#2) : (i32, i32) -> ()
-      }) {simt.normalized.loop_terminators} : (i1) -> (i32, i32)
-      %5 = arith.addi %4#0, %4#1 : i32
+        "simt_step.yield"() : () -> ()
+      }) {simt.normalized.loop_terminators} : (i1) -> ()
+      %5 = arith.addi %3#1, %3#2 : i32
       %c1_i32_2 = arith.constant 1 : i32
-      %6 = arith.addi %4#1, %c1_i32_2 : i32
+      %6 = arith.addi %3#2, %c1_i32_2 : i32
       "simt_step.yield"(%5, %6) : (i32, i32) -> ()
     }) : (i32, i32) -> (i32, i32)
     return
