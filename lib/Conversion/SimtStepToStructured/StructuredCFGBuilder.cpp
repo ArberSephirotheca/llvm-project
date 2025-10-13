@@ -476,14 +476,8 @@ bool StructuredCFGBuilder::getSourceTupleForEdge(
       }
     }
 
-    if (destIsThen || destIsElse) {
-      if (values.empty()) {
-        if (edge.condition)
-          values.push_back(edge.condition);
-        appendHeaderTuple();
-      }
-      return !values.empty() || expectedCount() == 0;
-    }
+    if (destIsThen || destIsElse)
+      return expectedCount() == 0;
 
     return false;
   }
