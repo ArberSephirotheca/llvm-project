@@ -20,8 +20,8 @@
 - **SimtPluginOpInterface**: allows `simt.custom` to expose the same APIs (traits, resource requirements, side effects) via registry metadata.
 
 ## Built-in Operations
-- Structured control flow regions (`scf.if`, `scf.while`, dialect-specific ops) are the user-facing form. Mask/continuation ops are introduced only by the lowering pass that prepares IR for execution/analysis.
-- Synchronization (`barrier`, `fence`) with scope and memory semantics attributes.
+- Structured control flow regions (`scf.if`, `scf.while`, dialect-specific ops) are the user-facing form. 
+- Synchronization (`barrier` ) with scope and memory semantics attributes.
 - Collectives (`wave.ballot`, `wave.all`, `wave.any`, `wave.shuffle`, `wave.reduce`).
 - Memory operations with explicit space and ordering metadata.
 - State queries (`lane.id`, `subgroup.width`, `active.mask`).

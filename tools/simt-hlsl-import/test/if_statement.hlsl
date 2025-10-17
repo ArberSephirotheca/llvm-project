@@ -6,4 +6,6 @@ void main(uint tid : SV_DispatchThreadID) {
   if (tid == 0) {
     value = 1;
   }
+  uint result = 2;
+
 }
