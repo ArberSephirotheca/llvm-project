@@ -464,7 +464,9 @@ bool StructuredCFGBuilder::getSourceTupleForEdge(
     if (destIsThen || destIsElse) {
       if (values.empty()) {
         ArrayRef<Value> tuple;
-        if (destIsThen && !info.thenYieldValues.empty())
+        if (!info.results.empty())
+          tuple = info.results;
+        else if (destIsThen && !info.thenYieldValues.empty())
           tuple = info.thenYieldValues;
         else if (destIsElse && !info.elseYieldValues.empty())
           tuple = info.elseYieldValues;
@@ -475,14 +477,13 @@ bool StructuredCFGBuilder::getSourceTupleForEdge(
           unsigned carried = 0;
           if (info.parent)
             carried = getDataArgCount(*info.parent);
-          if (!carried && !info.resultTypes.empty())
-            carried = info.resultTypes.size() > 0 ? info.resultTypes.size() - 1
-                                                  : 0;
           if (!carried && tuple.size() > 0)
             carried = tuple.size() > 0 ? tuple.size() - 1 : 0;
 
-          if (carried && tuple.size() >= carried) {
-            values.append(tuple.end() - carried, tuple.end());
+          if (carried && tuple.size() >= carried + 1) {
+            ArrayRef<Value> carriedValues =
+                tuple.drop_front(tuple.size() - carried);
+            values.append(carriedValues.begin(), carriedValues.end());
             return true;
           }
         }
