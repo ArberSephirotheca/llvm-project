@@ -85,6 +85,24 @@ sequences. Additional work remains to broaden operator coverage, but the block
 structure illustrated above reflects the semantics relied upon by the
 interpreter.
 
+### Normalised loop terminators
+
+During conversion each `simt_step` loop first rewrites early exits (continue /
+break) into a **two-stage** form before structured blocks are created:
+
+1. A **value stage** (`simt_step.if`) produces the tuple `{ flag, carried… }`.
+2. A **control stage** consumes `flag` and contains only effect ops:
+   - true arm → `simt_step.continue(carried…)`
+   - false arm → `simt_step.yield(carried…)` (or `simt_step.break`).
+
+Structured lowering only sees the second stage, so every path that stays in the
+loop funnels through a single latch, mirroring SPIR-V / LLVM latch semantics.
+
+Downstream passes can rely on the control stage being **effect-only**: no branch
+produces SSA results, and the carried tuple is forwarded explicitly along the
+edge, making it trivial to synthesise the continue block and merge block during
+`simt_step` → `simt_struct` lowering.
+
 ---
 
 This dialect is the staging ground for the interpreter and the entry point for
