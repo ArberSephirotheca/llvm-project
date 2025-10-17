@@ -441,8 +441,6 @@ bool StructuredCFGBuilder::getSourceTupleForEdge(
     IfInfo &info = it->second;
     const bool destIsThen = info.thenBlock && edge.dest == info.thenBlock;
     const bool destIsElse = info.elseBlock && edge.dest == info.elseBlock;
-    const bool destIsMerge = info.mergeBlock && edge.dest == info.mergeBlock;
-
     BlockInfo *headerInfo = info.parent ? info.parent : edge.source;
     auto appendHeaderTuple = [&]() {
       if (!headerInfo)
@@ -463,18 +461,19 @@ bool StructuredCFGBuilder::getSourceTupleForEdge(
 
     if (destIsThen || destIsElse) {
       if (values.empty()) {
-        ArrayRef<Value> results = ifOp.getResults();
-        unsigned carried = 0;
-        if (info.parent)
-          carried = getDataArgCount(*info.parent);
-        if (!carried && results.size() > 0)
-          carried = results.size() > 0 ? results.size() - 1 : 0;
+        if (ifOp.getNumResults() > 0) {
+          ArrayRef<Value> tuple;
+          if (destIsThen && !info.thenYieldValues.empty())
+            tuple = info.thenYieldValues;
+          else if (destIsElse && !info.elseYieldValues.empty())
+            tuple = info.elseYieldValues;
+          else if (destIsElse && info.elseImplicitYield && !info.results.empty())
+            tuple = info.results;
 
-        if (carried && results.size() >= carried + 1) {
-          ArrayRef<Value> suffix =
-              results.drop_front(results.size() - carried);
-          values.append(suffix.begin(), suffix.end());
-          return true;
+          if (!tuple.empty()) {
+            values.append(tuple.begin(), tuple.end());
+            return true;
+          }
         }
 
         appendHeaderTuple();
@@ -594,6 +593,42 @@ LogicalResult StructuredCFGBuilder::materializeEdgeOperands(
   Block *succBlock = succ->structuredBody;
   (void)succBlock;
   unsigned expected = getDataArgCount(*succ);
+  if (edge.payload.size() < expected) {
+    auto appendFrom = [&](llvm::ArrayRef<Value> candidates) {
+      for (Value candidate : candidates) {
+        if (!candidate)
+          continue;
+        if (edge.payload.size() >= expected)
+          break;
+        edge.payload.push_back(candidate);
+        edge.payloadKinds.push_back(PayloadKind::Carried);
+      }
+    };
+
+    if (edge.source)
+      appendFrom(edge.source->payloadSeed);
+    if (edge.source) {
+      for (mlir::BlockArgument arg : edge.source->blockArgs) {
+        if (!arg)
+          continue;
+        if (edge.payload.size() >= expected)
+          break;
+        edge.payload.push_back(arg);
+        edge.payloadKinds.push_back(PayloadKind::Carried);
+      }
+    }
+
+    size_t current = edge.payload.size();
+    if (current < expected) {
+      edge.payload.resize(expected, Value());
+      edge.payloadKinds.resize(expected, PayloadKind::Unknown);
+      for (size_t idx = current; idx < expected; ++idx)
+        edge.payloadKinds[idx] = PayloadKind::Carried;
+    } else {
+      edge.payloadKinds.resize(edge.payload.size(), PayloadKind::Carried);
+    }
+  }
+
   if (edge.payload.size() != expected) {
     if (context)
       context->emitError("edge payload arity mismatch for structured branch")
