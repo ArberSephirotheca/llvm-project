@@ -4,10 +4,8 @@
 void main(uint tid : SV_DispatchThreadID) {
   uint acc = 0;
   for (uint i = 0; i < 4; i = i + 1) {
-    if (i == 1){
+    if (i == 1)
       acc = acc + 10;
-      continue;
-    }
     acc = acc + i;
   }
 }

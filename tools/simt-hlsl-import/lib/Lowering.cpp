@@ -3674,20 +3674,28 @@ static bool lowerStatement(const clang::Stmt *stmt, LoweringContext &ctx,
     mlir::Location loc = ctx.defaultLoc;
     bool hasElse = ifStmt->getElse() != nullptr;
 
-    llvm::SmallVector<const clang::ValueDecl *, 8> mutatedVars;
-    if (!collectIfMutations(ctx, ifStmt->getThen(), ifStmt->getElse(),
-                            mutatedVars))
-      return false;
+  llvm::SmallVector<const clang::ValueDecl *, 8> mutatedVars;
+  if (!collectIfMutations(ctx, ifStmt->getThen(), ifStmt->getElse(),
+                          mutatedVars))
+    return false;
 
-    llvm::SmallVector<const clang::ValueDecl *, 8> carriedVars;
-    carriedVars.reserve(mutatedVars.size());
+  llvm::SmallVector<const clang::ValueDecl *, 8> carriedVars;
+  carriedVars.reserve(mutatedVars.size());
+
+  auto *innermostLoop = getInnermostLoop(ctx);
+  if (innermostLoop && !innermostLoop->carriedVars.empty()) {
+    for (const clang::ValueDecl *vd : innermostLoop->carriedVars)
+      if (ctx.valueMap.count(vd))
+        carriedVars.push_back(vd);
+  } else {
     for (const clang::ValueDecl *vd : mutatedVars)
       if (ctx.valueMap.count(vd))
         carriedVars.push_back(vd);
+  }
 
-    bool needsElseRegion = hasElse || !carriedVars.empty();
-    auto scope =
-        interp.beginIf(cond, carriedVars, hasElse, needsElseRegion, loc);
+  bool needsElseRegion = hasElse || !carriedVars.empty();
+  auto scope =
+      interp.beginIf(cond, carriedVars, hasElse, needsElseRegion, loc);
 
     LoweringContext &thenCtx = scope.thenContext();
     auto thenInterp = interp.fork(thenCtx);
