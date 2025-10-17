@@ -463,29 +463,18 @@ bool StructuredCFGBuilder::getSourceTupleForEdge(
 
     if (destIsThen || destIsElse) {
       if (values.empty()) {
-        ArrayRef<Value> tuple;
-        if (!info.results.empty())
-          tuple = info.results;
-        else if (destIsThen && !info.thenYieldValues.empty())
-          tuple = info.thenYieldValues;
-        else if (destIsElse && !info.elseYieldValues.empty())
-          tuple = info.elseYieldValues;
-        else if (destIsElse && info.elseImplicitYield && !info.results.empty())
-          tuple = info.results;
+        ArrayRef<Value> results = ifOp.getResults();
+        unsigned carried = 0;
+        if (info.parent)
+          carried = getDataArgCount(*info.parent);
+        if (!carried && results.size() > 0)
+          carried = results.size() > 0 ? results.size() - 1 : 0;
 
-        if (!tuple.empty()) {
-          unsigned carried = 0;
-          if (info.parent)
-            carried = getDataArgCount(*info.parent);
-          if (!carried && tuple.size() > 0)
-            carried = tuple.size() > 0 ? tuple.size() - 1 : 0;
-
-          if (carried && tuple.size() >= carried + 1) {
-            ArrayRef<Value> carriedValues =
-                tuple.drop_front(tuple.size() - carried);
-            values.append(carriedValues.begin(), carriedValues.end());
-            return true;
-          }
+        if (carried && results.size() >= carried + 1) {
+          ArrayRef<Value> suffix =
+              results.drop_front(results.size() - carried);
+          values.append(suffix.begin(), suffix.end());
+          return true;
         }
 
         appendHeaderTuple();
