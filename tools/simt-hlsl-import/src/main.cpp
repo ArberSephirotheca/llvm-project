@@ -35,6 +35,10 @@ int main(int argc, char **argv) {
   llvm::cl::opt<std::string> shaderProfile(
       "profile", llvm::cl::desc("Target shader profile (default: cs_6_7)"),
       llvm::cl::init("cs_6_7"), llvm::cl::cat(toolCategory));
+  llvm::cl::opt<bool> normalizeLoopTerminators(
+      "normalize-loop-terminators",
+      llvm::cl::desc("Normalize result-producing simt.loop terminators"),
+      llvm::cl::init(true), llvm::cl::cat(toolCategory));
 
   llvm::cl::ParseCommandLineOptions(argc, argv,
                                     "SIMT-Step HLSL importer (compute)\n");
@@ -96,12 +100,15 @@ int main(int argc, char **argv) {
   mlir::ModuleOp module = result.value().get();
 
   mlir::PassManager pm(&context);
-  pm.addNestedPass<mlir::func::FuncOp>(
-      simt::dialect::createNormalizeLoopTerminatorsPass());
-  if (mlir::failed(pm.run(module))) {
-    llvm::errs() << "simt-hlsl-import: failed to normalize loop terminators\n";
-    module.dump();
-    return 1;
+  if (normalizeLoopTerminators) {
+    pm.addNestedPass<mlir::func::FuncOp>(
+        simt::dialect::createNormalizeLoopTerminatorsPass());
+    if (mlir::failed(pm.run(module))) {
+      llvm::errs()
+          << "simt-hlsl-import: failed to normalize loop terminators\n";
+      module.dump();
+      return 1;
+    }
   }
 
   if (failed(module.verify())) {

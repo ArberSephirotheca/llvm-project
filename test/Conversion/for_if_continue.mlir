@@ -24,7 +24,7 @@ module {
       "simt_step.if"(%3#0) ({
         "simt_step.continue"(%3#1, %3#2) : (i32, i32) -> ()
       }, {
-        "simt_step.yield"() : () -> ()
+        "simt_step.yield"(%3#1, %3#2) : (i32, i32) -> ()
       }) {simt.normalized.loop_terminators} : (i1) -> ()
       %4 = arith.addi %3#1, %3#2 : i32
       %c1_i32_1 = arith.constant 1 : i32
