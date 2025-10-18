@@ -139,7 +139,7 @@ def SimtStep_WaveBallotOp : Op<SimtStep_Dialect, "wave_ballot"> {
   let arguments = (ins I1:$predicate);
   let results = (outs AnyInteger:$mask);
 
-  let assemblyFormat = "$predicate attr-dict `:` type($mask)";
+  // let assemblyFormat = "`(` $predicate `)` attr-dict `:` type($mask)";
 }
 
 def SimtStep_WaveCountBitsOp : Op<SimtStep_Dialect, "wave_count_bits"> {
@@ -150,8 +150,8 @@ def SimtStep_WaveCountBitsOp : Op<SimtStep_Dialect, "wave_count_bits"> {
     mask type regardless of the source language's return type.
   }];
   let arguments = (ins I1:$predicate);
-  let results = (outs I64:$count);
-  let assemblyFormat = "$predicate attr-dict `:` type($count)";
+  let results = (outs I32:$count);
+  // let assemblyFormat = "$predicate attr-dict";
 }
 
 def SimtStep_MaskPushOp : Op<SimtStep_Dialect, "mask_push"> {

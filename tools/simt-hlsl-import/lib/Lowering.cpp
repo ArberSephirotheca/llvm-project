@@ -1296,9 +1296,26 @@ struct EmitInterpreter
       if (!mlir::isa<mlir::IntegerType>(resultType))
         return fail("WaveActiveCountBits expects integer result type");
 
+      mlir::Value count =
+          ctx.builder
+              .create<simt::dialect::WaveCountBitsOp>(
+                  mlirLoc, ctx.builder.getI32Type(), operands[0])
+              .getCount();
+
+      if (count.getType() == resultType)
+        return count;
+
+      auto countType = mlir::cast<mlir::IntegerType>(count.getType());
+      auto desiredType = mlir::cast<mlir::IntegerType>(resultType);
+
+      if (desiredType.getWidth() < countType.getWidth())
+        return ctx.builder
+            .create<mlir::arith::TruncIOp>(mlirLoc, resultType, count)
+            .getResult();
+
       return ctx.builder
-          .create<simt::dialect::WaveBallotOp>(mlirLoc, resultType, operands[0])
-          .getMask();
+          .create<mlir::arith::ExtUIOp>(mlirLoc, resultType, count)
+          .getResult();
     }
     case simt_hlsl_import::WaveIntrinsic::GetLaneIndex: {
       if (!operands.empty())
