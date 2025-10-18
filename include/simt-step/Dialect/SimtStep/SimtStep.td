@@ -132,15 +132,14 @@ def SimtStep_WaveAnyOp : Op<SimtStep_Dialect, "wave_any"> {
 def SimtStep_WaveBallotOp : Op<SimtStep_Dialect, "wave_ballot"> {
   let summary = "Wave-level ballot producing a bitmask of lanes with predicate true";
   let description = [{
-    Produces an integer mask (typically 64-bit) encoding which active lanes have
-    the predicate set. The operand is an `i1` per-lane predicate, the result is
-    an `i64` mask.
+    Produces an integer mask encoding which active lanes have the predicate set.
+    The caller chooses the integer result type (commonly `i64`).
   }];
 
   let arguments = (ins I1:$predicate);
-  let results = (outs I64:$mask);
+  let results = (outs AnyInteger:$mask);
 
-  let assemblyFormat = "`(` $predicate `)` attr-dict";
+  let assemblyFormat = "$predicate attr-dict `:` type($mask)";
 }
 
 def SimtStep_MaskPushOp : Op<SimtStep_Dialect, "mask_push"> {
