@@ -4,5 +4,5 @@
 void main(uint tid : SV_DispatchThreadID) {
   uint count = WaveActiveCountBits(tid == 0);
   if (count == 0)
-    count  = 1;
+    return;
 }

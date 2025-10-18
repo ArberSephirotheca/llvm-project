@@ -20,6 +20,7 @@
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/IR/OwningOpRef.h"
 
+#include "llvm/ADT/SmallString.h"
 #include "clang/AST/ASTConsumer.h"
 #include "clang/AST/Attr.h"
 #include "clang/AST/Decl.h"
@@ -1295,9 +1296,31 @@ struct EmitInterpreter
       if (!mlir::isa<mlir::IntegerType>(resultType))
         return fail("WaveActiveCountBits expects integer result type");
 
+      mlir::Value count =
+          ctx.builder
+              .create<simt::dialect::WaveCountBitsOp>(
+                  mlirLoc, ctx.builder.getI64Type(), operands[0])
+              .getCount();
+
+      if (count.getType() == resultType)
+        return count;
+
+      auto countType = mlir::cast<mlir::IntegerType>(count.getType());
+      auto desiredType = mlir::cast<mlir::IntegerType>(resultType);
+      unsigned countWidth = countType.getWidth();
+      unsigned desiredWidth = desiredType.getWidth();
+
+      if (desiredWidth == countWidth)
+        return count;
+
+      if (desiredWidth < countWidth)
+        return ctx.builder
+            .create<mlir::arith::TruncIOp>(mlirLoc, resultType, count)
+            .getResult();
+
       return ctx.builder
-          .create<simt::dialect::WaveBallotOp>(mlirLoc, resultType, operands[0])
-          .getMask();
+          .create<mlir::arith::ExtUIOp>(mlirLoc, resultType, count)
+          .getResult();
     }
     case simt_hlsl_import::WaveIntrinsic::GetLaneIndex: {
       if (!operands.empty())
@@ -2677,6 +2700,26 @@ static typename Interp::Value lowerExprInterp(const clang::Expr *expr,
 
   mlir::Location loc = getLocation(expr, ctx);
 
+  if (const auto *boolLit = llvm::dyn_cast<clang::CXXBoolLiteralExpr>(expr)) {
+    auto intType = llvm::dyn_cast<mlir::IntegerType>(type);
+    if (!intType || intType.getWidth() != 1) {
+      signalError(ctx, expr, "boolean literal expects i1 type");
+      return ValueT();
+    }
+    std::string tag = buildIntegerTag(intType);
+    auto src = makeSourceLoc(expr, ctx);
+    auto result = interp.emitConstantInt(boolLit->getValue() ? 1 : 0,
+                                         tag.c_str(), src);
+    if constexpr (!std::is_same_v<typename Interp::Value, mlir::Value>) {
+      mlir::Value mlirConst = ctx.builder.create<mlir::arith::ConstantIntOp>(
+          loc, boolLit->getValue() ? 1 : 0, /*bitwidth=*/1);
+      result.setValue(mlirConst);
+      if (!result.hasSymValue())
+        result.setSym(makeSymValueForType(type));
+    }
+    return result;
+  }
+
   if (const auto *intLit = llvm::dyn_cast<clang::IntegerLiteral>(expr)) {
     if (!mlir::isa<mlir::IntegerType>(type)) {
       signalError(ctx, expr, "integer literal expects integer type");
@@ -3139,7 +3182,9 @@ static typename Interp::Value lowerExprInterp(const clang::Expr *expr,
                                   makeSourceLoc(condOp, ctx));
   }
 
-  signalError(ctx, expr, "unsupported expression lowering");
+  llvm::SmallString<64> message("unsupported expression lowering: ");
+  message += expr->getStmtClassName();
+  signalError(ctx, expr, message);
   return typename Interp::Value();
 }
 

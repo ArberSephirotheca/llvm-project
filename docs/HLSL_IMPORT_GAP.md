@@ -40,7 +40,8 @@ built-in handling.
   - Compatibility wrappers cover the initial wave suite and count helper:
     `WaveActiveAllTrue`, `WaveActiveAnyTrue`, `WaveActiveCountBits`, and
     `WaveGetLaneIndex` now lower to the corresponding `simt_step.wave_*`,
-    maths `ctpop`, and `simt_step.lane_id` operations.
+    `simt_step.wave_count_bits` (with integer truncation/extension as needed),
+    and `simt_step.lane_id` operations.
     `GroupMemoryBarrierWithGroupSync` is accepted for parsing (still lowered to
     a placeholder until the dialect semantics land).
   - Interpreter simulates threadgroups and waves, tracks built-in state, and
