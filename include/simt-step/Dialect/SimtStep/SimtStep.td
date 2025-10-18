@@ -142,6 +142,18 @@ def SimtStep_WaveBallotOp : Op<SimtStep_Dialect, "wave_ballot"> {
   let assemblyFormat = "$predicate attr-dict `:` type($mask)";
 }
 
+def SimtStep_WaveCountBitsOp : Op<SimtStep_Dialect, "wave_count_bits"> {
+  let summary = "Wave-level population count of lanes with predicate true";
+  let description = [{
+    Counts the number of active lanes whose predicate evaluates to true.
+    The result is always an `i64`, matching the default width of the SIMT-Step
+    mask type regardless of the source language's return type.
+  }];
+  let arguments = (ins I1:$predicate);
+  let results = (outs I64:$count);
+  let assemblyFormat = "$predicate attr-dict `:` type($count)";
+}
+
 def SimtStep_MaskPushOp : Op<SimtStep_Dialect, "mask_push"> {
   let summary = "Push an explicit mask onto the execution stack";
   let description = [{
