@@ -37,8 +37,9 @@ int main(int argc, char **argv) {
       llvm::cl::init("cs_6_7"), llvm::cl::cat(toolCategory));
   llvm::cl::opt<bool> normalizeLoopTerminators(
       "normalize-loop-terminators",
-      llvm::cl::desc("Normalize result-producing simt.loop terminators"),
-      llvm::cl::init(true), llvm::cl::cat(toolCategory));
+      llvm::cl::desc(
+          "Preserve simt.normalized.loop_terminators annotations (normalization is always applied)"),
+      llvm::cl::init(false), llvm::cl::cat(toolCategory));
 
   llvm::cl::ParseCommandLineOptions(argc, argv,
                                     "SIMT-Step HLSL importer (compute)\n");
@@ -100,16 +101,19 @@ int main(int argc, char **argv) {
   mlir::ModuleOp module = result.value().get();
 
   mlir::PassManager pm(&context);
-  if (normalizeLoopTerminators) {
-    pm.addNestedPass<mlir::func::FuncOp>(
-        simt::dialect::createNormalizeLoopTerminatorsPass());
-    if (mlir::failed(pm.run(module))) {
-      llvm::errs()
-          << "simt-hlsl-import: failed to normalize loop terminators\n";
-      module.dump();
-      return 1;
-    }
+  pm.enableVerifier(false);
+  pm.addNestedPass<mlir::func::FuncOp>(
+      simt::dialect::createNormalizeLoopTerminatorsPass());
+  if (mlir::failed(pm.run(module))) {
+    llvm::errs() << "simt-hlsl-import: failed to normalize loop terminators\n";
+    module.dump();
+    return 1;
   }
+
+  if (!normalizeLoopTerminators)
+    module.walk([](mlir::Operation *op) {
+      op->removeAttr("simt.normalized.loop_terminators");
+    });
 
   if (failed(module.verify())) {
     llvm::errs() << "simt-hlsl-import: generated IR failed to verify\n";

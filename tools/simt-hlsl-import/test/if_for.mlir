@@ -1,20 +1,20 @@
-// MLIR-LABEL: func.func @main
-// MLIR: %[[COND:.+]] = arith.cmpi eq
-// MLIR: %[[IF:.+]]:2 = simt_step.if %[[COND]]
-// MLIR-SAME: -> (i32)
-// MLIR:   %[[LOOP:.+]]:2 = simt_step.loop
-// MLIR:     simt_step.condition
-// MLIR:     simt_step.yield
-// MLIR:   simt_step.yield %[[LOOP]]#0
-// MLIR:   simt_step.yield %c0_i32
+// MLIR-LABEL: module {
+// MLIR:   func.func @main(%[[ARG0:.*]]: i32)
+// MLIR:     %[[DISPATCH:.*]] = simt_step.dispatch_thread_id : i32
+// MLIR:     %[[COND:.*]] = arith.cmpi eq
+// MLIR:     %[[IF:.*]] = "simt_step.if"(%[[COND]])
+// MLIR:       "simt_step.loop"
+// MLIR:       "simt_step.yield"
+
 module {
   func.func @main(%arg0: i32) attributes {simt.num_threads = array<i64: 1, 1, 1>} {
-    %0 = "simt_step.dispatch_thread_id"() : () -> i32
+    %0 = simt_step.dispatch_thread_id : i32
     %c0_i32 = arith.constant 0 : i32
     %c0_i32_0 = arith.constant 0 : i32
     %1 = arith.cmpi eq, %c0_i32, %c0_i32_0 : i32
     %2 = "simt_step.if"(%1) ({
-      %3:2 = "simt_step.loop"(%c0_i32, %c0_i32) ({
+      %c0_i32_1 = arith.constant 0 : i32
+      %3:2 = "simt_step.loop"(%c0_i32, %c0_i32_1) ({
       ^bb0(%arg1: i32, %arg2: i32):
         %c4_i32 = arith.constant 4 : i32
         %4 = arith.cmpi slt, %arg2, %c4_i32 : i32

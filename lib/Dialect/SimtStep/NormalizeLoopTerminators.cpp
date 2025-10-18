@@ -40,7 +40,7 @@ static std::optional<ExitKind> classifyTerminator(mlir::Operation *op) {
   return std::nullopt;
 }
 
-static std::optional<BranchInfo> analyzeBranch(mlir::Region &region,
+[[maybe_unused]] static std::optional<BranchInfo> analyzeBranch(mlir::Region &region,
                                                unsigned resultCount) {
   if (region.empty())
     return std::nullopt;
@@ -139,6 +139,12 @@ public:
     if (worklist.empty())
       return;
 
+    // Temporary design choice: disable the staging rewrite to keep the importer
+    // output in its original single-stage form.  The previous implementation is
+    // retained below for reference.
+    return;
+
+#if 0
     mlir::IRRewriter rewriter(&getContext());
 
     for (simt::dialect::IfOp ifOp : worklist) {
@@ -273,6 +279,7 @@ public:
 
       rewriter.replaceOp(ifOp, tupleValues);
     }
+#endif
   }
 };
 
