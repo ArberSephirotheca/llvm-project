@@ -12,7 +12,6 @@
 - `simt_step.wave_all` – returns an `i1` indicating whether all active lanes satisfy the predicate.
 - `simt_step.wave_any` – returns an `i1` indicating whether any active lane satisfies the predicate.
 - `simt_step.wave_ballot` – produces an integer mask (`i64`) identifying lanes with `true` predicate values. Future revisions will return `simt_step.mask`.
-- `simt_step.wave_count_bits` – returns an `i64` counting the active lanes for which the predicate is `true`.
 
 ### Synchronization & state
 - `simt_step.barrier` – synchronization barrier with optional `scope` / `memsem` enums.

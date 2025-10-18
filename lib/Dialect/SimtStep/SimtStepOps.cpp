@@ -150,42 +150,6 @@ void GroupIndexOp::print(mlir::OpAsmPrinter &printer) {
   printStateQueryOp(getOperation(), printer);
 }
 
-mlir::ParseResult WaveBallotOp::parse(mlir::OpAsmParser &parser,
-                                      mlir::OperationState &state) {
-  mlir::OpAsmParser::UnresolvedOperand predicate;
-  mlir::Type maskType;
-
-  if (parser.parseLParen() || parser.parseOperand(predicate) ||
-      parser.parseRParen())
-    return mlir::failure();
-
-  if (parser.parseOptionalAttrDict(state.attributes))
-    return mlir::failure();
-
-  if (parser.parseColonType(maskType))
-    return mlir::failure();
-
-  auto intType = llvm::dyn_cast<mlir::IntegerType>(maskType);
-  if (!intType)
-    return parser.emitError(parser.getCurrentLocation())
-           << "mask type must be an integer";
-
-  mlir::Type predType = parser.getBuilder().getI1Type();
-  if (parser.resolveOperand(predicate, predType, state.operands))
-    return mlir::failure();
-
-  state.addTypes(maskType);
-  return mlir::success();
-}
-
-void WaveBallotOp::print(mlir::OpAsmPrinter &printer) {
-  printer << '(';
-  printer.printOperand(getPredicate());
-  printer << ')';
-  printer << " : ";
-  printer.printType(getMask().getType());
-}
-
 static void addResultTypeFromResource(mlir::OpBuilder &builder,
                                       mlir::OperationState &state,
                                       mlir::Value resource) {
