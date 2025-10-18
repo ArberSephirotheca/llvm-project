@@ -28,9 +28,6 @@ class BlockOp;
 class BranchOp;
 class CondBranchOp;
 class ReturnOp;
-class MaskPushOp;
-class MaskPopOp;
-class MaskMergeOp;
 } // namespace simt::structured
 
 namespace simt::conversion {
@@ -50,17 +47,68 @@ public:
   mlir::LogicalResult build();
 
 private:
+  /// Lightweight expression tree modelling lane masks.  Mask expressions are
+  /// built during analysis and propagated alongside the structured CFG so we
+  /// can reason about dynamic blocks without relying on push/pop scaffolding.
+  struct MaskExpr {
+    enum class Kind : uint8_t { Invalid, Full, Empty, Value, And, Or, Not };
+
+    struct Node {
+      Kind kind = Kind::Invalid;
+      mlir::Value value;
+      std::shared_ptr<const Node> lhs;
+      std::shared_ptr<const Node> rhs;
+    };
+
+    MaskExpr() = default;
+    explicit MaskExpr(std::shared_ptr<const Node> node) : node(std::move(node)) {}
+
+    static MaskExpr full();
+    static MaskExpr empty();
+    static MaskExpr value(mlir::Value v);
+    static MaskExpr makeAnd(const MaskExpr &lhs, const MaskExpr &rhs);
+    static MaskExpr makeOr(const MaskExpr &lhs, const MaskExpr &rhs);
+    static MaskExpr makeNot(const MaskExpr &arg);
+
+    /// Returns a simplified version of the expression (constant folds basic
+    /// cases).
+  MaskExpr simplify() const;
+
+    bool isValid() const { return static_cast<bool>(node); }
+    Kind getKind() const { return node ? node->kind : Kind::Invalid; }
+
+    mlir::Value getValue() const { return node ? node->value : mlir::Value(); }
+    const MaskExpr getLHS() const;
+    const MaskExpr getRHS() const;
+
+    bool equals(const MaskExpr &other) const;
+    bool operator==(const MaskExpr &other) const { return equals(other); }
+    bool operator!=(const MaskExpr &other) const { return !equals(other); }
+
+    std::shared_ptr<const Node> node;
+  };
+
   struct BlockInfo;
   struct EdgeInfo;
   struct IfInfo;
   struct LoopInfo;
   struct SwitchInfo;
 
+  MaskExpr materializeMaskExpr(mlir::Value &result, BlockInfo &current,
+                              const MaskExpr &expr, mlir::OpBuilder &builder);
+  mlir::Value localizeOperandIntoBlock(mlir::Value value, BlockInfo &current,
+                                       mlir::OpBuilder &builder);
+
+  enum class PayloadKind : uint8_t { Unknown, Result, Carried, Mask };
+
   struct EdgeInfo {
     BlockInfo *source = nullptr;
     BlockInfo *dest = nullptr;
     llvm::SmallVector<mlir::Value, 8> payload;
+    llvm::SmallVector<PayloadKind, 8> payloadKinds;
+    llvm::SmallVector<mlir::Value, 4> control;
     llvm::SmallVector<mlir::Value, 4> maskValues;
+    MaskExpr guardMask;
     enum Kind { Plain, ConditionalTrue, ConditionalFalse, LoopBackEdge } kind =
         Plain;
     mlir::Value condition;
@@ -75,10 +123,16 @@ private:
     BlockInfo *thenBlock = nullptr;
     BlockInfo *elseBlock = nullptr;
     BlockInfo *mergeBlock = nullptr;
+    mlir::Block *mergeOriginal = nullptr;
     llvm::SmallVector<mlir::BlockArgument, 4> mergeArgs;
     llvm::SmallVector<mlir::Type, 4> resultTypes;
     llvm::SmallVector<mlir::Value, 4> results;
     mlir::Value condition;
+    llvm::SmallVector<mlir::Value, 4> thenYieldValues;
+    llvm::SmallVector<mlir::Value, 4> elseYieldValues;
+    mlir::Operation *thenYieldOp = nullptr;
+    mlir::Operation *elseYieldOp = nullptr;
+    bool elseImplicitYield = false;
   };
 
   struct LoopInfo {
@@ -122,6 +176,9 @@ private:
     llvm::SmallVector<mlir::BlockArgument, 4> blockArgs;
     llvm::SmallVector<mlir::Operation *, 4> controlOps;
 
+    MaskExpr incomingMask;
+    bool maskKnown = false;
+
     mlir::Operation *originalTerminator = nullptr;
 
     simt::structured::BlockOp structuredOp;
@@ -129,17 +186,27 @@ private:
     mlir::BlockArgument structuredMaskArg;
     mlir::Value currentMask;
     llvm::SmallVector<mlir::BlockArgument, 4> structuredArgs;
+    llvm::SmallVector<mlir::BlockArgument, 4> payloadArgs;
+    llvm::SmallVector<PayloadKind, 8> payloadKinds;
+    mlir::Operation *owningIf = nullptr;
+    unsigned payloadBlockArgOffset = 0;
 
     mlir::Block *mergeTarget = nullptr;
     mlir::Block *continueTarget = nullptr;
 
+    bool isMergeBlock = false;
+    llvm::SmallVector<mlir::Value, 4> capturedInputs;
+    llvm::SmallVector<mlir::BlockArgument, 4> capturedArgs;
+    llvm::DenseMap<mlir::Value, unsigned> capturedInputIndex;
+
     bool requestsMaskPush = false;
     bool requestsMaskPop = false;
     std::string symbolName;
-    llvm::SmallVector<const EdgeInfo *, 4> outgoingEdges;
+    llvm::SmallVector<unsigned, 4> outgoingEdges;
   };
 
   mlir::LogicalResult analyseBlocks();
+  mlir::LogicalResult computeMasks();
   mlir::LogicalResult computePayloads();
   mlir::LogicalResult enumerateEdges();
   mlir::LogicalResult emitStructuredBlocks();
@@ -147,6 +214,24 @@ private:
 
   mlir::LogicalResult emitStructuredBlock(BlockInfo &info);
   mlir::LogicalResult emitStructuredTerminator(BlockInfo &source);
+  mlir::LogicalResult emitStructuredIf(BlockInfo &header, IfInfo &info,
+                                       mlir::OpBuilder &builder);
+  mlir::LogicalResult emitStructuredLoop(BlockInfo &enclosing, LoopInfo &info,
+                                         mlir::OpBuilder &builder);
+  void normalizeEdgeForMerge(EdgeInfo &edge, BlockInfo &merge);
+  static mlir::Block *getSuccessorBody(const BlockInfo &succ);
+  static unsigned getDataArgCount(const BlockInfo &succ);
+  static mlir::BlockArgument getDataArgAt(const BlockInfo &succ,
+                                          unsigned index);
+  mlir::BlockArgument getCapturedArg(BlockInfo &succ, mlir::Value value);
+  void appendCapturedInputs(EdgeInfo &edge);
+  bool getSourceTupleForEdge(EdgeInfo &edge,
+                             llvm::SmallVectorImpl<mlir::Value> &values);
+  void seedEdgePayloadFromSource(EdgeInfo &edge);
+  void computeCapturedInputs(BlockInfo &info);
+  mlir::LogicalResult materializeEdgeOperands(EdgeInfo &edge, BlockInfo *succ,
+                                              llvm::SmallVectorImpl<mlir::Value> &operands,
+                                              mlir::Operation *context);
   mlir::LogicalResult stabilisePayloadSeeds();
 
   /// Helpers used while analysing structured control ops.
@@ -172,13 +257,14 @@ private:
   mlir::LogicalResult materialiseMaskExit(BlockInfo &info);
 
   BlockInfo &ensureLoopMergeBlock(LoopInfo &info, mlir::Operation *loopOp);
+  BlockInfo &ensureIfMergeBlock(IfInfo &info, mlir::Operation *ifOp);
 
   mlir::FunctionOpInterface func;
   llvm::SmallVector<mlir::Block *> blockOrder;
 
   /// Mapping from original blocks to collected metadata.
   llvm::DenseMap<mlir::Block *, BlockInfo> blockInfos;
-  llvm::SmallVector<EdgeInfo> edges;
+  llvm::SmallVector<EdgeInfo, 4> edges;
 
   /// Scratch storage used while cloning ops into structured blocks.
   std::unique_ptr<mlir::IRMapping> mapper;

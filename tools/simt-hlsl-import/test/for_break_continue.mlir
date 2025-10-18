@@ -1,32 +1,52 @@
-// MLIR-LABEL: "builtin.module"()
-// MLIR:   "func.func"() <{function_type = (i32) -> (), sym_name = "main"}>
-// MLIR: %[[MASK:.*]] = "simt_step.active_mask"() : () -> i64
-// MLIR: %{{.*}} = "simt_step.dispatch_thread_id"() : () -> i32
-// MLIR: %[[ACC_INIT:.*]] = "arith.constant"() <{value = 0 : i32}> : () -> i32
-// MLIR: %[[I_INIT:.*]] = "arith.constant"() <{value = 0 : i32}> : () -> i32
-// MLIR: %[[LOOP:.*]]:2 = "simt_step.loop"(%[[ACC_INIT]], %[[I_INIT]]) ({
-// MLIR:   ^bb0(%[[ACC_PH:.*]]: i32, %[[I_PH:.*]]: i32):
-// MLIR:     %[[LIMIT:.*]] = "arith.constant"() <{value = 4 : i32}> : () -> i32
-// MLIR:     %[[COND:.*]] = "arith.cmpi"(%[[I_PH]], %[[LIMIT]]) <{predicate = 2 : i64}> : (i32, i32) -> i1
-// MLIR:     "simt_step.condition"(%[[COND]], %[[ACC_PH]], %[[I_PH]]) : (i1, i32, i32) -> ()
-// MLIR: }, {
-// MLIR:   ^bb0(%[[ACC_BODY:.*]]: i32, %[[I_BODY:.*]]: i32):
-// MLIR:     %[[ONE:.*]] = "arith.constant"() <{value = 1 : i32}> : () -> i32
-// MLIR:     %[[IS_CONT:.*]] = "arith.cmpi"(%[[I_BODY]], %[[ONE]]) <{predicate = 0 : i64}> : (i32, i32) -> i1
-// MLIR:     %[[CONT:.*]]:2 = "simt_step.if"(%[[IS_CONT]]) ({
-// MLIR:       "simt_step.continue"(%[[ACC_BODY]], %[[I_BODY]]) : (i32, i32) -> ()
-// MLIR:     }, {
-// MLIR:       "simt_step.yield"(%[[ACC_BODY]], %[[I_BODY]]) : (i32, i32) -> ()
-// MLIR:     }) : (i1) -> (i32, i32)
-// MLIR:     %[[THREE:.*]] = "arith.constant"() <{value = 3 : i32}> : () -> i32
-// MLIR:     %[[IS_BREAK:.*]] = "arith.cmpi"(%[[CONT]]#1, %[[THREE]]) <{predicate = 0 : i64}> : (i32, i32) -> i1
-// MLIR:     %[[AFTER_BREAK:.*]]:2 = "simt_step.if"(%[[IS_BREAK]]) ({
-// MLIR:       "simt_step.break"(%[[CONT]]#0, %[[CONT]]#1) : (i32, i32) -> ()
-// MLIR:     }, {
-// MLIR:       "simt_step.yield"(%[[CONT]]#0, %[[CONT]]#1) : (i32, i32) -> ()
-// MLIR:     }) : (i1) -> (i32, i32)
-// MLIR:     %[[ACC_NEXT:.*]] = "arith.addi"(%[[AFTER_BREAK]]#0, %[[AFTER_BREAK]]#1) {{.*}}
-// MLIR:     %[[I_NEXT:.*]] = "arith.addi"(%[[AFTER_BREAK]]#1, %{{.*}}) {{.*}}
-// MLIR:     "simt_step.yield"(%[[ACC_NEXT]], %[[I_NEXT]]) : (i32, i32) -> ()
-// MLIR: }) : (i32, i32) -> (i32, i32)
-// MLIR:   "func.return"() : () -> ()
+// MLIR-LABEL: module {
+// MLIR:   func.func @main(%[[ARG0:.*]]: i32)
+// MLIR:     %[[DISPATCH:.*]] = simt_step.dispatch_thread_id : i32
+// MLIR:     %[[INIT_ACC:.*]] = arith.constant 0 : i32
+// MLIR:     %[[INIT_I:.*]] = arith.constant 0 : i32
+// MLIR:     %[[LOOP:.*]]:2 = "simt_step.loop"(%[[INIT_ACC]], %[[INIT_I]]) ({
+// MLIR:   ^bb0(%[[ACC:.*]]: i32, %[[I:.*]]: i32):
+// MLIR:     %[[ONE:.*]] = arith.constant 1 : i32
+// MLIR:     %[[CONT_IF:.*]]:2 = "simt_step.if"(
+// MLIR:       "simt_step.continue"
+// MLIR:     %[[THREE:.*]] = arith.constant 3 : i32
+// MLIR:     %[[BREAK_IF:.*]]:2 = "simt_step.if"(
+// MLIR:       "simt_step.break"
+// MLIR:     "simt_step.yield"
+// MLIR:   }) : (i32, i32) -> (i32, i32)
+
+module {
+  func.func @main(%arg0: i32) attributes {simt.num_threads = array<i64: 1, 1, 1>} {
+    %0 = simt_step.dispatch_thread_id : i32
+    %c0_i32 = arith.constant 0 : i32
+    %c0_i32_0 = arith.constant 0 : i32
+    %1:2 = "simt_step.loop"(%c0_i32, %c0_i32_0) ({
+    ^bb0(%arg1: i32, %arg2: i32):
+      %c4_i32 = arith.constant 4 : i32
+      %2 = arith.cmpi slt, %arg2, %c4_i32 : i32
+      "simt_step.condition"(%2, %arg1, %arg2) : (i1, i32, i32) -> ()
+    }, {
+    ^bb0(%arg1: i32, %arg2: i32):
+      %c1_i32 = arith.constant 1 : i32
+      %2 = arith.cmpi eq, %arg2, %c1_i32 : i32
+      %3:2 = "simt_step.if"(%2) ({
+        %c1_i32_2 = arith.constant 1 : i32
+        %8 = arith.addi %arg2, %c1_i32_2 : i32
+        "simt_step.continue"(%arg1, %8) : (i32, i32) -> ()
+      }, {
+        "simt_step.yield"(%arg1, %arg2) : (i32, i32) -> ()
+      }) : (i1) -> (i32, i32)
+      %c3_i32 = arith.constant 3 : i32
+      %4 = arith.cmpi eq, %3#1, %c3_i32 : i32
+      %5:2 = "simt_step.if"(%4) ({
+        "simt_step.break"(%3#0, %3#1) : (i32, i32) -> ()
+      }, {
+        "simt_step.yield"(%3#0, %3#1) : (i32, i32) -> ()
+      }) : (i1) -> (i32, i32)
+      %6 = arith.addi %5#0, %5#1 : i32
+      %c1_i32_1 = arith.constant 1 : i32
+      %7 = arith.addi %5#1, %c1_i32_1 : i32
+      "simt_step.yield"(%6, %7) : (i32, i32) -> ()
+    }) : (i32, i32) -> (i32, i32)
+    func.return
+  }
+}

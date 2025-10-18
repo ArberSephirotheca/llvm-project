@@ -132,15 +132,26 @@ def SimtStep_WaveAnyOp : Op<SimtStep_Dialect, "wave_any"> {
 def SimtStep_WaveBallotOp : Op<SimtStep_Dialect, "wave_ballot"> {
   let summary = "Wave-level ballot producing a bitmask of lanes with predicate true";
   let description = [{
-    Produces an integer mask (typically 64-bit) encoding which active lanes have
-    the predicate set. The operand is an `i1` per-lane predicate, the result is
-    an `i64` mask.
+    Produces an integer mask encoding which active lanes have the predicate set.
+    The caller chooses the integer result type (commonly `i64`).
   }];
 
   let arguments = (ins I1:$predicate);
-  let results = (outs I64:$mask);
+  let results = (outs AnyInteger:$mask);
 
-  let assemblyFormat = "`(` $predicate `)` attr-dict";
+  // let assemblyFormat = "`(` $predicate `)` attr-dict `:` type($mask)";
+}
+
+def SimtStep_WaveCountBitsOp : Op<SimtStep_Dialect, "wave_count_bits"> {
+  let summary = "Wave-level population count of lanes with predicate true";
+  let description = [{
+    Counts the number of active lanes whose predicate evaluates to true.
+    The result is always an `i64`, matching the default width of the SIMT-Step
+    mask type regardless of the source language's return type.
+  }];
+  let arguments = (ins I1:$predicate);
+  let results = (outs I32:$count);
+  // let assemblyFormat = "$predicate attr-dict";
 }
 
 def SimtStep_MaskPushOp : Op<SimtStep_Dialect, "mask_push"> {
@@ -422,12 +433,14 @@ def SimtStep_YieldOp : Op<SimtStep_Dialect, "yield",
 }
 
 def SimtStep_IfOp : Op<SimtStep_Dialect, "if",
-    [SingleBlockImplicitTerminator<"YieldOp">,
-     NoRegionArguments]> {
+    [NoRegionArguments]> {
   let summary = "SIMT if-then-else";
   let description = [{
     Control flow construct with optional else region producing SSA results.
-    Each region terminates with `simt_step.yield` to forward per-lane values.
+    Each region contains a single block. Regions normally terminate with
+    `simt_step.yield` to forward per-lane values. When the `if` is nested
+    inside a `simt_step.loop`, regions are also permitted to terminate with
+    `simt_step.continue` or `simt_step.break`, allowing early loop exits.
   }];
 
   let arguments = (ins I1:$condition);
@@ -476,15 +489,17 @@ def SimtStep_LoopOp : Op<SimtStep_Dialect, "loop",
 }
 
 def SimtStep_BreakOp : Op<SimtStep_Dialect, "break",
-    [Terminator, HasParent<"LoopOp">]> {
+    [Terminator]> {
   let summary = "Structured break from simt.loop";
   let arguments = (ins Variadic<AnyType>:$results);
+  let hasVerifier = 1;
 }
 
 def SimtStep_ContinueOp : Op<SimtStep_Dialect, "continue",
-    [Terminator, HasParent<"LoopOp">]> {
+    [Terminator]> {
   let summary = "Structured continue within simt.loop";
   let arguments = (ins Variadic<AnyType>:$results);
+  let hasVerifier = 1;
 }
 
 def SimtStep_BarrierOp : Op<SimtStep_Dialect, "barrier"> {
@@ -576,15 +591,15 @@ def SimtStep_LaneIdOp : Op<SimtStep_Dialect, "lane_id"> {
   let assemblyFormat = "attr-dict";
 }
 
-def SimtStep_ActiveMaskOp : Op<SimtStep_Dialect, "active_mask"> {
-  let summary = "Expose the current active lane mask";
-  let description = [{
-    Returns an `i64` mask representing currently active lanes. Planned future
-    work will make the bit-width configurable via attributes.
-  }];
+// def SimtStep_ActiveMaskOp : Op<SimtStep_Dialect, "active_mask"> {
+//   let summary = "Expose the current active lane mask";
+//   let description = [{
+//     Returns an `i64` mask representing currently active lanes. Planned future
+//     work will make the bit-width configurable via attributes.
+//   }];
 
-  let results = (outs I64:$mask);
-}
+//   let results = (outs I64:$mask);
+// }
 
 def SimtStep_MemLoadOp : Op<SimtStep_Dialect, "mem_load"> {
   let summary = "Load a value from memory";

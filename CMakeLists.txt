@@ -58,6 +58,43 @@ if (NOT LLVM_ENABLE_RTTI)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-rtti")
 endif()
 
+find_program(CLANG_FORMAT_EXE NAMES clang-format)
+if (CLANG_FORMAT_EXE)
+    set(_format_search_dirs
+        ${PROJECT_SOURCE_DIR}/include
+        ${PROJECT_SOURCE_DIR}/lib
+        ${PROJECT_SOURCE_DIR}/tools
+        ${PROJECT_SOURCE_DIR}/test
+        ${PROJECT_SOURCE_DIR}/docs
+    )
+    set(_format_extensions h hh hpp hxx c cc cpp cxx cu)
+    set(FORMAT_FILES)
+    foreach(_dir IN LISTS _format_search_dirs)
+        if (EXISTS "${_dir}")
+            foreach(_ext IN LISTS _format_extensions)
+                file(GLOB_RECURSE _format_tmp CONFIGURE_DEPENDS
+                    "${_dir}/*.${_ext}")
+                list(APPEND FORMAT_FILES ${_format_tmp})
+            endforeach()
+        endif()
+    endforeach()
+    list(REMOVE_DUPLICATES FORMAT_FILES)
+    if (FORMAT_FILES)
+        add_custom_target(format
+            COMMAND ${CMAKE_COMMAND}
+                -DCLANG_FORMAT=${CLANG_FORMAT_EXE}
+                -DFILES=${FORMAT_FILES}
+                -P ${PROJECT_SOURCE_DIR}/cmake/run_clang_format.cmake
+            WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+            COMMENT "Running clang-format on project sources"
+        )
+    else()
+        message(STATUS "No source files found for clang-format target")
+    endif()
+else()
+    message(STATUS "clang-format not found; 'format' target disabled")
+endif()
+
 add_subdirectory(lib)
 add_subdirectory(tools)
 add_subdirectory(test)

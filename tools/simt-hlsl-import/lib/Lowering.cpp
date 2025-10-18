@@ -13,12 +13,14 @@
 #include "simt-hlsl-import/LoopScopeSupport.h"
 #include "simt-hlsl-import/LoweringAlgebra.h"
 #include "mlir/IR/BuiltinAttributes.h"
+#include "mlir/IR/BuiltinDialect.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/DialectRegistry.h"
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/IR/OwningOpRef.h"
 
+#include "llvm/ADT/SmallString.h"
 #include "clang/AST/ASTConsumer.h"
 #include "clang/AST/Attr.h"
 #include "clang/AST/Decl.h"
@@ -335,8 +337,10 @@ struct EmitInterpreter
     LoweringContext &thenContext() {
       if (!thenCtxStorage) {
         mlir::Region &region = ifOp.getThenRegion();
+        mlir::Block &block = region.front();
+        block.clear();
         thenBuilder.emplace(parent.builder.getContext());
-        thenBuilder->setInsertionPointToEnd(&region.front());
+        thenBuilder->setInsertionPointToEnd(&block);
         thenCtxStorage.emplace(*thenBuilder, loc, parent.returnType,
                                parent.errorMessage, parent.sourceManager);
         cloneContextState(parent, *thenCtxStorage);
@@ -351,8 +355,10 @@ struct EmitInterpreter
         llvm::report_fatal_error("elseContext requested but no else branch");
       if (!elseCtxStorage) {
         mlir::Region &region = ifOp.getElseRegion();
+        mlir::Block &block = region.front();
+        block.clear();
         elseBuilder.emplace(parent.builder.getContext());
-        elseBuilder->setInsertionPointToEnd(&region.front());
+        elseBuilder->setInsertionPointToEnd(&block);
         elseCtxStorage.emplace(*elseBuilder, loc, parent.returnType,
                                parent.errorMessage, parent.sourceManager);
         cloneContextState(parent, *elseCtxStorage);
@@ -1287,39 +1293,29 @@ struct EmitInterpreter
       if (!resultType)
         return fail("WaveActiveCountBits requires result type");
 
-      mlir::Value mask =
+      if (!mlir::isa<mlir::IntegerType>(resultType))
+        return fail("WaveActiveCountBits expects integer result type");
+
+      mlir::Value count =
           ctx.builder
-              .create<simt::dialect::WaveBallotOp>(mlirLoc,
-                                                   ctx.builder.getI64Type(),
-                                                   operands[0])
-              .getMask();
-      mlir::Value pop =
-          ctx.builder.create<mlir::math::CtPopOp>(mlirLoc, mask).getResult();
+              .create<simt::dialect::WaveCountBitsOp>(
+                  mlirLoc, ctx.builder.getI32Type(), operands[0])
+              .getCount();
 
-      if (pop.getType() == resultType)
-        return pop;
+      if (count.getType() == resultType)
+        return count;
 
-      if (auto intType = llvm::dyn_cast<mlir::IntegerType>(resultType)) {
-        auto popInt = llvm::cast<mlir::IntegerType>(pop.getType());
-        unsigned targetWidth = intType.getWidth();
-        unsigned sourceWidth = popInt.getWidth();
-        if (targetWidth == sourceWidth)
-          return pop;
-        if (targetWidth < sourceWidth)
-          return ctx.builder
-              .create<mlir::arith::TruncIOp>(mlirLoc, resultType, pop)
-              .getResult();
+      auto countType = mlir::cast<mlir::IntegerType>(count.getType());
+      auto desiredType = mlir::cast<mlir::IntegerType>(resultType);
+
+      if (desiredType.getWidth() < countType.getWidth())
         return ctx.builder
-            .create<mlir::arith::ExtUIOp>(mlirLoc, resultType, pop)
-            .getResult();
-      }
-
-      if (mlir::isa<mlir::IndexType>(resultType))
-        return ctx.builder
-            .create<mlir::arith::IndexCastOp>(mlirLoc, resultType, pop)
+            .create<mlir::arith::TruncIOp>(mlirLoc, resultType, count)
             .getResult();
 
-      return fail("WaveActiveCountBits unsupported result type");
+      return ctx.builder
+          .create<mlir::arith::ExtUIOp>(mlirLoc, resultType, count)
+          .getResult();
     }
     case simt_hlsl_import::WaveIntrinsic::GetLaneIndex: {
       if (!operands.empty())
@@ -1607,69 +1603,109 @@ struct AnalysisInterpreter
   }
   Value emitArithmetic(simt_hlsl_import::ArithOp op, Value lhs, Value rhs,
                        simt_hlsl_import::SourceLoc loc) {
-    mlir::Location mlirLoc = resolveLoc(loc, ctx);
-
-    if (auto intType = mlir::dyn_cast<mlir::IntegerType>(lhs.getType())) {
-      switch (op) {
-      case simt_hlsl_import::ArithOp::Add:
-        return ctx.builder.create<mlir::arith::AddIOp>(mlirLoc, lhs, rhs)
-            .getResult();
-      case simt_hlsl_import::ArithOp::Sub:
-        return ctx.builder.create<mlir::arith::SubIOp>(mlirLoc, lhs, rhs)
-            .getResult();
-      case simt_hlsl_import::ArithOp::Mul:
-        return ctx.builder.create<mlir::arith::MulIOp>(mlirLoc, lhs, rhs)
-            .getResult();
-      case simt_hlsl_import::ArithOp::Div:
-        return ctx.builder.create<mlir::arith::DivSIOp>(mlirLoc, lhs, rhs)
-            .getResult();
-      case simt_hlsl_import::ArithOp::Rem:
-        return ctx.builder.create<mlir::arith::RemSIOp>(mlirLoc, lhs, rhs)
-            .getResult();
-      case simt_hlsl_import::ArithOp::Neg: {
-        auto zero = ctx.builder.create<mlir::arith::ConstantIntOp>(
-            mlirLoc, 0, intType.getWidth());
-        return ctx.builder
-            .create<mlir::arith::SubIOp>(mlirLoc, zero.getResult(), lhs)
-            .getResult();
-      }
-      case simt_hlsl_import::ArithOp::BitAnd:
-        return ctx.builder.create<mlir::arith::AndIOp>(mlirLoc, lhs, rhs)
-            .getResult();
-      case simt_hlsl_import::ArithOp::BitOr:
-        return ctx.builder.create<mlir::arith::OrIOp>(mlirLoc, lhs, rhs)
-            .getResult();
-      case simt_hlsl_import::ArithOp::BitXor:
-        return ctx.builder.create<mlir::arith::XOrIOp>(mlirLoc, lhs, rhs)
-            .getResult();
-      }
+    mlir::Type type = lhs.getType();
+    if (!type)
+      type = rhs.getType();
+    if (!type) {
+      signalError(ctx, loc, "arithmetic requires typed operands");
+      return {};
     }
 
-    if (mlir::isa<mlir::FloatType>(lhs.getType())) {
+    Value result;
+    result.setTypeHint(type);
+    result.setSym(makeSymValueForType(type));
+
+    auto foldInt = [&](int64_t lhsVal,
+                       int64_t rhsVal) -> std::optional<int64_t> {
+      auto applyBinary = [&](auto fn) -> int64_t {
+        return fn(lhsVal, rhsVal);
+      };
       switch (op) {
       case simt_hlsl_import::ArithOp::Add:
-        return ctx.builder.create<mlir::arith::AddFOp>(mlirLoc, lhs, rhs)
-            .getResult();
+        return applyBinary(std::plus<>());
       case simt_hlsl_import::ArithOp::Sub:
-        return ctx.builder.create<mlir::arith::SubFOp>(mlirLoc, lhs, rhs)
-            .getResult();
+        return applyBinary(std::minus<>());
       case simt_hlsl_import::ArithOp::Mul:
-        return ctx.builder.create<mlir::arith::MulFOp>(mlirLoc, lhs, rhs)
-            .getResult();
+        return applyBinary(std::multiplies<>());
       case simt_hlsl_import::ArithOp::Div:
-        return ctx.builder.create<mlir::arith::DivFOp>(mlirLoc, lhs, rhs)
-            .getResult();
+        if (rhsVal == 0)
+          return std::nullopt;
+        return applyBinary(std::divides<>());
       case simt_hlsl_import::ArithOp::Rem:
-        return ctx.builder.create<mlir::arith::RemFOp>(mlirLoc, lhs, rhs)
-            .getResult();
+        if (rhsVal == 0)
+          return std::nullopt;
+        return lhsVal % rhsVal;
+      case simt_hlsl_import::ArithOp::BitAnd:
+        return lhsVal & rhsVal;
+      case simt_hlsl_import::ArithOp::BitOr:
+        return lhsVal | rhsVal;
+      case simt_hlsl_import::ArithOp::BitXor:
+        return lhsVal ^ rhsVal;
       case simt_hlsl_import::ArithOp::Neg:
-        return ctx.builder.create<mlir::arith::NegFOp>(mlirLoc, lhs)
-            .getResult();
+        (void)rhsVal;
+        return -lhsVal;
+      }
+      return std::nullopt;
+    };
+
+    if (auto intType = mlir::dyn_cast<mlir::IntegerType>(type)) {
+      auto lhsConst = lhs.getConstantInt();
+      auto rhsConst = rhs.getConstantInt();
+      if (op == simt_hlsl_import::ArithOp::Neg) {
+        if (!lhsConst)
+          lhsConst = rhsConst;
+        if (lhsConst)
+          result.setConstantInt(-*lhsConst);
+        return result;
+      }
+
+      if (lhsConst && rhsConst)
+        if (auto folded = foldInt(*lhsConst, *rhsConst))
+          result.setConstantInt(*folded);
+      return result;
+    }
+
+    if (auto floatType = mlir::dyn_cast<mlir::FloatType>(type)) {
+      auto lhsConst = lhs.getConstantFloat();
+      auto rhsConst = rhs.getConstantFloat();
+      auto applyBinary = [&](auto fn) -> std::optional<double> {
+        if (!lhsConst || !rhsConst)
+          return std::nullopt;
+        return fn(*lhsConst, *rhsConst);
+      };
+
+      switch (op) {
+      case simt_hlsl_import::ArithOp::Add:
+        if (auto folded = applyBinary(std::plus<>()))
+          result.setConstantFloat(*folded);
+        break;
+      case simt_hlsl_import::ArithOp::Sub:
+        if (auto folded = applyBinary(std::minus<>()))
+          result.setConstantFloat(*folded);
+        break;
+      case simt_hlsl_import::ArithOp::Mul:
+        if (auto folded = applyBinary(std::multiplies<>()))
+          result.setConstantFloat(*folded);
+        break;
+      case simt_hlsl_import::ArithOp::Div:
+        if (rhsConst && *rhsConst == 0.0)
+          break;
+        if (auto folded = applyBinary(std::divides<>()))
+          result.setConstantFloat(*folded);
+        break;
+      case simt_hlsl_import::ArithOp::Rem:
       case simt_hlsl_import::ArithOp::BitAnd:
       case simt_hlsl_import::ArithOp::BitOr:
       case simt_hlsl_import::ArithOp::BitXor:
         break;
+      case simt_hlsl_import::ArithOp::Neg:
+        if (lhsConst)
+          result.setConstantFloat(-*lhsConst);
+        else if (rhsConst)
+          result.setConstantFloat(-*rhsConst);
+        break;
       }
+      return result;
     }
 
     signalError(ctx, loc, "unsupported arithmetic operation for type");
@@ -1677,59 +1713,74 @@ struct AnalysisInterpreter
   }
   Value emitCompare(simt_hlsl_import::CmpOp op, Value lhs, Value rhs,
                     simt_hlsl_import::SourceLoc loc) {
-    mlir::Location mlirLoc = resolveLoc(loc, ctx);
     mlir::Type type = lhs.getType();
+    if (!type)
+      type = rhs.getType();
+    if (!type) {
+      signalError(ctx, loc, "compare requires typed operands");
+      return {};
+    }
+
+    auto *mlirCtx = ctx.builder.getContext();
+    auto boolType = mlir::IntegerType::get(mlirCtx, 1);
+
+    auto makeResult = [&](std::optional<int64_t> constant) {
+      Value value;
+      value.setTypeHint(boolType);
+      value.setSym(makeSymValueForType(boolType));
+      if (constant)
+        value.setConstantInt(*constant ? 1 : 0);
+      return value;
+    };
 
     if (mlir::isa<mlir::IntegerType>(type) || mlir::isa<mlir::IndexType>(type)) {
-      mlir::arith::CmpIPredicate pred;
-      switch (op) {
-      case simt_hlsl_import::CmpOp::EQ:
-        pred = mlir::arith::CmpIPredicate::eq;
-        break;
-      case simt_hlsl_import::CmpOp::NE:
-        pred = mlir::arith::CmpIPredicate::ne;
-        break;
-      case simt_hlsl_import::CmpOp::LT:
-        pred = mlir::arith::CmpIPredicate::slt;
-        break;
-      case simt_hlsl_import::CmpOp::LE:
-        pred = mlir::arith::CmpIPredicate::sle;
-        break;
-      case simt_hlsl_import::CmpOp::GT:
-        pred = mlir::arith::CmpIPredicate::sgt;
-        break;
-      case simt_hlsl_import::CmpOp::GE:
-        pred = mlir::arith::CmpIPredicate::sge;
-        break;
+      auto lhsConst = lhs.getConstantInt();
+      auto rhsConst = rhs.getConstantInt();
+      if (lhsConst && rhsConst) {
+        auto evalPred = [&](auto pred) {
+          return makeResult(pred(*lhsConst, *rhsConst));
+        };
+        switch (op) {
+        case simt_hlsl_import::CmpOp::EQ:
+          return evalPred(std::equal_to<>());
+        case simt_hlsl_import::CmpOp::NE:
+          return evalPred(std::not_equal_to<>());
+        case simt_hlsl_import::CmpOp::LT:
+          return evalPred(std::less<>());
+        case simt_hlsl_import::CmpOp::LE:
+          return evalPred(std::less_equal<>());
+        case simt_hlsl_import::CmpOp::GT:
+          return evalPred(std::greater<>());
+        case simt_hlsl_import::CmpOp::GE:
+          return evalPred(std::greater_equal<>());
+        }
       }
-      return ctx.builder.create<mlir::arith::CmpIOp>(mlirLoc, pred, lhs, rhs)
-          .getResult();
+      return makeResult(std::nullopt);
     }
 
     if (mlir::isa<mlir::FloatType>(type)) {
-      mlir::arith::CmpFPredicate pred;
-      switch (op) {
-      case simt_hlsl_import::CmpOp::EQ:
-        pred = mlir::arith::CmpFPredicate::OEQ;
-        break;
-      case simt_hlsl_import::CmpOp::NE:
-        pred = mlir::arith::CmpFPredicate::UNE;
-        break;
-      case simt_hlsl_import::CmpOp::LT:
-        pred = mlir::arith::CmpFPredicate::OLT;
-        break;
-      case simt_hlsl_import::CmpOp::LE:
-        pred = mlir::arith::CmpFPredicate::OLE;
-        break;
-      case simt_hlsl_import::CmpOp::GT:
-        pred = mlir::arith::CmpFPredicate::OGT;
-        break;
-      case simt_hlsl_import::CmpOp::GE:
-        pred = mlir::arith::CmpFPredicate::OGE;
-        break;
+      auto lhsConst = lhs.getConstantFloat();
+      auto rhsConst = rhs.getConstantFloat();
+      if (lhsConst && rhsConst) {
+        auto evalPred = [&](auto pred) {
+          return makeResult(pred(*lhsConst, *rhsConst));
+        };
+        switch (op) {
+        case simt_hlsl_import::CmpOp::EQ:
+          return evalPred(std::equal_to<>());
+        case simt_hlsl_import::CmpOp::NE:
+          return evalPred(std::not_equal_to<>());
+        case simt_hlsl_import::CmpOp::LT:
+          return evalPred(std::less<>());
+        case simt_hlsl_import::CmpOp::LE:
+          return evalPred(std::less_equal<>());
+        case simt_hlsl_import::CmpOp::GT:
+          return evalPred(std::greater<>());
+        case simt_hlsl_import::CmpOp::GE:
+          return evalPred(std::greater_equal<>());
+        }
       }
-      return ctx.builder.create<mlir::arith::CmpFOp>(mlirLoc, pred, lhs, rhs)
-          .getResult();
+      return makeResult(std::nullopt);
     }
 
     signalError(ctx, loc, "unsupported compare operands");
@@ -1737,16 +1788,45 @@ struct AnalysisInterpreter
   }
   Value emitSelect(Value cond, Value trueV, Value falseV,
                    simt_hlsl_import::SourceLoc loc) {
-    return ctx.builder
-        .create<mlir::arith::SelectOp>(resolveLoc(loc, ctx), cond, trueV, falseV)
-        .getResult();
+    if (trueV.getType() && falseV.getType() &&
+        trueV.getType() != falseV.getType()) {
+      signalError(ctx, loc, "select requires matching branch types");
+      return {};
+    }
+
+    Value result;
+    mlir::Type type = trueV.getType();
+    if (!type)
+      type = falseV.getType();
+    if (type)
+      result.setTypeHint(type);
+    if (type)
+      result.setSym(makeSymValueForType(type));
+
+    if (auto condConst = cond.getConstantInt()) {
+      if (*condConst)
+        return trueV;
+      return falseV;
+    }
+
+    if (auto lhsConst = trueV.getConstantInt()) {
+      if (auto rhsConst = falseV.getConstantInt())
+        if (*lhsConst == *rhsConst)
+          result.setConstantInt(*lhsConst);
+    } else if (auto lhsConstF = trueV.getConstantFloat()) {
+      if (auto rhsConstF = falseV.getConstantFloat())
+        if (*lhsConstF == *rhsConstF)
+          result.setConstantFloat(*lhsConstF);
+    }
+
+    return result;
   }
 
   template <typename RHSMake>
   Value emitShortCircuit(simt_hlsl_import::LogicalOp op, Value lhs,
                          RHSMake &&rhsBuilder,
                          simt_hlsl_import::SourceLoc loc) {
-    mlir::Type boolType = ctx.builder.getI1Type();
+    auto boolType = mlir::IntegerType::get(ctx.builder.getContext(), 1);
 
     auto ensureBoolType = [&](Value &value) -> bool {
       mlir::Type type = value.getType();
@@ -1879,31 +1959,46 @@ struct AnalysisInterpreter
   Value emitBufferLoad(Value resourceHandle, Value index,
                        const clang::ValueDecl *decl,
                        simt_hlsl_import::SourceLoc loc) {
-    mlir::Location mlirLoc = resolveLoc(loc, ctx);
-    mlir::Value load =
-        ctx.builder
-            .create<simt::dialect::BufferLoadOp>(mlirLoc, resourceHandle,
-                                                 index)
-            .getResult();
-    simt_hlsl_import::AnalysisValue result =
-        simt_hlsl_import::AnalysisValue::fromValue(load);
+    (void)index;
+    (void)loc;
+
+    Value result;
+
+    if (auto resType =
+            mlir::dyn_cast_or_null<simt::dialect::ResourceType>(
+                resourceHandle.getType())) {
+      mlir::Type elementType = resType.getElementType();
+      result.setTypeHint(elementType);
+      result.setSym(makeSymValueForType(elementType));
+    }
+
     if (decl) {
       if (auto symIt = ctx.symValueMap.find(decl);
           symIt != ctx.symValueMap.end())
         result.setSym(symIt->second);
     }
+
     return result;
   }
 
   void emitBufferStore(Value, Value, Value, const clang::ValueDecl *,
                        simt_hlsl_import::SourceLoc) {}
 
-  Value emitAtomic(simt_hlsl_import::BufferAtomicOp, Value, Value, Value, Value,
+  Value emitAtomic(simt_hlsl_import::BufferAtomicOp, Value resourceHandle,
+                   Value, Value, Value,
                    const clang::ValueDecl *resourceDecl,
                    simt_hlsl_import::SourceLoc) {
     if (resourceDecl)
       noteMutation(resourceDecl);
-    return {};
+    Value result;
+    if (auto resType =
+            mlir::dyn_cast_or_null<simt::dialect::ResourceType>(
+                resourceHandle.getType())) {
+      mlir::Type elementType = resType.getElementType();
+      result.setTypeHint(elementType);
+      result.setSym(makeSymValueForType(elementType));
+    }
+    return result;
   }
 
   Value emitWaveIntrinsic(simt_hlsl_import::WaveIntrinsic,
@@ -2600,6 +2695,26 @@ static typename Interp::Value lowerExprInterp(const clang::Expr *expr,
 
   mlir::Location loc = getLocation(expr, ctx);
 
+  if (const auto *boolLit = llvm::dyn_cast<clang::CXXBoolLiteralExpr>(expr)) {
+    auto intType = llvm::dyn_cast<mlir::IntegerType>(type);
+    if (!intType || intType.getWidth() != 1) {
+      signalError(ctx, expr, "boolean literal expects i1 type");
+      return ValueT();
+    }
+    std::string tag = buildIntegerTag(intType);
+    auto src = makeSourceLoc(expr, ctx);
+    auto result = interp.emitConstantInt(boolLit->getValue() ? 1 : 0,
+                                         tag.c_str(), src);
+    if constexpr (!std::is_same_v<typename Interp::Value, mlir::Value>) {
+      mlir::Value mlirConst = ctx.builder.create<mlir::arith::ConstantIntOp>(
+          loc, boolLit->getValue() ? 1 : 0, /*bitwidth=*/1);
+      result.setValue(mlirConst);
+      if (!result.hasSymValue())
+        result.setSym(makeSymValueForType(type));
+    }
+    return result;
+  }
+
   if (const auto *intLit = llvm::dyn_cast<clang::IntegerLiteral>(expr)) {
     if (!mlir::isa<mlir::IntegerType>(type)) {
       signalError(ctx, expr, "integer literal expects integer type");
@@ -3062,7 +3177,9 @@ static typename Interp::Value lowerExprInterp(const clang::Expr *expr,
                                   makeSourceLoc(condOp, ctx));
   }
 
-  signalError(ctx, expr, "unsupported expression lowering");
+  llvm::SmallString<64> message("unsupported expression lowering: ");
+  message += expr->getStmtClassName();
+  signalError(ctx, expr, message);
   return typename Interp::Value();
 }
 
@@ -3393,7 +3510,9 @@ static bool collectLoopMutations(
     LoweringContext &ctx, const clang::Stmt *body,
     llvm::function_ref<bool(LoweringContext &)> extraWork,
     LoopMetadata &metadata) {
+  const clang::Stmt *recordedIncrement = metadata.increment;
   metadata = LoopMetadata();
+  metadata.increment = recordedIncrement;
 
   mlir::Region analysisRegion;
   analysisRegion.emplaceBlock();
@@ -3546,8 +3665,22 @@ static bool lowerStatement(const clang::Stmt *stmt, LoweringContext &ctx,
   }
 
   if (llvm::isa<clang::ContinueStmt>(stmt)) {
-    if (LoopFrame *loopFrame = getInnermostLoop(ctx))
-      return interp.emitLoopContinue(*loopFrame, makeSourceLoc(stmt, ctx));
+    if (LoopFrame *loopFrame = getInnermostLoop(ctx)) {
+      auto src = makeSourceLoc(stmt, ctx);
+      if (LoopMetadata *metadata = loopFrame->metadata) {
+        if (const clang::Stmt *inc = metadata->increment) {
+          if (const auto *incExpr = llvm::dyn_cast<clang::Expr>(inc)) {
+            (void)lowerExprInterp(incExpr, ctx, interp);
+          } else {
+            if (!lowerStatement(inc, ctx, interp))
+              return false;
+          }
+          if (ctx.failed)
+            return false;
+        }
+      }
+      return interp.emitLoopContinue(*loopFrame, src);
+    }
     return true;
   }
 
@@ -3559,20 +3692,28 @@ static bool lowerStatement(const clang::Stmt *stmt, LoweringContext &ctx,
     mlir::Location loc = ctx.defaultLoc;
     bool hasElse = ifStmt->getElse() != nullptr;
 
-    llvm::SmallVector<const clang::ValueDecl *, 8> mutatedVars;
-    if (!collectIfMutations(ctx, ifStmt->getThen(), ifStmt->getElse(),
-                            mutatedVars))
-      return false;
+  llvm::SmallVector<const clang::ValueDecl *, 8> mutatedVars;
+  if (!collectIfMutations(ctx, ifStmt->getThen(), ifStmt->getElse(),
+                          mutatedVars))
+    return false;
 
-    llvm::SmallVector<const clang::ValueDecl *, 8> carriedVars;
-    carriedVars.reserve(mutatedVars.size());
+  llvm::SmallVector<const clang::ValueDecl *, 8> carriedVars;
+  carriedVars.reserve(mutatedVars.size());
+
+  auto *innermostLoop = getInnermostLoop(ctx);
+  if (innermostLoop && !innermostLoop->carriedVars.empty()) {
+    for (const clang::ValueDecl *vd : innermostLoop->carriedVars)
+      if (ctx.valueMap.count(vd))
+        carriedVars.push_back(vd);
+  } else {
     for (const clang::ValueDecl *vd : mutatedVars)
       if (ctx.valueMap.count(vd))
         carriedVars.push_back(vd);
+  }
 
-    bool needsElseRegion = hasElse || !carriedVars.empty();
-    auto scope =
-        interp.beginIf(cond, carriedVars, hasElse, needsElseRegion, loc);
+  bool needsElseRegion = hasElse || !carriedVars.empty();
+  auto scope =
+      interp.beginIf(cond, carriedVars, hasElse, needsElseRegion, loc);
 
     LoweringContext &thenCtx = scope.thenContext();
     auto thenInterp = interp.fork(thenCtx);
@@ -3680,6 +3821,7 @@ static bool lowerForStmt(const clang::ForStmt *forStmt, LoweringContext &ctx,
 
   LoopMetadata loopMeta;
   const clang::Stmt *incStmt = forStmt->getInc();
+  loopMeta.increment = incStmt;
   auto analyzeIncrement = [&](LoweringContext &analysisCtx) -> bool {
     if (!incStmt)
       return true;
@@ -3713,6 +3855,7 @@ static bool lowerForStmt(const clang::ForStmt *forStmt, LoweringContext &ctx,
   LoweringContext &prepareCtx = loopScope.prepareContext();
   mlir::OpBuilder &prepBuilder = prepareCtx.builder;
 
+  const bool emitPrepare = isEmitContext(prepareCtx) && !loopScope.isAnalysisOnly();
   mlir::Value condValue;
   if (const clang::Expr *condExpr = forStmt->getCond()) {
     auto condInterp = interp.fork(prepareCtx);
@@ -3720,9 +3863,9 @@ static bool lowerForStmt(const clang::ForStmt *forStmt, LoweringContext &ctx,
     if (prepareCtx.failed)
       return false;
     condValue = unwrapValue(condResult);
-    if (isEmitContext(prepareCtx) && !condValue)
+    if (emitPrepare && !condValue)
       return false;
-  } else {
+  } else if (emitPrepare) {
     condValue = prepBuilder.create<mlir::arith::ConstantIntOp>(loc, 1, 1);
   }
 
@@ -3735,7 +3878,11 @@ static bool lowerForStmt(const clang::ForStmt *forStmt, LoweringContext &ctx,
     forwarded.push_back(value);
   }
 
-  prepBuilder.create<simt::dialect::ConditionOp>(loc, condValue, forwarded);
+  if (emitPrepare) {
+    if (!condValue)
+      condValue = prepBuilder.create<mlir::arith::ConstantIntOp>(loc, 1, 1);
+    prepBuilder.create<simt::dialect::ConditionOp>(loc, condValue, forwarded);
+  }
 
   LoweringContext &bodyCtx = loopScope.bodyContext();
   auto bodyInterp = interp.fork(bodyCtx);
@@ -3745,7 +3892,7 @@ static bool lowerForStmt(const clang::ForStmt *forStmt, LoweringContext &ctx,
       return false;
   }
 
-  if (!bodyCtx.emittedTerminator) {
+  if (!bodyCtx.emittedTerminator && !loopScope.isAnalysisOnly()) {
     if (const auto *incExpr =
             llvm::dyn_cast_or_null<clang::Expr>(forStmt->getInc())) {
       (void)lowerExprInterp(incExpr, bodyCtx, bodyInterp);
@@ -3757,7 +3904,7 @@ static bool lowerForStmt(const clang::ForStmt *forStmt, LoweringContext &ctx,
     }
   }
 
-  if (!bodyCtx.emittedTerminator) {
+  if (!bodyCtx.emittedTerminator && !loopScope.isAnalysisOnly()) {
     llvm::SmallVector<mlir::Value, 8> yieldOperands;
     yieldOperands.reserve(mutatedVars.size());
     for (const clang::ValueDecl *vd : mutatedVars) {
@@ -3896,7 +4043,7 @@ static bool lowerDoStmt(const clang::DoStmt *doStmt, LoweringContext &ctx,
   mlir::OpBuilder &prepBuilder = prepareCtx.builder;
 
   mlir::Value condValue;
-  if (loopScope.hasFirstIterFlag()) {
+  if (loopScope.hasFirstIterFlag() && !loopScope.isAnalysisOnly()) {
     mlir::Value firstIterFlag = loopScope.getPrepareFirstIterArg();
 
     llvm::SmallVector<mlir::Type, 8> condResultTypes;
@@ -3966,6 +4113,9 @@ static bool lowerDoStmt(const clang::DoStmt *doStmt, LoweringContext &ctx,
     condValue = condIf.getResult(0);
     for (auto [index, vd] : llvm::enumerate(mutatedVars))
       prepareCtx.valueMap[vd] = condIf.getResult(index + 1);
+    condValue = condIf.getResult(0);
+    for (auto [index, vd] : llvm::enumerate(mutatedVars))
+      prepareCtx.valueMap[vd] = condIf.getResult(index + 1);
   } else {
     if (condExpr) {
       auto condInterp = interp.fork(prepareCtx);
@@ -3973,38 +4123,41 @@ static bool lowerDoStmt(const clang::DoStmt *doStmt, LoweringContext &ctx,
       if (prepareCtx.failed)
         return false;
       condValue = unwrapValue(condResult);
-      if (isEmitContext(prepareCtx) && !condValue)
+      if (!loopScope.isAnalysisOnly() && isEmitContext(prepareCtx) && !condValue)
         return false;
-    } else {
+    } else if (!loopScope.isAnalysisOnly()) {
       condValue = prepBuilder.create<mlir::arith::ConstantIntOp>(loc, 1, 1);
     }
   }
 
-  llvm::SmallVector<mlir::Value, 8> forwarded;
-  forwarded.reserve(mutatedVars.size() + (loopScope.hasFirstIterFlag() ? 1 : 0));
-  for (const clang::ValueDecl *vd : mutatedVars) {
-    mlir::Value value = prepareCtx.valueMap.lookup(vd);
-    if (!value)
-      value = ctx.valueMap.lookup(vd);
-    forwarded.push_back(value);
-  }
+  if (!loopScope.isAnalysisOnly()) {
+    llvm::SmallVector<mlir::Value, 8> forwarded;
+    forwarded.reserve(mutatedVars.size() + (loopScope.hasFirstIterFlag() ? 1 : 0));
+    for (const clang::ValueDecl *vd : mutatedVars) {
+      mlir::Value value = prepareCtx.valueMap.lookup(vd);
+      if (!value)
+        value = ctx.valueMap.lookup(vd);
+      forwarded.push_back(value);
+    }
 
-  mlir::Value continueFlagInit;
-  if (loopScope.hasFirstIterFlag()) {
-    continueFlagInit =
-        prepBuilder.create<mlir::arith::ConstantIntOp>(loc, 0, 1);
-    forwarded.push_back(continueFlagInit);
-    loopScope.setCurrentFirstIterValue(continueFlagInit);
-  }
+    if (loopScope.hasFirstIterFlag()) {
+      mlir::Value continueFlagInit =
+          prepBuilder.create<mlir::arith::ConstantIntOp>(loc, 0, 1);
+      forwarded.push_back(continueFlagInit);
+      loopScope.setCurrentFirstIterValue(continueFlagInit);
+    }
 
-  prepBuilder.create<simt::dialect::ConditionOp>(loc, condValue, forwarded);
+    if (!condValue)
+      condValue = prepBuilder.create<mlir::arith::ConstantIntOp>(loc, 1, 1);
+    prepBuilder.create<simt::dialect::ConditionOp>(loc, condValue, forwarded);
+  }
 
   // Body region: execute loop body and forward flag state.
   LoweringContext &bodyCtx = loopScope.bodyContext();
   auto bodyInterp = interp.fork(bodyCtx);
 
   mlir::Value continueFlag;
-  if (loopScope.hasFirstIterFlag()) {
+  if (!loopScope.isAnalysisOnly() && loopScope.hasFirstIterFlag()) {
     continueFlag =
         bodyCtx.builder.create<mlir::arith::ConstantIntOp>(loc, 0, 1);
     loopScope.setCurrentFirstIterValue(continueFlag);
@@ -4015,7 +4168,7 @@ static bool lowerDoStmt(const clang::DoStmt *doStmt, LoweringContext &ctx,
       return false;
   }
 
-  if (!bodyCtx.emittedTerminator) {
+  if (!bodyCtx.emittedTerminator && !loopScope.isAnalysisOnly()) {
     llvm::SmallVector<mlir::Value, 8> yieldOperands;
     yieldOperands.reserve(mutatedVars.size() +
                           (loopScope.hasFirstIterFlag() ? 1 : 0));
@@ -4553,8 +4706,8 @@ public:
 
     mlir::Block *entry = func.addEntryBlock();
     mlir::OpBuilder funcBuilder(entry, entry->begin());
-    funcBuilder.create<simt::dialect::ActiveMaskOp>(loc,
-                                                    funcBuilder.getI64Type());
+    // funcBuilder.create<simt::dialect::ActiveMaskOp>(loc,
+    //                                                 funcBuilder.getI64Type());
 
     const clang::ASTContext &astContext = decl->getASTContext();
     const clang::SourceManager &sourceManager = astContext.getSourceManager();
@@ -4619,10 +4772,11 @@ public:
         mlir::Value zero = buildZeroValue(ctx, ctx.returnType);
         if (!zero)
           return false;
-        ctx.builder.create<mlir::func::ReturnOp>(ctx.builder.getUnknownLoc(),
-                                                 zero);
+        ctx.builder.create<mlir::func::ReturnOp>(
+            ctx.builder.getUnknownLoc(), zero);
       } else {
-        ctx.builder.create<mlir::func::ReturnOp>(ctx.builder.getUnknownLoc());
+        ctx.builder.create<mlir::func::ReturnOp>(
+            ctx.builder.getUnknownLoc());
       }
     }
 
@@ -4678,8 +4832,9 @@ Result<mlir::OwningOpRef<mlir::ModuleOp>>
 translateComputeShader(mlir::MLIRContext &context, llvm::StringRef fileName,
                        llvm::StringRef source,
                        const TranslationOptions &options) {
-  context.loadDialect<mlir::func::FuncDialect, mlir::arith::ArithDialect,
-                      mlir::math::MathDialect, mlir::vector::VectorDialect,
+  context.loadDialect<mlir::BuiltinDialect, mlir::func::FuncDialect,
+                      mlir::arith::ArithDialect, mlir::math::MathDialect,
+                      mlir::vector::VectorDialect,
                       simt::dialect::SimtStepDialect>();
 
   mlir::OpBuilder builder(&context);

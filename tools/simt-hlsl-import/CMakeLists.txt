@@ -2,7 +2,6 @@ find_package(Clang REQUIRED CONFIG)
 
 add_executable(simt-hlsl-import
     src/main.cpp
-    lib/LoopScopeSupport.cpp
     lib/Lowering.cpp
 )
 
@@ -18,6 +17,7 @@ endif()
 
 target_link_libraries(simt-hlsl-import
     PRIVATE
+        simt-frontends-common
         simt-step
         MLIRSupport
         MLIRFuncDialect

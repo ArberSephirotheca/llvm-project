@@ -50,6 +50,16 @@ These operations correspond to the merge-stack management performed by the HLSL
 interpreter. `mask_pop`/`mask_merge` now appear at reconvergence points to feed
 the block’s mask argument before any user operations execute.
 
+### Mask logic helpers
+- `simt_struct.mask_and %lhs, %rhs` – internal bitwise AND used while
+  materialising SSA mask expressions.
+- `simt_struct.mask_or %lhs, %rhs` – internal bitwise OR for mask propagation.
+- `simt_struct.mask_not %mask` – internal bitwise complement of a mask value.
+
+These helper ops are produced by the structured CFG builder to keep mask
+computation distinct from user-visible instructions. They should not carry
+direct semantic meaning outside of the lowering pipeline.
+
 ### Example lowering (work-in-progress)
 
 ```
@@ -74,6 +84,24 @@ so divergent control flow reconverges through explicit `mask_pop`/`mask_merge`
 sequences. Additional work remains to broaden operator coverage, but the block
 structure illustrated above reflects the semantics relied upon by the
 interpreter.
+
+### Normalised loop terminators
+
+During conversion each `simt_step` loop first rewrites early exits (continue /
+break) into a **two-stage** form before structured blocks are created:
+
+1. A **value stage** (`simt_step.if`) produces the tuple `{ flag, carried… }`.
+2. A **control stage** consumes `flag` and contains only effect ops:
+   - true arm → `simt_step.continue(carried…)`
+   - false arm → `simt_step.yield(carried…)` (or `simt_step.break`).
+
+Structured lowering only sees the second stage, so every path that stays in the
+loop funnels through a single latch, mirroring SPIR-V / LLVM latch semantics.
+
+Downstream passes can rely on the control stage being **effect-only**: no branch
+produces SSA results, and the carried tuple is forwarded explicitly along the
+edge, making it trivial to synthesise the continue block and merge block during
+`simt_step` → `simt_struct` lowering.
 
 ---
 

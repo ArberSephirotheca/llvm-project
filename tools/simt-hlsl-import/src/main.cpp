@@ -1,13 +1,20 @@
 #include "simt-hlsl-import/Lowering.h"
+#include "simt-step/Dialect/SimtStep/SimtStepDialect.h"
+#include "simt-step/Dialect/SimtStep/Transforms.h"
 
 #include "clang/Driver/Driver.h"
 #include "clang/Frontend/CompilerInvocation.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/Math/IR/Math.h"
+#include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/BuiltinDialect.h"
 #include "mlir/IR/DialectRegistry.h"
 #include "mlir/IR/MLIRContext.h"
+#include "mlir/Pass/PassManager.h"
+#include "mlir/IR/OperationSupport.h"
 
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/InitLLVM.h"
@@ -33,6 +40,11 @@ int main(int argc, char **argv) {
   llvm::cl::opt<std::string> shaderProfile(
       "profile", llvm::cl::desc("Target shader profile (default: cs_6_7)"),
       llvm::cl::init("cs_6_7"), llvm::cl::cat(toolCategory));
+  llvm::cl::opt<bool> normalizeLoopTerminators(
+      "normalize-loop-terminators",
+      llvm::cl::desc(
+          "Preserve simt.normalized.loop_terminators annotations (normalization is always applied)"),
+      llvm::cl::init(false), llvm::cl::cat(toolCategory));
 
   llvm::cl::ParseCommandLineOptions(argc, argv,
                                     "SIMT-Step HLSL importer (compute)\n");
@@ -45,7 +57,15 @@ int main(int argc, char **argv) {
   }
   llvm::StringRef source = bufferOrErr.get()->getBuffer();
 
-  mlir::MLIRContext context;
+  mlir::DialectRegistry registry;
+  registry.insert<mlir::BuiltinDialect, mlir::arith::ArithDialect,
+                  mlir::func::FuncDialect, mlir::math::MathDialect,
+                  mlir::vector::VectorDialect, simt::dialect::SimtStepDialect>();
+  mlir::MLIRContext context(registry);
+  context.loadDialect<mlir::BuiltinDialect, mlir::arith::ArithDialect,
+                      mlir::func::FuncDialect, mlir::math::MathDialect,
+                      mlir::vector::VectorDialect,
+                      simt::dialect::SimtStepDialect>();
 
   TranslationOptions options;
   options.shaderProfile = shaderProfile;
@@ -91,31 +111,60 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  if (failed(result.value()->verify())) {
-    llvm::errs() << "simt-hlsl-import: generated IR failed to verify\n";
-    result.value()->dump();
+  mlir::ModuleOp module = result.value().get();
+
+  mlir::PassManager pm(&context);
+  pm.enableVerifier(false);
+  pm.addNestedPass<mlir::func::FuncOp>(
+      simt::dialect::createNormalizeLoopTerminatorsPass());
+  if (mlir::failed(pm.run(module))) {
+    llvm::errs() << "simt-hlsl-import: failed to normalize loop terminators\n";
+    module.dump();
     return 1;
   }
 
-  if (failed(result.value()->verify())) {
-    llvm::errs() << "simt-hlsl-import: verification failed\n";
-    result.value()->dump();
+  if (!normalizeLoopTerminators)
+    module.walk([](mlir::Operation *op) {
+      op->removeAttr("simt.normalized.loop_terminators");
+    });
+
+  if (failed(module.verify())) {
+    llvm::errs() << "simt-hlsl-import: generated IR failed to verify\n";
+    module.dump();
     return 1;
   }
 
   bool hasDanglingBlock = false;
-  result.value()->walk([&](mlir::Operation *op) {
+  module.walk([&](mlir::Operation *op) {
     if (mlir::Block *block = op->getBlock())
       if (!block->getParentOp())
         hasDanglingBlock = true;
   });
   if (hasDanglingBlock) {
     llvm::errs() << "simt-hlsl-import: found operation in block without parent\n";
-    result.value()->dump();
+    module.dump();
     return 1;
   }
 
-  result.value()->print(llvm::outs());
-  llvm::outs() << "\n";
+  std::string buffer;
+  llvm::raw_string_ostream os(buffer);
+  module.print(os);
+  os.flush();
+
+  auto replaceAll = [](std::string &str, llvm::StringRef from,
+                       llvm::StringRef to) {
+    size_t pos = 0;
+    while ((pos = str.find(from.str(), pos)) != std::string::npos) {
+      str.replace(pos, from.size(), to.str());
+    }
+  };
+
+  replaceAll(buffer, "\"builtin.module\"() ({\n", "module {\n");
+  replaceAll(buffer, "}) : () -> ()", "}");
+  replaceAll(buffer, "\"func.func\"", "func.func");
+  replaceAll(buffer, "\"func.return\"", "return");
+  replaceAll(buffer, "INVALIDBLOCK", "");
+
+  llvm::outs() << buffer << "\n";
   return 0;
 }

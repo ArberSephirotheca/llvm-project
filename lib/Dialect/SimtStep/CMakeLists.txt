@@ -33,7 +33,8 @@ add_public_tablegen_target(SimtStepDialectIncGen)
 
 set(SIMT_STEP_DIALECT_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/SimtStepDialect.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/SimtStepOps.cpp)
+    ${CMAKE_CURRENT_SOURCE_DIR}/SimtStepOps.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/NormalizeLoopTerminators.cpp)
 
 foreach(src ${SIMT_STEP_DIALECT_SOURCES})
   target_sources(simt-step PRIVATE ${src})

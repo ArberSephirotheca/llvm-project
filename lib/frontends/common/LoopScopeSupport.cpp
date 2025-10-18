@@ -1,4 +1,4 @@
-#include "simt-hlsl-import/LoopScopeSupport.h"
+#include "simt-step/Frontends/Common/LoopScopeSupport.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "llvm/ADT/STLExtras.h"
@@ -11,7 +11,7 @@
 #include "clang/AST/Type.h"
 #include "clang/Basic/SourceManager.h"
 
-namespace simt_hlsl_import {
+namespace simt::frontend {
 
 namespace {
 
@@ -772,4 +772,4 @@ void AnalysisLoopScope::cleanup() {
   bodyBuilder.reset();
 }
 
-} // namespace simt_hlsl_import
+} // namespace simt::frontend

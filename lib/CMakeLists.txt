@@ -10,6 +10,9 @@ target_link_libraries(simt-step
         MLIRIR
         MLIRSupport
         LLVMSupport
+        MLIRPass
+        MLIRArithDialect
+        MLIRFuncDialect
 )
 
 add_subdirectory(core)
