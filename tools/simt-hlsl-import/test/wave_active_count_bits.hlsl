@@ -2,7 +2,7 @@
 
 [numthreads(1, 1, 1)]
 void main(uint tid : SV_DispatchThreadID) {
-  uint count = WaveActiveCountBits(tid == 0);
+  uint count = WaveActiveCountBits(0);
   if (count == 0)
-    return;
+    count  = 1;
 }

@@ -7,6 +7,7 @@
 #include <mlir/IR/ImplicitLocOpBuilder.h>
 #include <mlir/IR/OpDefinition.h>
 #include <mlir/IR/Operation.h>
+#include <mlir/Dialect/Func/IR/FuncOps.h>
 #include <mlir/IR/Region.h>
 #include <mlir/Interfaces/ControlFlowInterfaces.h>
 #include <mlir/Interfaces/SideEffectInterfaces.h>

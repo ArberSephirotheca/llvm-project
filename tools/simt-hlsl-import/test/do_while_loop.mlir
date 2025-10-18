@@ -55,6 +55,6 @@ module {
       %7 = arith.addi %5#0, %c1_i32_1 : i32
       "simt_step.yield"(%7, %6, %false) : (i32, i32, i1) -> ()
     }) : (i32, i32, i1) -> (i32, i32, i1)
-    return
+    func.return
   }
 }

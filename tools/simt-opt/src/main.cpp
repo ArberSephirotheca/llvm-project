@@ -8,6 +8,7 @@
 #include <mlir/Dialect/ControlFlow/IR/ControlFlow.h>
 #include <mlir/Dialect/Func/IR/FuncOps.h>
 #include <mlir/Dialect/LLVMIR/LLVMDialect.h>
+#include <mlir/Dialect/Math/IR/Math.h>
 #include <mlir/Dialect/MemRef/IR/MemRef.h>
 #include <mlir/Dialect/SCF/IR/SCF.h>
 #include <mlir/Dialect/Tensor/IR/Tensor.h>
@@ -23,7 +24,8 @@ int main(int argc, char **argv) {
   DialectRegistry registry;
   registry.insert<mlir::BuiltinDialect, mlir::arith::ArithDialect,
                   mlir::cf::ControlFlowDialect, mlir::func::FuncDialect,
-                  mlir::LLVM::LLVMDialect, mlir::memref::MemRefDialect,
+                  mlir::LLVM::LLVMDialect, mlir::math::MathDialect,
+                  mlir::memref::MemRefDialect,
                   mlir::scf::SCFDialect, mlir::tensor::TensorDialect,
                   mlir::vector::VectorDialect>();
   simt::dialect::registerSimtStepDialect(registry);

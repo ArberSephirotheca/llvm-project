@@ -1,4 +1,5 @@
 #include "simt-hlsl-import/Lowering.h"
+#include "simt-step/Dialect/SimtStep/SimtStepDialect.h"
 #include "simt-step/Dialect/SimtStep/Transforms.h"
 
 #include "clang/Driver/Driver.h"
@@ -6,10 +7,14 @@
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/Math/IR/Math.h"
+#include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/BuiltinDialect.h"
 #include "mlir/IR/DialectRegistry.h"
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/Pass/PassManager.h"
+#include "mlir/IR/OperationSupport.h"
 
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/InitLLVM.h"
@@ -52,7 +57,15 @@ int main(int argc, char **argv) {
   }
   llvm::StringRef source = bufferOrErr.get()->getBuffer();
 
-  mlir::MLIRContext context;
+  mlir::DialectRegistry registry;
+  registry.insert<mlir::BuiltinDialect, mlir::arith::ArithDialect,
+                  mlir::func::FuncDialect, mlir::math::MathDialect,
+                  mlir::vector::VectorDialect, simt::dialect::SimtStepDialect>();
+  mlir::MLIRContext context(registry);
+  context.loadDialect<mlir::BuiltinDialect, mlir::arith::ArithDialect,
+                      mlir::func::FuncDialect, mlir::math::MathDialect,
+                      mlir::vector::VectorDialect,
+                      simt::dialect::SimtStepDialect>();
 
   TranslationOptions options;
   options.shaderProfile = shaderProfile;
@@ -133,7 +146,25 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  module.print(llvm::outs());
-  llvm::outs() << "\n";
+  std::string buffer;
+  llvm::raw_string_ostream os(buffer);
+  module.print(os);
+  os.flush();
+
+  auto replaceAll = [](std::string &str, llvm::StringRef from,
+                       llvm::StringRef to) {
+    size_t pos = 0;
+    while ((pos = str.find(from.str(), pos)) != std::string::npos) {
+      str.replace(pos, from.size(), to.str());
+    }
+  };
+
+  replaceAll(buffer, "\"builtin.module\"() ({\n", "module {\n");
+  replaceAll(buffer, "}) : () -> ()", "}");
+  replaceAll(buffer, "\"func.func\"", "func.func");
+  replaceAll(buffer, "\"func.return\"", "return");
+  replaceAll(buffer, "INVALIDBLOCK", "");
+
+  llvm::outs() << buffer << "\n";
   return 0;
 }

@@ -1,6 +1,6 @@
 module {
   func.func @main(%arg0: i32) attributes {simt.num_threads = array<i64: 1, 1, 1>} {
-    %0 = "simt_step.dispatch_thread_id"() : () -> i32
+    %0 = simt_step.dispatch_thread_id : i32
     %c0_i32 = arith.constant 0 : i32
     %c1_i32 = arith.constant 1 : i32
     %1 = arith.andi %0, %c1_i32 : i32
@@ -23,7 +23,7 @@ module {
       %c0_i32_2 = arith.constant 0 : i32
       "simt_step.yield"(%c0_i32_2) : (i32) -> ()
     }) : (i1) -> i32
-    return
+    func.return
   }
 }
 // RUN: %simt-opt --simt-step-to-structured %s | %mlir-file-check %s

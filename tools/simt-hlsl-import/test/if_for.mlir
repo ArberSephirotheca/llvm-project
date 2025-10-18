@@ -30,6 +30,6 @@ module {
     }, {
       "simt_step.yield"(%c0_i32) : (i32) -> ()
     }) : (i1) -> i32
-    return
+    func.return
   }
 }

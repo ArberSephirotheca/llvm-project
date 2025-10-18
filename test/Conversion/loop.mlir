@@ -1,6 +1,6 @@
 module {
   func.func @main(%arg0: i32) attributes {simt.num_threads = array<i64: 1, 1, 1>} {
-    %0 = "simt_step.dispatch_thread_id"() : () -> i32
+    %0 = simt_step.dispatch_thread_id : i32
     %c0_i32 = arith.constant 0 : i32
     %c0_i32_0 = arith.constant 0 : i32
     %1:2 = "simt_step.loop"(%c0_i32, %c0_i32_0) ({
@@ -15,7 +15,7 @@ module {
       %3 = arith.addi %arg2, %c1_i32 : i32
       "simt_step.yield"(%2, %3) : (i32, i32) -> ()
     }) : (i32, i32) -> (i32, i32)
-    return
+    func.return
   }
 }
 
@@ -23,7 +23,7 @@ module {
   func.func @main(%arg0: i32) attributes {simt.num_threads = array<i64: 1, 1, 1>} {
     "simt_struct.block"() ({
     ^bb0(%arg1: i64, %arg2: i32):
-      %0 = "simt_step.dispatch_thread_id"() : () -> i32
+      %0 = simt_step.dispatch_thread_id : i32
       %c0_i32 = arith.constant 0 : i32
       %c0_i32_0 = arith.constant 0 : i32
       "simt_struct.branch"(%arg1, %c0_i32, %c0_i32_0) {target = @block4} : (i64, i32, i32) -> ()
@@ -49,7 +49,7 @@ module {
       %1 = "simt_struct.mask_not"(%0) : (i1) -> i1
       "simt_struct.cond_branch"(%0, %0, %1, %arg2, %arg3, %arg2, %arg3) {false_target = @block1, operandSegmentSizes = array<i32: 1, 1, 1, 2, 2>, true_target = @block2} : (i1, i1, i1, i32, i32, i32, i32) -> ()
     }) {continue_target = @block4, merge_target = @block1, sym_name = "block4"} : () -> ()
-    return
+    func.return
   }
 }
 

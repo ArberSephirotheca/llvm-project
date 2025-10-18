@@ -1853,7 +1853,7 @@ LogicalResult StructuredCFGBuilder::cleanupOriginalCFG() {
 
   builder.setInsertionPointToEnd(entry);
   if (func.getNumResults() == 0)
-    builder.create<func::ReturnOp>(func.getLoc());
+    builder.create<mlir::func::ReturnOp>(func.getLoc());
 
   return success();
 }
@@ -2068,7 +2068,7 @@ LogicalResult StructuredCFGBuilder::emitStructuredBlock(BlockInfo &info) {
         }
         continue;
       }
-      if (isa<cf::BranchOp, cf::CondBranchOp, func::ReturnOp>(&op))
+      if (isa<cf::BranchOp, cf::CondBranchOp, mlir::func::ReturnOp>(&op))
         continue;
       // if (auto active = dyn_cast<simt::dialect::ActiveMaskOp>(&op)) {
       //   mapper->map(active.getResult(), info.currentMask);
@@ -2364,7 +2364,7 @@ LogicalResult StructuredCFGBuilder::emitStructuredTerminator(BlockInfo &source) 
     return success();
   };
 
-  if (auto ret = dyn_cast_or_null<func::ReturnOp>(origTerm)) {
+  if (auto ret = dyn_cast_or_null<mlir::func::ReturnOp>(origTerm)) {
     SmallVector<Value> results;
     if (failed(mapValues(ret.getOperands(), results, "return")))
       return failure();

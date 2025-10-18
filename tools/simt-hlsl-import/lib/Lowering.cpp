@@ -13,6 +13,7 @@
 #include "simt-hlsl-import/LoopScopeSupport.h"
 #include "simt-hlsl-import/LoweringAlgebra.h"
 #include "mlir/IR/BuiltinAttributes.h"
+#include "mlir/IR/BuiltinDialect.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/DialectRegistry.h"
@@ -335,8 +336,10 @@ struct EmitInterpreter
     LoweringContext &thenContext() {
       if (!thenCtxStorage) {
         mlir::Region &region = ifOp.getThenRegion();
+        mlir::Block &block = region.front();
+        block.clear();
         thenBuilder.emplace(parent.builder.getContext());
-        thenBuilder->setInsertionPointToEnd(&region.front());
+        thenBuilder->setInsertionPointToEnd(&block);
         thenCtxStorage.emplace(*thenBuilder, loc, parent.returnType,
                                parent.errorMessage, parent.sourceManager);
         cloneContextState(parent, *thenCtxStorage);
@@ -351,8 +354,10 @@ struct EmitInterpreter
         llvm::report_fatal_error("elseContext requested but no else branch");
       if (!elseCtxStorage) {
         mlir::Region &region = ifOp.getElseRegion();
+        mlir::Block &block = region.front();
+        block.clear();
         elseBuilder.emplace(parent.builder.getContext());
-        elseBuilder->setInsertionPointToEnd(&region.front());
+        elseBuilder->setInsertionPointToEnd(&block);
         elseCtxStorage.emplace(*elseBuilder, loc, parent.returnType,
                                parent.errorMessage, parent.sourceManager);
         cloneContextState(parent, *elseCtxStorage);
@@ -1287,39 +1292,12 @@ struct EmitInterpreter
       if (!resultType)
         return fail("WaveActiveCountBits requires result type");
 
-      mlir::Value mask =
-          ctx.builder
-              .create<simt::dialect::WaveBallotOp>(mlirLoc,
-                                                   ctx.builder.getI64Type(),
-                                                   operands[0])
-              .getMask();
-      mlir::Value pop =
-          ctx.builder.create<mlir::math::CtPopOp>(mlirLoc, mask).getResult();
+      if (!mlir::isa<mlir::IntegerType>(resultType))
+        return fail("WaveActiveCountBits expects integer result type");
 
-      if (pop.getType() == resultType)
-        return pop;
-
-      if (auto intType = llvm::dyn_cast<mlir::IntegerType>(resultType)) {
-        auto popInt = llvm::cast<mlir::IntegerType>(pop.getType());
-        unsigned targetWidth = intType.getWidth();
-        unsigned sourceWidth = popInt.getWidth();
-        if (targetWidth == sourceWidth)
-          return pop;
-        if (targetWidth < sourceWidth)
-          return ctx.builder
-              .create<mlir::arith::TruncIOp>(mlirLoc, resultType, pop)
-              .getResult();
-        return ctx.builder
-            .create<mlir::arith::ExtUIOp>(mlirLoc, resultType, pop)
-            .getResult();
-      }
-
-      if (mlir::isa<mlir::IndexType>(resultType))
-        return ctx.builder
-            .create<mlir::arith::IndexCastOp>(mlirLoc, resultType, pop)
-            .getResult();
-
-      return fail("WaveActiveCountBits unsupported result type");
+      return ctx.builder
+          .create<simt::dialect::WaveBallotOp>(mlirLoc, resultType, operands[0])
+          .getMask();
     }
     case simt_hlsl_import::WaveIntrinsic::GetLaneIndex: {
       if (!operands.empty())
@@ -4754,10 +4732,11 @@ public:
         mlir::Value zero = buildZeroValue(ctx, ctx.returnType);
         if (!zero)
           return false;
-        ctx.builder.create<mlir::func::ReturnOp>(ctx.builder.getUnknownLoc(),
-                                                 zero);
+        ctx.builder.create<mlir::func::ReturnOp>(
+            ctx.builder.getUnknownLoc(), zero);
       } else {
-        ctx.builder.create<mlir::func::ReturnOp>(ctx.builder.getUnknownLoc());
+        ctx.builder.create<mlir::func::ReturnOp>(
+            ctx.builder.getUnknownLoc());
       }
     }
 
@@ -4813,8 +4792,9 @@ Result<mlir::OwningOpRef<mlir::ModuleOp>>
 translateComputeShader(mlir::MLIRContext &context, llvm::StringRef fileName,
                        llvm::StringRef source,
                        const TranslationOptions &options) {
-  context.loadDialect<mlir::func::FuncDialect, mlir::arith::ArithDialect,
-                      mlir::math::MathDialect, mlir::vector::VectorDialect,
+  context.loadDialect<mlir::BuiltinDialect, mlir::func::FuncDialect,
+                      mlir::arith::ArithDialect, mlir::math::MathDialect,
+                      mlir::vector::VectorDialect,
                       simt::dialect::SimtStepDialect>();
 
   mlir::OpBuilder builder(&context);
