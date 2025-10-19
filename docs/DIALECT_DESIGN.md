@@ -16,7 +16,6 @@
 - **SimtIndependentOp**: pure per-lane behavior, no cross-lane coordination.
 - **SimtSynchronizedOp**: rendezvous semantics (barrier, fence) with accessors for scope and ordering.
 - **SimtCollectiveOp**: wave-wide behavior (ballot, shuffle, reductions) with helpers for required scope, uniform mask expectations, and needed resources.
-- **SimtMaskModifier**: ops that push/pop or adjust the active mask.
 - **SimtPluginOpInterface**: allows `simt.custom` to expose the same APIs (traits, resource requirements, side effects) via registry metadata.
 
 ## Built-in Operations
@@ -35,11 +34,10 @@
 - Memory ops participate in MLIR’s memory effect interface and enforce legal scope/ordering combinations.
 
 ## Lowering Strategy
-- User IR stays in structured control flow; a dedicated lowering pass converts `simt_step` regions into a **Structured SIMT dialect** that models block-based execution (labels, merge points, explicit mask operands) akin to SPIR-V and the dynamic-block representation used by the interpreter.
+- User IR stays in structured control flow; a dedicated lowering pass converts `simt_step` regions into a **Structured SIMT dialect** that models block-based execution (labels, merge points) akin to SPIR-V and the dynamic-block representation used by the interpreter.
 - Another pass materializes dynamic block frames and mask transitions from the structured dialect for execution/analysis.
 - Specialization pass folds constant masks/values and simplifies collectives when possible.
 - Canonicalization cleans redundant mask operations and hoists invariants.
-- LLVM lowering translates traits to concrete intrinsics/runtime calls (`llvm.nvvm.barrier0`, shuffles, etc.).
 
 ## Plugin Integration
 - Registry metadata declares instruction traits (independent/synchronized/collective), operand/result schema, side effects, and resource requirements.
@@ -83,7 +81,6 @@
    - Provide sample plugin definitions demonstrating new interfaces.
 8. **Testing & Examples**
    - Author MLIR lit tests covering each op category and verification rule.
-   - Add end-to-end tests using `simt-run` with plugins to validate interpreter behavior.
 9. **Documentation**
    - Integrate dialect reference into docs and link from `Design.md`.
    - Provide plugin authoring guide aligned with the new trait system.
