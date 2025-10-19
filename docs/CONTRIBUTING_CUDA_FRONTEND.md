@@ -96,11 +96,9 @@ The CUDA-specific pieces will live under `lib/frontends/` and
 
 3. **Lower straight-line kernels**
    - Start from a trivial kernel (`__global__ void add(int* out, int v)`).
-   - Use the shared lowering algebra to emit `simt_step.func` with loads,
-     stores, and arithmetic.
 
 4. **Add regression tests**
-   - Mirror the HLSL workflow (see `docs/test_workflow.md`): pair each CUDA
+   - Mirror the HLSL workflow: pair each CUDA
      kernel (`*.cu`) with a `*.mlir` FileCheck file.
    - Add a lit config (similar to `tools/simt-hlsl-import/test/CMakeLists.txt`).
 
