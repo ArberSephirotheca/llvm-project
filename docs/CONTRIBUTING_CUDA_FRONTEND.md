@@ -1,11 +1,5 @@
 # Contributing to the SIMT-Step CUDA Frontend
 
-Welcome aboard! This guide is aimed at new contributors—especially students—who
-want to help build the CUDA importer for SIMT-Step. It pulls together the key
-context, tooling steps, and bite-sized tasks so you can be productive quickly.
-
----
-
 ## 1. Project Overview
 
 SIMT-Step provides an MLIR dialect (`simt_step`) that captures SIMT execution
