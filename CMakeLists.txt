@@ -16,11 +16,13 @@ endif()
 
 project(SIMTStep LANGUAGES C CXX)
 
-# Allow build to locate LLVM/MLIR from common install prefix if the user
+# Allow build to locate LLVM/MLIR from common install prefixes if the user
 # hasn't provided explicit cache entries. Matches the Rust config defaults.
-set(_simt_llvm_prefixes
-    "/opt/llvm-hlsl"
-)
+set(_simt_llvm_prefixes)
+if (DEFINED ENV{LLVM_PREFIX})
+    list(APPEND _simt_llvm_prefixes "$ENV{LLVM_PREFIX}")
+endif()
+list(APPEND _simt_llvm_prefixes "/opt/llvm")
 
 foreach(_prefix IN LISTS _simt_llvm_prefixes)
     if (NOT LLVM_DIR AND EXISTS "${_prefix}/lib/cmake/llvm")

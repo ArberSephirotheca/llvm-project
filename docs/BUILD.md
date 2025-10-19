@@ -1,17 +1,23 @@
 # Building SIMT-Step (C++)
 
-The C++ port now expects the in-tree LLVM/MLIR toolchain you installed at `/opt/llvm-hlsl`. Adjust the paths if your environment differs (older binaries under `/opt/llvm-20` continue to work for legacy setups, but the Clang-based HLSL frontend requires the new build).
+The C++ tree assumes you have a recent out-of-tree LLVM/MLIR build (21.x or newer). Point CMake at the install prefix you produced when building LLVM. Throughout this guide the prefix is referenced via the shell variable `LLVM_PREFIX`; set it once to avoid hard-coded `/opt/llvm` paths:
+
+```bash
+export LLVM_PREFIX=/path/to/your/llvm-install   # e.g. $(pwd)/llvm-install or /opt/llvm
+```
+
+If you followed the quick-start scripts that install into `/opt/llvm`, setting `LLVM_PREFIX=/opt/llvm-hlsl` keeps the old behaviour.
 
 ## Configure
 
 ```bash
 cmake -S . -B build \
-  -DLLVM_DIR=/opt/llvm-hlsl/lib/cmake/llvm \
-  -DMLIR_DIR=/opt/llvm-hlsl/lib/cmake/mlir \
+  -DLLVM_DIR=$LLVM_PREFIX/lib/cmake/llvm \
+  -DMLIR_DIR=$LLVM_PREFIX/lib/cmake/mlir \
   -DCMAKE_BUILD_TYPE=Release
 ```
 
-The root `CMakeLists.txt` already seeds defaults for these variables when it detects `/opt/llvm-hlsl`, so running `cmake -S . -B build` may be enough if the directory is present.
+The root `CMakeLists.txt` still auto-detects `/opt/llvm`; if you export `LLVM_PREFIX` to another location the commands above keep everything in sync.
 
 ## Build
 
@@ -19,22 +25,7 @@ The root `CMakeLists.txt` already seeds defaults for these variables when it det
 cmake --build build
 ```
 
-This produces the shared library `libsimt-step` and the command-line tools under `build/tools/`.
-
-- `simt-run` exercises the registry + interpreter infrastructure, loads the built-in `reduce_add` plugin example, and instantiates stub MLIR modules via the CUDA/HLSL frontend helpers.
-- `simt-convert` reads source text, runs the selected frontend (`--frontend=hlsl|cuda`), and prints the resulting MLIR module.
-- `check-simt-hlsl-import` runs lit-based regression tests for the HLSL
-  importer (requires the LLVM build tree’s `llvm-lit`).
-- `check-simt-opt` runs the structured conversion/interpreter smoke tests, including the
-  `--simt-dump-structured-program` utility pass added to `simt-opt`.
-
-After building you can exercise the structured inspection pass manually:
-
-```bash
-build/tools/simt-opt/simt-opt \
-  --simt-step-to-structured \
-  --simt-dump-structured-program \
-  path/to/input.mlir
+This produces the shared library `libsimt-step` and several command-line tools under `build/tools/`. At the moment **`simt-hlsl-import` is the only fully functional driver** (use it to translate HLSL sources to `simt_step` MLIR). The other executables (`simt-convert`, `simt-run`, `simt-opt`, `simt-step-parse`) are still work in progress or utility stubs, and the `check-*` targets simply exercise their current smoke tests.
 ```
 
 ## Environment
@@ -42,13 +33,12 @@ build/tools/simt-opt/simt-opt \
 Before configuring, ensure your shell uses the Clang toolchain that ships with the same LLVM install:
 
 ```bash
-export PATH=/opt/llvm-hlsl/bin:$PATH
-export CC=/opt/llvm-hlsl/bin/clang
-export CXX=/opt/llvm-hlsl/bin/clang++
-export LD_LIBRARY_PATH=/opt/llvm-hlsl/lib:$LD_LIBRARY_PATH
+export PATH=$LLVM_PREFIX/bin:$PATH
+export CC=$LLVM_PREFIX/bin/clang
+export CXX=$LLVM_PREFIX/bin/clang++
+export LD_LIBRARY_PATH=$LLVM_PREFIX/lib:$LD_LIBRARY_PATH
 ```
 
-These settings mirror `.cargo/config.toml` so both the legacy Rust pieces and the new CMake build can share one dependency layout.
 
 ### HLSL builtin headers
 

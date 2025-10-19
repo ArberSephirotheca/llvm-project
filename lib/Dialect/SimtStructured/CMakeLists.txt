@@ -9,8 +9,11 @@ set(MLIR_TABLEGEN_INCLUDE_DIRECTORIES
 set(_simt_struct_tablegen_includes
     -I${MLIR_MAIN_INCLUDE_DIR}
     -I${LLVM_MAIN_INCLUDE_DIR}
-    -I${PROJECT_SOURCE_DIR}/include
-    -I/opt/llvm-hlsl/include)
+    -I${PROJECT_SOURCE_DIR}/include)
+
+foreach(inc_dir ${LLVM_INCLUDE_DIRS})
+    list(APPEND _simt_struct_tablegen_includes -I${inc_dir})
+endforeach()
 
 mlir_tablegen(StructuredDialect.h.inc -gen-dialect-decls -dialect=simt_struct
     ${_simt_struct_tablegen_includes})
