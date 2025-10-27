@@ -1,5 +1,6 @@
 #pragma once
 
+#include "simt-step/Dialect/SimtStep/SimtStepDialect.h"
 #include "simt-step/semantics/CPSInterpreter.h"
 #include "simt-step/semantics/ExecutionState.h"
 #include "simt-step/semantics/SimpleSemantics.h"
@@ -23,6 +24,11 @@ public:
     const StateType &state() const { return interpreter_.state(); }
 
 private:
+    llvm::Expected<bool> evaluateBool(mlir::Value value,
+                                      SemanticsContext &context);
+    llvm::Error handleIfOp(simt::dialect::IfOp ifOp,
+                           SemanticsContext context);
+
     SimpleSemantics semantics_;
     CPSInterpreter<SimpleSemantics> interpreter_;
 };

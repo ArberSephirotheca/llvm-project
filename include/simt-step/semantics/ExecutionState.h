@@ -93,6 +93,7 @@ template <typename ValueT, typename StepT>
 struct InterpreterState {
     llvm::DenseMap<WaveId, WaveContext<ValueT, StepT>> waves;
     std::queue<ReadyContinuation<ValueT, StepT>> readyQueue;
+    StepT pendingStep;
 };
 
 using DefaultValue = SemValue;

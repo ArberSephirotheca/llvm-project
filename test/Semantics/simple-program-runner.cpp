@@ -40,10 +40,29 @@ llvm::Expected<int> run() {
     auto *entry = func.addEntryBlock();
     builder.setInsertionPointToStart(entry);
     auto loc = builder.getUnknownLoc();
-    auto c1 = builder.create<mlir::arith::ConstantIntOp>(loc, 1, 32);
-    auto c2 = builder.create<mlir::arith::ConstantIntOp>(loc, 2, 32);
-    builder.create<mlir::arith::AddIOp>(loc, c1, c2);
-    builder.create<simt::dialect::LaneIdOp>(loc, builder.getIndexType());
+    auto lhs = builder.create<mlir::arith::ConstantIntOp>(loc, 1, 32);
+    auto rhs = builder.create<mlir::arith::ConstantIntOp>(loc, 2, 32);
+    (void)builder.create<mlir::arith::AddIOp>(loc, lhs, rhs);
+    auto cond = builder.create<mlir::arith::ConstantIntOp>(loc, 1, 1);
+    auto ifOp = builder.create<simt::dialect::IfOp>(loc, cond, /*withElseRegion=*/true);
+
+    {
+        mlir::OpBuilder thenBuilder(ifOp.getThenRegion());
+        auto *thenBlock = &ifOp.getThenRegion().front();
+        thenBuilder.setInsertionPointToEnd(thenBlock);
+        thenBuilder.create<simt::dialect::LaneIdOp>(loc, thenBuilder.getIndexType());
+        thenBuilder.create<simt::dialect::YieldOp>(loc);
+    }
+
+    {
+        mlir::OpBuilder elseBuilder(ifOp.getElseRegion());
+        auto *elseBlock = &ifOp.getElseRegion().front();
+        elseBuilder.setInsertionPointToEnd(elseBlock);
+        auto zero = elseBuilder.create<mlir::arith::ConstantIntOp>(loc, 0, 32);
+        elseBuilder.create<simt::dialect::YieldOp>(loc, mlir::ValueRange{zero});
+    }
+
+    builder.setInsertionPointAfter(ifOp);
     builder.create<mlir::func::ReturnOp>(loc);
 
     mlir::Block &block = func.getBody().front();

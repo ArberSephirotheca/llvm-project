@@ -1,7 +1,11 @@
 #include "simt-step/semantics/SimpleProgram.h"
 
+#include <mlir/Dialect/Arith/IR/Arith.h>
 #include <mlir/IR/Block.h>
 #include <mlir/IR/Operation.h>
+
+#include <llvm/Support/Error.h>
+#include <llvm/Support/raw_ostream.h>
 
 namespace simt::semantics {
 
@@ -12,6 +16,12 @@ llvm::Error SimpleProgramRunner::runBlock(mlir::Block *block,
     auto &laneCtx = waveCtx.lanes[0];
 
     for (mlir::Operation &op : *block) {
+        if (auto ifOp = llvm::dyn_cast<simt::dialect::IfOp>(&op)) {
+            if (llvm::Error err = handleIfOp(ifOp, context))
+                return err;
+            continue;
+        }
+
         StepType step = semantics_.evalOperation(&op, context);
         StepType current = std::move(step);
 
@@ -37,17 +47,48 @@ llvm::Error SimpleProgramRunner::runBlock(mlir::Block *block,
             }
 
             if (std::holds_alternative<typename StepType::Suspend>(variant)) {
-                return llvm::make_error<llvm::StringError>(
-                    "suspend effects are not supported in SimpleProgramRunner",
-                    llvm::inconvertibleErrorCode());
+                auto susp = std::get<typename StepType::Suspend>(std::move(variant));
+                state.pendingStep = StepType::suspend(std::move(susp.effect), std::move(susp.resume));
+                break;
             }
 
             if (std::holds_alternative<typename StepType::Halt>(variant)) {
-                // No value produced; leave returnValue unchanged.
                 break;
             }
         }
     }
+
+    return llvm::Error::success();
+}
+
+llvm::Expected<bool> SimpleProgramRunner::evaluateBool(mlir::Value value,
+                                                       SemanticsContext &context) {
+    if (auto constOp = value.getDefiningOp<mlir::arith::ConstantIntOp>())
+        return constOp.value() != 0;
+
+    if (auto constOp2 = value.getDefiningOp<mlir::arith::ConstantOp>()) {
+        if (auto intAttr = mlir::dyn_cast<mlir::IntegerAttr>(constOp2.getValue()))
+            return intAttr.getInt() != 0;
+    }
+
+    return llvm::make_error<llvm::StringError>(
+        "SimpleProgramRunner only supports constant boolean conditions",
+        llvm::inconvertibleErrorCode());
+}
+
+llvm::Error SimpleProgramRunner::handleIfOp(simt::dialect::IfOp ifOp,
+                                            SemanticsContext context) {
+    auto condOrErr = evaluateBool(ifOp.getCondition(), context);
+    if (!condOrErr)
+        return condOrErr.takeError();
+
+    bool cond = *condOrErr;
+    if (cond) {
+        return runBlock(&ifOp.getThenRegion().front(), context);
+    }
+
+    if (!ifOp.getElseRegion().empty())
+        return runBlock(&ifOp.getElseRegion().front(), context);
 
     return llvm::Error::success();
 }
