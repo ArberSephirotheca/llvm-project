@@ -36,23 +36,26 @@ auto SimpleSemantics::evalOperation(mlir::Operation *op,
     if (auto addOp = llvm::dyn_cast<mlir::arith::AddIOp>(op))
         return handleAddIOp(addOp);
 
+    if (auto cmpOp = llvm::dyn_cast<mlir::arith::CmpIOp>(op))
+        return handleCmpIOp(cmpOp, context);
+
     if (llvm::isa<simt::dialect::LaneIdOp>(op))
         return handleLaneId(context);
 
-    if (llvm::isa<simt::dialect::YieldOp>(op))
-        return StepType::halt();
+    if (llvm::isa<simt::dialect::DispatchThreadIdOp>(op))
+        return handleDispatchThreadId(context);
 
-    if (llvm::isa<mlir::func::ReturnOp>(op))
-        return StepType::halt();
+    if (auto yieldOp = llvm::dyn_cast<simt::dialect::YieldOp>(op))
+        return handleYieldOp(yieldOp, context);
 
-    llvm::errs() << "simple semantics: unsupported op '"
-                 << op->getName().getStringRef() << "'\n";
-    return StepType::halt();
+    if (auto retOp = llvm::dyn_cast<mlir::func::ReturnOp>(op))
+        return handleReturnOp(retOp);
+
+    return handleUnknown(op);
 }
 
-auto SimpleSemantics::handleConstant(mlir::arith::ConstantOp op) -> StepType {
-    SemValue value = makeValueFromAttribute(op.getValue());
-    return StepType::produce(std::move(value));
+auto SimpleSemantics::handleConstant(mlir::arith::ConstantOp) -> StepType {
+    return StepType::halt();
 }
 
 auto SimpleSemantics::handleLaneId(SemanticsContext &context) -> StepType {
@@ -72,6 +75,83 @@ auto SimpleSemantics::handleAddIOp(mlir::arith::AddIOp op) -> StepType {
     SemValue rhs = makeValueFromAttribute(rhsConst.getValue());
     auto result = lhs.add(rhs);
     return StepType::produce(std::move(result));
+}
+
+llvm::Expected<SemValue>
+SimpleSemantics::evaluateValue(mlir::Value value,
+                               SemanticsContext &context) {
+    if (auto constOp = value.getDefiningOp<mlir::arith::ConstantOp>())
+        return makeValueFromAttribute(constOp.getValue());
+
+    if (auto laneOp = value.getDefiningOp<simt::dialect::LaneIdOp>())
+        return SemValue::fromInt32(static_cast<int32_t>(context.laneId));
+
+    if (value.getDefiningOp<simt::dialect::DispatchThreadIdOp>())
+        return SemValue::fromInt32(0);
+
+    if (auto cmpOp = value.getDefiningOp<mlir::arith::CmpIOp>()) {
+        auto step = handleCmpIOp(cmpOp, context);
+        if (!step.isProduce())
+            return llvm::make_error<llvm::StringError>(
+                "cmpi did not produce a value", llvm::inconvertibleErrorCode());
+        auto state = std::move(step).takeState();
+        return std::get<typename StepType::Produce>(std::move(state)).value;
+    }
+
+    return llvm::make_error<llvm::StringError>(
+        "simple semantics: unsupported SSA value", llvm::inconvertibleErrorCode());
+}
+
+auto SimpleSemantics::handleCmpIOp(mlir::arith::CmpIOp op,
+                                   SemanticsContext &context) -> StepType {
+    auto lhsOrErr = evaluateValue(op.getLhs(), context);
+    if (!lhsOrErr)
+        return StepType::halt();
+    auto rhsOrErr = evaluateValue(op.getRhs(), context);
+    if (!rhsOrErr)
+        return StepType::halt();
+
+    bool result = false;
+    switch (op.getPredicate()) {
+    case mlir::arith::CmpIPredicate::eq:
+        result = lhsOrErr->cmpEqual(*rhsOrErr).asBool();
+        break;
+    case mlir::arith::CmpIPredicate::ne:
+        result = lhsOrErr->cmpNotEqual(*rhsOrErr).asBool();
+        break;
+    default:
+        llvm::errs() << "simple semantics: unsupported cmp predicate\n";
+        return StepType::halt();
+    }
+
+    return StepType::produce(SemValue::fromBool(result));
+}
+
+auto SimpleSemantics::handleDispatchThreadId(SemanticsContext &)
+    -> StepType {
+    return StepType::produce(SemValue::fromInt32(0));
+}
+
+auto SimpleSemantics::handleYieldOp(simt::dialect::YieldOp op,
+                                    SemanticsContext &context) -> StepType {
+    if (op.getNumOperands() == 0)
+        return StepType::halt();
+
+    auto valueOrErr = evaluateValue(op.getOperand(0), context);
+    if (!valueOrErr)
+        return StepType::halt();
+
+    return StepType::produce(std::move(*valueOrErr));
+}
+
+auto SimpleSemantics::handleReturnOp(mlir::func::ReturnOp) -> StepType {
+    return StepType::halt();
+}
+
+auto SimpleSemantics::handleUnknown(mlir::Operation *op) -> StepType {
+    llvm::errs() << "simple semantics: unsupported op '"
+                 << op->getName().getStringRef() << "'\n";
+    return StepType::halt();
 }
 
 } // namespace simt::semantics

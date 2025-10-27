@@ -26,6 +26,15 @@ cmake --build build
 ```
 
 This produces the shared library `libsimt-step` and several command-line tools under `build/tools/`. At the moment **`simt-hlsl-import` is the only fully functional driver** (use it to translate HLSL sources to `simt_step` MLIR). The other executables (`simt-convert`, `simt-run`, `simt-opt`, `simt-step-parse`) are still work in progress or utility stubs, and the `check-*` targets simply exercise their current smoke tests.
+
+- `simple-program-runner` lives under `build/test/` and runs the minimal CPS interpreter against a `simt_step` MLIR module. Example:
+  ```bash
+  ./build/test/simple-program-runner test/simple-interpreter/if_else.mlir
+  ```
+  The harness prints the resulting lane value (e.g. `1`). We also expose it as a CTest target:
+  ```bash
+  ctest --test-dir build -R simple_interpreter_if --output-on-failure
+  ```
 ```
 
 ## Environment

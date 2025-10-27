@@ -25,3 +25,7 @@ target_link_libraries(simple-program-runner PRIVATE
     MLIRArithDialect
     MLIRFuncDialect
 )
+
+add_test(NAME simple_interpreter_if
+  COMMAND simple-program-runner ${CMAKE_CURRENT_SOURCE_DIR}/simple-interpreter/if_else.mlir)
+set_tests_properties(simple_interpreter_if PROPERTIES PASS_REGULAR_EXPRESSION "1")

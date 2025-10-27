@@ -8,6 +8,7 @@
 #include <mlir/IR/Builders.h>
 #include <mlir/IR/BuiltinDialect.h>
 #include <mlir/IR/BuiltinOps.h>
+#include <mlir/Parser/Parser.h>
 #include <mlir/IR/DialectRegistry.h>
 #include <mlir/IR/MLIRContext.h>
 
@@ -18,7 +19,7 @@ using namespace simt::semantics;
 
 namespace {
 
-llvm::Expected<int> run() {
+llvm::Expected<int> run(llvm::StringRef path) {
     mlir::DialectRegistry registry;
     simt::dialect::registerSimtStepDialect(registry);
     registry.insert<mlir::BuiltinDialect, mlir::arith::ArithDialect,
@@ -32,38 +33,55 @@ llvm::Expected<int> run() {
     (void)context.getOrLoadDialect<simt::dialect::SimtStepDialect>();
 
     mlir::OpBuilder builder(&context);
-    auto module = mlir::ModuleOp::create(builder.getUnknownLoc());
-    auto funcType = builder.getFunctionType({}, {});
-    auto func = builder.create<mlir::func::FuncOp>(builder.getUnknownLoc(),
-                                                   "kernel", funcType);
-    module.push_back(func);
-    auto *entry = func.addEntryBlock();
-    builder.setInsertionPointToStart(entry);
-    auto loc = builder.getUnknownLoc();
-    auto lhs = builder.create<mlir::arith::ConstantIntOp>(loc, 1, 32);
-    auto rhs = builder.create<mlir::arith::ConstantIntOp>(loc, 2, 32);
-    (void)builder.create<mlir::arith::AddIOp>(loc, lhs, rhs);
-    auto cond = builder.create<mlir::arith::ConstantIntOp>(loc, 1, 1);
-    auto ifOp = builder.create<simt::dialect::IfOp>(loc, cond, /*withElseRegion=*/true);
+    mlir::OwningOpRef<mlir::ModuleOp> module;
+    mlir::func::FuncOp func;
 
-    {
-        mlir::OpBuilder thenBuilder(ifOp.getThenRegion());
-        auto *thenBlock = &ifOp.getThenRegion().front();
-        thenBuilder.setInsertionPointToEnd(thenBlock);
-        thenBuilder.create<simt::dialect::LaneIdOp>(loc, thenBuilder.getIndexType());
-        thenBuilder.create<simt::dialect::YieldOp>(loc);
+    if (path.empty() || path == "-") {
+        module = mlir::ModuleOp::create(builder.getUnknownLoc());
+        auto funcType = builder.getFunctionType({}, {});
+        func = builder.create<mlir::func::FuncOp>(builder.getUnknownLoc(),
+                                                  "kernel", funcType);
+        module->push_back(func);
+        auto *entry = func.addEntryBlock();
+        builder.setInsertionPointToStart(entry);
+        auto loc = builder.getUnknownLoc();
+        auto lhs = builder.create<mlir::arith::ConstantIntOp>(loc, 1, 32);
+        auto rhs = builder.create<mlir::arith::ConstantIntOp>(loc, 2, 32);
+        (void)builder.create<mlir::arith::AddIOp>(loc, lhs, rhs);
+        auto cond = builder.create<mlir::arith::ConstantIntOp>(loc, 1, 1);
+        auto ifOp = builder.create<simt::dialect::IfOp>(loc, cond, /*withElseRegion=*/true);
+
+        {
+            mlir::OpBuilder thenBuilder(ifOp.getThenRegion());
+            thenBuilder.setInsertionPointToEnd(&ifOp.getThenRegion().front());
+            thenBuilder.create<simt::dialect::LaneIdOp>(loc, thenBuilder.getIndexType());
+            thenBuilder.create<simt::dialect::YieldOp>(loc);
+        }
+
+        {
+            mlir::OpBuilder elseBuilder(ifOp.getElseRegion());
+            elseBuilder.setInsertionPointToEnd(&ifOp.getElseRegion().front());
+            elseBuilder.create<simt::dialect::YieldOp>(loc);
+        }
+
+        builder.setInsertionPointAfter(ifOp);
+        builder.create<mlir::func::ReturnOp>(loc);
+    } else {
+        module = mlir::parseSourceFile<mlir::ModuleOp>(path, &context);
+        if (!module)
+            return llvm::make_error<llvm::StringError>(
+                "failed to parse module", llvm::inconvertibleErrorCode());
+
+        for (mlir::Operation &op : module->getBody()->getOperations())
+            if (auto f = mlir::dyn_cast<mlir::func::FuncOp>(op)) {
+                func = f;
+                break;
+            }
+
+        if (!func)
+            return llvm::make_error<llvm::StringError>(
+                "module missing func.func", llvm::inconvertibleErrorCode());
     }
-
-    {
-        mlir::OpBuilder elseBuilder(ifOp.getElseRegion());
-        auto *elseBlock = &ifOp.getElseRegion().front();
-        elseBuilder.setInsertionPointToEnd(elseBlock);
-        auto zero = elseBuilder.create<mlir::arith::ConstantIntOp>(loc, 0, 32);
-        elseBuilder.create<simt::dialect::YieldOp>(loc, mlir::ValueRange{zero});
-    }
-
-    builder.setInsertionPointAfter(ifOp);
-    builder.create<mlir::func::ReturnOp>(loc);
 
     mlir::Block &block = func.getBody().front();
 
@@ -94,12 +112,18 @@ llvm::Expected<int> run() {
 
 } // namespace
 
-int main() {
-    auto resultOrErr = run();
+int main(int argc, char **argv) {
+    llvm::StringRef path;
+    if (argc > 1)
+        path = argv[1];
+
+    auto resultOrErr = run(path);
     if (!resultOrErr) {
         llvm::errs() << llvm::toString(resultOrErr.takeError()) << "\n";
         return 1;
     }
-    // Expect lane id (4) to be the final produced value.
+    if (!path.empty() && path != "-")
+        return 0;
+    // Default in-memory program: expect lane id (4).
     return *resultOrErr == 4 ? 0 : 1;
 }

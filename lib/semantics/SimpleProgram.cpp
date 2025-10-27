@@ -63,17 +63,10 @@ llvm::Error SimpleProgramRunner::runBlock(mlir::Block *block,
 
 llvm::Expected<bool> SimpleProgramRunner::evaluateBool(mlir::Value value,
                                                        SemanticsContext &context) {
-    if (auto constOp = value.getDefiningOp<mlir::arith::ConstantIntOp>())
-        return constOp.value() != 0;
-
-    if (auto constOp2 = value.getDefiningOp<mlir::arith::ConstantOp>()) {
-        if (auto intAttr = mlir::dyn_cast<mlir::IntegerAttr>(constOp2.getValue()))
-            return intAttr.getInt() != 0;
-    }
-
-    return llvm::make_error<llvm::StringError>(
-        "SimpleProgramRunner only supports constant boolean conditions",
-        llvm::inconvertibleErrorCode());
+    auto semv = semantics_.evaluateValue(value, context);
+    if (!semv)
+        return semv.takeError();
+    return semv->asBool();
 }
 
 llvm::Error SimpleProgramRunner::handleIfOp(simt::dialect::IfOp ifOp,
