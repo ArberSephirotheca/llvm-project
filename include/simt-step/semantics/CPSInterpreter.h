@@ -5,8 +5,12 @@
 #include <cstdint>
 #include <functional>
 #include <optional>
+#include <type_traits>
 #include <utility>
 #include <variant>
+#include <queue>
+
+#include <llvm/Support/Error.h>
 
 namespace mlir {
 class Operation;
@@ -137,6 +141,7 @@ public:
     bool isSuspend() const { return std::holds_alternative<Suspend>(state_); }
 
     const State &state() const { return state_; }
+    State takeState() && { return std::move(state_); }
 
 private:
     State state_;
@@ -150,7 +155,11 @@ struct SimtStepSemanticsAdaptor {
     using StepType = Step<ValueType>;
 
     StepType eval(Impl &impl, mlir::Operation *op, SemanticsContext &context) {
-        return impl.eval(op, context);
+        if constexpr (requires { impl.evalOperation(op, context); }) {
+            return impl.evalOperation(op, context);
+        } else {
+            return impl.eval(op, context);
+        }
     }
 };
 
@@ -175,6 +184,139 @@ public:
 private:
     SemanticsT semantics_;
     SimtStepSemanticsAdaptor<SemanticsT> adaptor_;
+};
+
+// Forward declarations for state structures defined in ExecutionState.h.
+struct DynamicBlockKey;
+template <typename ValueT, typename StepT>
+struct ReadyContinuation;
+template <typename ValueT, typename StepT>
+struct InterpreterState;
+using WaveId = std::uint32_t;
+using LaneId = std::uint32_t;
+
+/// Template interpreter harness that drives CPS-style semantics.
+template <typename SemanticsT>
+class CPSInterpreter {
+public:
+    using ValueType = typename SemanticsT::ValueType;
+    using StepType = Step<ValueType>;
+    using StateType = InterpreterState<ValueType, StepType>;
+
+    explicit CPSInterpreter(SemanticsT semantics)
+        : semantics_(std::move(semantics)) {}
+
+    StateType &state() { return state_; }
+    const StateType &state() const { return state_; }
+
+    /// Enqueue an initial continuation for the given wave/block/lane triple.
+    void enqueue(WaveId wave, const DynamicBlockKey &block, LaneId lane,
+                 StepType step) {
+        ensureWaveBlock(wave, block, lane);
+        state_.readyQueue.push(
+            ReadyContinuation<ValueType, StepType>{wave, block, lane, std::move(step)});
+    }
+
+    /// Execute a single ready continuation if available.
+    llvm::Error runOne() {
+        if (state_.readyQueue.empty())
+            return llvm::Error::success();
+        auto item = std::move(state_.readyQueue.front());
+        state_.readyQueue.pop();
+        return processReady(std::move(item));
+    }
+
+    /// Run until there are no ready continuations left.
+    llvm::Error run() {
+        while (!state_.readyQueue.empty()) {
+            if (llvm::Error err = runOne())
+                return err;
+        }
+        return llvm::Error::success();
+    }
+
+private:
+    llvm::Error processReady(ReadyContinuation<ValueType, StepType> item) {
+        ensureWaveBlock(item.wave, item.block, item.lane);
+        auto &waveCtx = state_.waves[item.wave];
+        auto &laneCtx = waveCtx.lanes[item.lane];
+        laneCtx.currentBlock = item.block;
+
+        StepType current = std::move(item.resume);
+        for (;;) {
+            typename StepType::State stateVariant = std::move(current).takeState();
+
+            if (std::holds_alternative<typename StepType::Continue>(stateVariant)) {
+                auto cont =
+                    std::get<typename StepType::Continue>(std::move(stateVariant));
+                if (!cont.next) {
+                    return llvm::make_error<llvm::StringError>(
+                        "continuation missing resume function",
+                        llvm::inconvertibleErrorCode());
+                }
+                current = cont.next();
+                continue;
+            }
+
+            if (std::holds_alternative<typename StepType::Produce>(stateVariant)) {
+                auto prod =
+                    std::get<typename StepType::Produce>(std::move(stateVariant));
+                laneCtx.hasReturned = true;
+                laneCtx.returnValue = std::move(prod.value);
+                return llvm::Error::success();
+            }
+
+            if (std::holds_alternative<typename StepType::Halt>(stateVariant)) {
+                laneCtx.hasReturned = true;
+                laneCtx.returnValue.reset();
+                return llvm::Error::success();
+            }
+
+            if (std::holds_alternative<typename StepType::Suspend>(stateVariant)) {
+                auto susp =
+                    std::get<typename StepType::Suspend>(std::move(stateVariant));
+                return handleSuspend(item.wave, item.block, item.lane,
+                                     std::move(susp));
+            }
+
+            return llvm::make_error<llvm::StringError>(
+                "unknown step state encountered in CPS interpreter",
+                llvm::inconvertibleErrorCode());
+        }
+    }
+
+    llvm::Error handleSuspend(WaveId wave, const DynamicBlockKey &block,
+                              LaneId lane,
+                              typename StepType::Suspend &&suspend) {
+        if (suspend.effect.isa<YieldEffect>()) {
+            if (!suspend.resume) {
+                return llvm::make_error<llvm::StringError>(
+                    "yield effect missing resume continuation",
+                    llvm::inconvertibleErrorCode());
+            }
+            StepType resumed = suspend.resume();
+            enqueue(wave, block, lane, std::move(resumed));
+            return llvm::Error::success();
+        }
+
+        return llvm::make_error<llvm::StringError>(
+            "collective/synchronization effects are not implemented in CPS interpreter yet",
+            llvm::inconvertibleErrorCode());
+    }
+
+    void ensureWaveBlock(WaveId wave, const DynamicBlockKey &block, LaneId lane) {
+        auto &waveCtx = state_.waves[wave];
+        auto [blockIt, inserted] = waveCtx.blocks.try_emplace(block);
+        if (inserted) {
+            blockIt->second.block = block.block;
+            blockIt->second.iteration = block.iteration;
+            blockIt->second.activeMask = 0;
+        }
+        waveCtx.lanes.try_emplace(lane);
+    }
+
+    SemanticsT semantics_;
+    StateType state_;
 };
 
 } // namespace simt::semantics

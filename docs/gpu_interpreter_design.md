@@ -95,6 +95,49 @@ Barrier semantics, reconvergence, and subgroup scheduling policies are all natur
 - Write handlers as composable functors (`SubgroupBarrierHandler`, `ModelCheckerHandler`).
 - Test with random programs, compare traces under different semantics.
 
+## Runtime State Layout
+The concrete interpreter mirrors MiniHLSL’s dynamic block model. We keep one
+authoritative record per shared entity:
+
+- **DynamicBlockKey**
+  - `const mlir::Block *block;`
+  - `uint32_t iteration;` — loop iteration counter (0 for straight-line blocks).
+- **DynamicBlock**
+  - `const mlir::Block *block;`
+  - `uint64_t activeMask;`
+  - `DenseMap<mlir::Value, SemValue> carriedValues;`
+  - `DenseMap<LaneId, StepType> continuations;` (suspended lane continuations)
+  - `uint32_t iteration;`
+- **LaneContext**
+  - `DenseMap<mlir::Value, SemValue> values;`
+  - `bool hasReturned;`
+  - `std::optional<SemValue> returnValue;`
+  - `std::optional<DynamicBlockKey> currentBlock;`
+- **CollectiveSyncPoint / SynchronizationSyncPoint**
+  - Effect payload (`CollectiveEffect` / `SynchronizationEffect`)
+  - `DynamicBlockKey block;`
+  - `uint64_t expectedMask;`
+  - `DenseSet<LaneId> arrivals;`
+  - `DenseMap<LaneId, SemValue> operands` (+ results for collectives)
+  - `DenseMap<LaneId, StepType> continuations;`
+- **WaveContext**
+  - `uint64_t currentMask;`
+  - `DenseMap<DynamicBlockKey, DynamicBlock> blocks;`
+  - `SmallVector<MergeStackEntry> mergeStack;`
+  - `DenseMap<uint32_t, CollectiveSyncPoint>;`
+  - `DenseMap<uint32_t, SynchronizationSyncPoint>;`
+  - `DenseMap<LaneId, LaneContext> lanes;`
+- **ReadyContinuation**
+  - `WaveId wave; DynamicBlockKey block; LaneId lane; StepType resume;`
+- **InterpreterState**
+  - `DenseMap<WaveId, WaveContext> waves;`
+  - `std::queue<ReadyContinuation>` readyQueue;
+
+Only one structure “owns” each piece of state: active masks live on dynamic
+blocks, lane SSA environments live in `LaneContext`, and runnable work is
+centralised in the ready queue. This keeps the CPS scheduler lean and avoids
+the duplication issues that plagued early prototypes.
+
 ## Mask Threading Contract
 - Structured lowering threads masks explicitly through block arguments. Branches
   forward the current mask operand, and reconvergence points insert

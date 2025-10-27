@@ -1,6 +1,7 @@
 #pragma once
 
 #include "simt-step/semantics/CPSInterpreter.h"
+#include "simt-step/semantics/SemValue.h"
 
 #include <cstdint>
 #include <limits>
@@ -79,6 +80,7 @@ struct WaveContext {
     llvm::SmallVector<MergeStackEntry<ValueT, StepT>, 8> mergeStack;
     llvm::DenseMap<std::uint32_t, CollectiveSyncPoint<ValueT, StepT>> collectives;
     llvm::DenseMap<std::uint32_t, SynchronizationSyncPoint<ValueT, StepT>> syncPoints;
+    llvm::DenseMap<LaneId, LaneContext<ValueT, StepT>> lanes;
 };
 
 template <typename ValueT, typename StepT>
@@ -94,6 +96,10 @@ struct InterpreterState {
     llvm::DenseMap<WaveId, WaveContext<ValueT, StepT>> waves;
     std::queue<ReadyContinuation<ValueT, StepT>> readyQueue;
 };
+
+using DefaultValue = SemValue;
+using DefaultStep = Step<SemValue>;
+using DefaultInterpreterState = InterpreterState<DefaultValue, DefaultStep>;
 
 } // namespace simt::semantics
 
