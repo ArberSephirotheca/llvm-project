@@ -15,7 +15,7 @@ public:
     using StepType = Step<ValueType>;
     using StateType = DefaultInterpreterState;
 
-    SimpleProgramRunner();
+    SimpleProgramRunner() : semantics_(), interpreter_(semantics_) {}
 
     llvm::Error runBlock(mlir::Block *block,
                          SemanticsContext context = SemanticsContext{});
@@ -23,10 +23,6 @@ public:
     const StateType &state() const { return interpreter_.state(); }
 
 private:
-    StepType buildStep(mlir::Block *block,
-                       mlir::Block::iterator it,
-                       SemanticsContext context);
-
     SimpleSemantics semantics_;
     CPSInterpreter<SimpleSemantics> interpreter_;
 };

@@ -268,7 +268,6 @@ private:
 
             if (std::holds_alternative<typename StepType::Halt>(stateVariant)) {
                 laneCtx.hasReturned = true;
-                laneCtx.returnValue.reset();
                 return llvm::Error::success();
             }
 

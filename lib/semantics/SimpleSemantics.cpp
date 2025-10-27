@@ -42,6 +42,9 @@ auto SimpleSemantics::evalOperation(mlir::Operation *op,
     if (llvm::isa<simt::dialect::YieldOp>(op))
         return StepType::halt();
 
+    if (llvm::isa<mlir::func::ReturnOp>(op))
+        return StepType::halt();
+
     llvm::errs() << "simple semantics: unsupported op '"
                  << op->getName().getStringRef() << "'\n";
     return StepType::halt();

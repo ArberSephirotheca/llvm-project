@@ -5,10 +5,11 @@
 
 #include <mlir/Dialect/Arith/IR/Arith.h>
 #include <mlir/Dialect/Func/IR/FuncOps.h>
+#include <mlir/IR/Builders.h>
+#include <mlir/IR/BuiltinDialect.h>
 #include <mlir/IR/BuiltinOps.h>
 #include <mlir/IR/DialectRegistry.h>
 #include <mlir/IR/MLIRContext.h>
-#include <mlir/Parser/Parser.h>
 
 #include <llvm/Support/Error.h>
 #include <llvm/Support/raw_ostream.h>
@@ -17,35 +18,33 @@ using namespace simt::semantics;
 
 namespace {
 
-constexpr llvm::StringLiteral kProgramIR = R"mlir(
-module {
-  func.func @kernel() {
-    %c1 = arith.constant 1 : i32
-    %c2 = arith.constant 2 : i32
-    %sum = arith.addi %c1, %c2 : i32
-    %lane = simt_step.lane_id : index
-    simt_step.yield
-  }
-}
-)mlir";
-
 llvm::Expected<int> run() {
     mlir::DialectRegistry registry;
-    registry.insert<mlir::arith::ArithDialect, mlir::func::FuncDialect,
-                    simt::dialect::SimtStepDialect>();
+    simt::dialect::registerSimtStepDialect(registry);
+    registry.insert<mlir::BuiltinDialect, mlir::arith::ArithDialect,
+                    mlir::func::FuncDialect, simt::dialect::SimtStepDialect>();
 
     mlir::MLIRContext context(registry);
     context.loadAllAvailableDialects();
+    (void)context.getOrLoadDialect<mlir::BuiltinDialect>();
+    (void)context.getOrLoadDialect<mlir::arith::ArithDialect>();
+    (void)context.getOrLoadDialect<mlir::func::FuncDialect>();
+    (void)context.getOrLoadDialect<simt::dialect::SimtStepDialect>();
 
-    auto module = mlir::parseSourceString<mlir::ModuleOp>(kProgramIR, &context);
-    if (!module)
-        return llvm::make_error<llvm::StringError>(
-            "failed to parse simple program", llvm::inconvertibleErrorCode());
-
-    auto func = mlir::dyn_cast<mlir::func::FuncOp>(*module->getBody()->begin());
-    if (!func)
-        return llvm::make_error<llvm::StringError>(
-            "expected func.func entry", llvm::inconvertibleErrorCode());
+    mlir::OpBuilder builder(&context);
+    auto module = mlir::ModuleOp::create(builder.getUnknownLoc());
+    auto funcType = builder.getFunctionType({}, {});
+    auto func = builder.create<mlir::func::FuncOp>(builder.getUnknownLoc(),
+                                                   "kernel", funcType);
+    module.push_back(func);
+    auto *entry = func.addEntryBlock();
+    builder.setInsertionPointToStart(entry);
+    auto loc = builder.getUnknownLoc();
+    auto c1 = builder.create<mlir::arith::ConstantIntOp>(loc, 1, 32);
+    auto c2 = builder.create<mlir::arith::ConstantIntOp>(loc, 2, 32);
+    builder.create<mlir::arith::AddIOp>(loc, c1, c2);
+    builder.create<simt::dialect::LaneIdOp>(loc, builder.getIndexType());
+    builder.create<mlir::func::ReturnOp>(loc);
 
     mlir::Block &block = func.getBody().front();
 
@@ -82,6 +81,6 @@ int main() {
         llvm::errs() << llvm::toString(resultOrErr.takeError()) << "\n";
         return 1;
     }
-    // Expect (1 + 2) = 3 as the last computed value.
-    return *resultOrErr == 3 ? 0 : 1;
+    // Expect lane id (4) to be the final produced value.
+    return *resultOrErr == 4 ? 0 : 1;
 }
