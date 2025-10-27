@@ -16,3 +16,6 @@ add_lit_testsuite(check-simt-opt "Running simt-opt regression tests"
   ARGS -j1)
 
 set_target_properties(check-simt-opt PROPERTIES FOLDER "Tests")
+
+add_executable(simple-program-runner Semantics/simple-program-runner.cpp)
+target_link_libraries(simple-program-runner PRIVATE simt-step MLIRParser MLIRIR)
