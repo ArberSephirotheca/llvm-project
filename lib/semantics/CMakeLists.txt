@@ -6,4 +6,5 @@ target_sources(simt-step
         ${CMAKE_CURRENT_SOURCE_DIR}/StructuredInterpreter.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/ValueStorage.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/StructuredProgramPasses.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/SimpleSemantics.cpp
 )

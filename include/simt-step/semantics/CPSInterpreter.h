@@ -288,7 +288,7 @@ private:
     llvm::Error handleSuspend(WaveId wave, const DynamicBlockKey &block,
                               LaneId lane,
                               typename StepType::Suspend &&suspend) {
-        if (suspend.effect.isa<YieldEffect>()) {
+        if (suspend.effect.template isa<YieldEffect>()) {
             if (!suspend.resume) {
                 return llvm::make_error<llvm::StringError>(
                     "yield effect missing resume continuation",
@@ -308,8 +308,6 @@ private:
         auto &waveCtx = state_.waves[wave];
         auto [blockIt, inserted] = waveCtx.blocks.try_emplace(block);
         if (inserted) {
-            blockIt->second.block = block.block;
-            blockIt->second.iteration = block.iteration;
             blockIt->second.activeMask = 0;
         }
         waveCtx.lanes.try_emplace(lane);

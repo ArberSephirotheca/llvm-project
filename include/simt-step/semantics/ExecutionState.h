@@ -33,11 +33,9 @@ struct DynamicBlockKey {
 
 template <typename ValueT, typename StepT>
 struct DynamicBlock {
-    const mlir::Block *block = nullptr;
     std::uint64_t activeMask = 0;
     llvm::DenseMap<mlir::Value, ValueT> carriedValues;
     llvm::DenseMap<LaneId, StepT> continuations;
-    std::uint32_t iteration = 0;
 };
 
 template <typename ValueT, typename StepT>
