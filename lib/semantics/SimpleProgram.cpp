@@ -13,52 +13,20 @@ llvm::Error SimpleProgramRunner::runBlock(mlir::Block *block,
                                           SemanticsContext context) {
     auto &state = interpreter_.state();
     auto &waveCtx = state.waves[0];
-    auto &laneCtx = waveCtx.lanes[0];
 
-    for (mlir::Operation &op : *block) {
-        if (auto ifOp = llvm::dyn_cast<simt::dialect::IfOp>(&op)) {
-            if (llvm::Error err = handleIfOp(ifOp, context))
-                return err;
-            continue;
-        }
+    DynamicBlockKey entryKey{block, 0};
+    auto &entryBlock = waveCtx.blocks[entryKey];
+    entryBlock.block = block;
+    entryBlock.iteration = 0;
+    entryBlock.expectedMask = context.activeMask ? context.activeMask : 0x1;
+    entryBlock.activeMask = entryBlock.expectedMask;
+    entryBlock.completedMask = 0;
 
-        StepType step = semantics_.evalOperation(&op, context);
-        StepType current = std::move(step);
+    waveCtx.lanes[0];
 
-        while (true) {
-            auto variant = std::move(current).takeState();
-
-            if (std::holds_alternative<typename StepType::Continue>(variant)) {
-                auto cont = std::get<typename StepType::Continue>(std::move(variant));
-                if (!cont.next) {
-                    return llvm::make_error<llvm::StringError>(
-                        "continuation missing resume function",
-                        llvm::inconvertibleErrorCode());
-                }
-                current = cont.next();
-                continue;
-            }
-
-            if (std::holds_alternative<typename StepType::Produce>(variant)) {
-                auto prod = std::get<typename StepType::Produce>(std::move(variant));
-                laneCtx.hasReturned = true;
-                laneCtx.returnValue = prod.value;
-                break;
-            }
-
-            if (std::holds_alternative<typename StepType::Suspend>(variant)) {
-                auto susp = std::get<typename StepType::Suspend>(std::move(variant));
-                state.pendingStep = StepType::suspend(std::move(susp.effect), std::move(susp.resume));
-                break;
-            }
-
-            if (std::holds_alternative<typename StepType::Halt>(variant)) {
-                break;
-            }
-        }
-    }
-
-    return llvm::Error::success();
+    StepType step = semantics_.evalOperation(&block->front(), context);
+    interpreter_.enqueue(/*wave=*/0, entryKey, /*lane=*/0, std::move(step));
+    return interpreter_.run();
 }
 
 llvm::Expected<bool> SimpleProgramRunner::evaluateBool(mlir::Value value,

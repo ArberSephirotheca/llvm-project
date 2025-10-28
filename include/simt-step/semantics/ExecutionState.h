@@ -33,9 +33,16 @@ struct DynamicBlockKey {
 
 template <typename ValueT, typename StepT>
 struct DynamicBlock {
+    const mlir::Block *block = nullptr;
+    std::uint32_t iteration = 0;
+
+    std::uint64_t expectedMask = 0;
     std::uint64_t activeMask = 0;
-    llvm::DenseMap<mlir::Value, ValueT> carriedValues;
+    std::uint64_t completedMask = 0;
+
     llvm::DenseMap<LaneId, StepT> continuations;
+    llvm::DenseMap<LaneId, StepT> pendingOps;
+    llvm::DenseMap<mlir::Value, ValueT> carriedValues;
 };
 
 template <typename ValueT, typename StepT>
@@ -63,12 +70,16 @@ struct LaneContext {
     bool hasReturned = false;
     std::optional<ValueT> returnValue;
     std::optional<DynamicBlockKey> currentBlock;
+    enum class Phase { Running, Waiting, Completed } phase = Phase::Running;
 };
 
 template <typename ValueT, typename StepT>
 struct MergeStackEntry {
     DynamicBlockKey parent;
     llvm::SmallVector<DynamicBlockKey, 4> pendingChildren;
+    llvm::SmallVector<std::uint64_t, 4> childMasks;
+    std::uint64_t expectedMask = 0;
+    std::uint64_t completedMask = 0;
 };
 
 template <typename ValueT, typename StepT>
