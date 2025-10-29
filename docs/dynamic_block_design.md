@@ -176,6 +176,43 @@ lane, step}`. For each step:
 This replaces the old “for each op in block” loop; from now on, the queue is the
 sole driver of execution order.
 
+### 3.3 Implementation Checklist (Step 2)
+
+The transition from the sequential loop to the CPS queue involves several
+mechanical steps. Work through them one by one:
+
+1. **Per-op continuations** – add a helper that, given a block iterator and
+   lane, returns a `Step::continueWith` wrapping `evalOperation`. The lambda
+   should call `evalOperation`, then decide whether to enqueue the next iterator
+   (for `Continue`) or return `halt()` when the block ends.
+
+2. **Seed entry block** – in `runBlock`, construct the entry `DynamicBlock`
+   (`expectedMask`, `activeMask` seeded with the initial lane mask), build the
+   first continuation, enqueue it, and call `CPSInterpreter::run()`.
+
+3. **Unify queue handling** – eliminate any direct use of the sequential
+   for-loop; all operation execution should flow through the ready queue. Remove
+   the temporary `pendingStep` field in `InterpreterState` once everything is
+   queued.
+
+4. **`simt_step.if` split** – replace the current recursive call in
+   `handleIfOp` with the mask-splitting logic described in Section 2. Populate
+   child blocks, push merge-stack entries, enqueue their continuations, and store
+   the parent continuation to be resumed later.
+
+5. **Reconvergence signal** – when a child block finishes a lane, update
+   `activeMask`, `completedMask`, and the merge stack. Once all participating
+   lanes complete (`completedMask == expectedMask`), pop the merge-stack entry
+   and enqueue the stored parent continuation.
+
+6. **Testing** – run the existing branch test and extend it to cover multiple
+   lanes once mask splitting is live. Ensure the interpreter still prints the
+   expected values via CLI and CTest.
+
+The checklist mirrors the narrative sections above, but makes the step-by-step
+implementation explicit so you can follow it without keeping the entire document
+in your head.
+
 ---
 
 ## 4. Synchronization Effects (stage 2)

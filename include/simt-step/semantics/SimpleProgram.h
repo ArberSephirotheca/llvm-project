@@ -24,6 +24,15 @@ public:
     const StateType &state() const { return interpreter_.state(); }
 
 private:
+    StepType buildStepForIterator(mlir::Block *block,
+                                  mlir::Block::iterator it,
+                                  SemanticsContext context);
+    StepType evaluateAndChain(StepType step, mlir::Block *block,
+                              mlir::Block::iterator nextIt,
+                              SemanticsContext context,
+                              bool isTerminator,
+                              bool continueAfterResult);
+
     llvm::Expected<bool> evaluateBool(mlir::Value value,
                                       SemanticsContext &context);
     llvm::Error handleIfOp(simt::dialect::IfOp ifOp,
