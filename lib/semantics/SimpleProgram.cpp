@@ -13,10 +13,16 @@
 
 namespace simt::semantics {
 
+namespace {
+using StepType = SimpleProgramRunner::StepType;
+using StateType = SimpleProgramRunner::StateType;
+}
+
 llvm::Error SimpleProgramRunner::runBlock(mlir::Block *block,
                                           SemanticsContext context) {
     auto &state = interpreter_.state();
-    state = StateType{};
+    StateType newState;
+    state = std::move(newState);
 
     if (block->empty())
         return llvm::Error::success();
@@ -43,7 +49,7 @@ llvm::Error SimpleProgramRunner::runBlock(mlir::Block *block,
     laneCtx.values.clear();
     laneCtx.hasReturned = false;
     laneCtx.returnValue.reset();
-    laneCtx.phase = decltype(laneCtx)::Phase::Running;
+    laneCtx.phase = decltype(laneCtx.phase)::Running;
     laneCtx.currentBlock = entryKey;
 
     StepType initialStep = buildStepForIterator(block, block->begin(), context);
@@ -55,9 +61,10 @@ llvm::Error SimpleProgramRunner::runBlock(mlir::Block *block,
     return llvm::Error::success();
 }
 
-StepType SimpleProgramRunner::buildStepForIterator(mlir::Block *block,
-                                                   mlir::Block::iterator it,
-                                                   SemanticsContext context) {
+SimpleProgramRunner::StepType
+SimpleProgramRunner::buildStepForIterator(mlir::Block *block,
+                                          mlir::Block::iterator it,
+                                          SemanticsContext context) {
     if (it == block->end())
         return StepType::halt();
 
@@ -99,12 +106,13 @@ return evaluateAndChain(std::move(step), block, nextIt, context,
                         /*continueAfterResult=*/true);
 }
 
-StepType SimpleProgramRunner::evaluateAndChain(StepType step,
-                                               mlir::Block *block,
-                                               mlir::Block::iterator nextIt,
-                                               SemanticsContext context,
-                                               bool isTerminator,
-                                               bool continueAfterResult) {
+SimpleProgramRunner::StepType
+SimpleProgramRunner::evaluateAndChain(StepType step,
+                                      mlir::Block *block,
+                                      mlir::Block::iterator nextIt,
+                                      SemanticsContext context,
+                                      bool isTerminator,
+                                      bool continueAfterResult) {
     StepType current = std::move(step);
 
     while (true) {
