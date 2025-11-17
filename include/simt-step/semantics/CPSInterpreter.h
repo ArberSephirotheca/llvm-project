@@ -1,7 +1,10 @@
 #pragma once
 
+#include "simt-step/semantics/Effects.h"
+#include "simt-step/semantics/ExecutionState.h"
 #include "simt-step/semantics/SemanticsContext.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <functional>
 #include <optional>
@@ -17,81 +20,6 @@ class Operation;
 } // namespace mlir
 
 namespace simt::semantics {
-
-/// Describes a barrier rendezvous that suspends execution until the handler
-/// releases the stored continuation.
-struct BarrierEffect {
-    /// Placeholder scope identifier; concrete semantics can reinterpret it.
-    std::uint32_t scope = 0;
-};
-
-/// Models an explicit yield back to the scheduler.
-struct YieldEffect {
-    /// Optional payload for instrumentation hooks.
-    std::optional<std::uint64_t> tag;
-};
-
-/// Coordinates collective operations (wave intrinsics, reductions, etc.).
-struct CollectiveEffect {
-    /// Identifier for the collective kind (e.g., opcode or enum value).
-    std::uint32_t operation = 0;
-    /// Bitmask of participating lanes; interpretation is semantics-specific.
-    std::uint64_t activeMask = 0;
-    /// Optional slot for implementation-defined payload indexing.
-    std::optional<std::uint32_t> token;
-};
-
-/// Notifies the handler about an execution-wide synchronization point (e.g.,
-/// subgroup barrier) using the same metadata layout as collectives for ease of
-/// handling.
-struct SynchronizationEffect {
-    /// Identifier for the synchronization operation.
-    std::uint32_t operation = 0;
-    /// Bitmask of participating lanes; interpretation is semantics-specific.
-    std::uint64_t activeMask = 0;
-    /// Optional slot for implementation-defined payload indexing.
-    std::optional<std::uint32_t> token;
-};
-
-/// Requests that the handler explore multiple continuations (e.g., for model
-/// checking). The handler chooses which branch to resume.
-struct NondeterministicChoiceEffect {
-    std::uint32_t choiceCount = 0;
-};
-
-/// Aggregates all supported interpreter effects.
-struct Effect {
-    using Payload =
-        std::variant<std::monostate, BarrierEffect, YieldEffect, CollectiveEffect,
-                     SynchronizationEffect, NondeterministicChoiceEffect>;
-
-    Effect() = default;
-
-    template <typename EffectT>
-    Effect(EffectT effect) : payload_(std::move(effect)) {}
-
-    bool hasValue() const {
-        return !std::holds_alternative<std::monostate>(payload_);
-    }
-
-    template <typename EffectT>
-    bool isa() const {
-        return std::holds_alternative<EffectT>(payload_);
-    }
-
-    template <typename EffectT>
-    EffectT &get() {
-        return std::get<EffectT>(payload_);
-    }
-
-    template <typename EffectT>
-    const EffectT &get() const {
-        return std::get<EffectT>(payload_);
-    }
-
-private:
-    Payload payload_;
-};
 
 /// Continuation-Passing Style control primitive returned by interpreter steps.
 template <typename ValueT>
@@ -186,19 +114,6 @@ private:
     SimtStepSemanticsAdaptor<SemanticsT> adaptor_;
 };
 
-// Forward declarations for state structures defined in ExecutionState.h.
-struct DynamicBlockKey;
-template <typename ValueT, typename StepT>
-struct ReadyContinuation;
-template <typename ValueT, typename StepT>
-struct DynamicBlock;
-template <typename ValueT, typename StepT>
-struct WaveContext;
-template <typename ValueT, typename StepT>
-struct InterpreterState;
-using WaveId = std::uint32_t;
-using LaneId = std::uint32_t;
-
 /// Template interpreter harness that drives CPS-style semantics.
 template <typename SemanticsT>
 class CPSInterpreter {
@@ -245,7 +160,9 @@ private:
         auto &waveCtx = state_.waves[item.wave];
         auto &laneCtx = waveCtx.lanes[item.lane];
         laneCtx.currentBlock = item.block;
-
+        if (auto *blockCtx = getBlock(waveCtx, item.block)) {
+            waveCtx.currentMask = blockCtx->activeMask;
+        }
         StepType current = std::move(item.resume);
         for (;;) {
             typename StepType::State stateVariant = std::move(current).takeState();
@@ -271,6 +188,7 @@ private:
                     std::uint64_t laneBit = 1ull << item.lane;
                     blockCtx->activeMask &= ~laneBit;
                     blockCtx->completedMask |= laneBit;
+                    handleReconvergence(item.wave, waveCtx, item.block, item.lane);
                 }
                 return llvm::Error::success();
             }
@@ -281,6 +199,7 @@ private:
                     std::uint64_t laneBit = 1ull << item.lane;
                     blockCtx->activeMask &= ~laneBit;
                     blockCtx->completedMask |= laneBit;
+                    handleReconvergence(item.wave, waveCtx, item.block, item.lane);
                 }
                 return llvm::Error::success();
             }
@@ -331,6 +250,48 @@ private:
              const DynamicBlockKey &key) {
         auto it = waveCtx.blocks.find(key);
         return it == waveCtx.blocks.end() ? nullptr : &it->second;
+    }
+
+    void handleReconvergence(WaveId waveId,
+                             WaveContext<ValueType, StepType> &waveCtx,
+                             const DynamicBlockKey &childKey,
+                             LaneId lane) {
+        if (waveCtx.mergeStack.empty())
+            return;
+        for (auto it = waveCtx.mergeStack.rbegin();
+             it != waveCtx.mergeStack.rend(); ++it) {
+            bool matchesChild = llvm::any_of(it->pendingChildren,
+                                             [&](const DynamicBlockKey &k) {
+                                                 return k == childKey;
+                                             });
+            if (!matchesChild)
+                continue;
+
+            it->completedMask |= (1ull << lane);
+            if (it->completedMask != it->expectedMask)
+                return;
+
+            DynamicBlockKey parentKey = it->parent;
+            auto parentBlockIt = waveCtx.blocks.find(parentKey);
+            if (parentBlockIt != waveCtx.blocks.end()) {
+                auto &parentBlock = parentBlockIt->second;
+                parentBlock.activeMask |= it->expectedMask;
+                // Resume parent continuation for each lane in the mask.
+                std::uint64_t mask = it->expectedMask;
+                while (mask) {
+                    unsigned l = std::countr_zero(mask);
+                    mask &= mask - 1;
+                    auto contIt = parentBlock.continuations.find(l);
+                    if (contIt != parentBlock.continuations.end()) {
+                        state_.readyQueue.push(
+                            ReadyContinuation<ValueType, StepType>{waveId, parentKey, l,
+                                                                   contIt->second});
+                    }
+                }
+            }
+            waveCtx.mergeStack.pop_back();
+            break;
+        }
     }
 
     SemanticsT semantics_;

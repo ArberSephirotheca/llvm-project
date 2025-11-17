@@ -1,6 +1,7 @@
 #include "simt-step/semantics/SimpleProgram.h"
 
 #include <mlir/Dialect/Arith/IR/Arith.h>
+#include <bit>
 #include <iterator>
 #include <utility>
 
@@ -28,7 +29,9 @@ llvm::Error SimpleProgramRunner::runBlock(mlir::Block *block,
         return llvm::Error::success();
 
     constexpr WaveId wave = 0;
-    std::uint64_t laneMask = context.activeMask ? context.activeMask : 0x1ull;
+    // Default to 32 active lanes if the caller does not supply a mask.
+    std::uint64_t laneMask =
+        context.activeMask ? context.activeMask : ((1ull << 32) - 1ull);
 
     auto &waveCtx = state.waves[wave];
     waveCtx.currentMask = 0;
@@ -44,9 +47,10 @@ llvm::Error SimpleProgramRunner::runBlock(mlir::Block *block,
 
     waveCtx.currentMask = laneMask;
 
-    for (LaneId lane = 0; lane < 64; ++lane) {
-        if ((laneMask & (1ull << lane)) == 0)
-            continue;
+    std::uint64_t tmpMask = laneMask;
+    while (tmpMask) {
+        unsigned lane = std::countr_zero(tmpMask);
+        tmpMask &= tmpMask - 1;
         auto &laneCtx = waveCtx.lanes[lane];
         laneCtx.values.clear();
         laneCtx.hasReturned = false;
@@ -78,34 +82,154 @@ SimpleProgramRunner::buildStepForIterator(mlir::Block *block,
         return StepType::halt();
 
     context.laneId = lane;
+    // Refresh active mask from the interpreter's dynamic block state so ops
+    // observe the per-block participation set.
+    if (auto waveIt = interpreter_.state().waves.find(0);
+        waveIt != interpreter_.state().waves.end()) {
+        for (const auto &blockEntry : waveIt->second.blocks) {
+            if (blockEntry.first.block == block) {
+                context.activeMask = blockEntry.second.activeMask;
+                break;
+            }
+        }
+    }
 
     if (auto ifOp = llvm::dyn_cast<simt::dialect::IfOp>(&*it)) {
-        SemanticsContext condContext = context;
-        auto condOrErr = evaluateBool(ifOp.getCondition(), condContext);
-        if (!condOrErr) {
-            llvm::consumeError(condOrErr.takeError());
+        auto &interpState = interpreter_.state();
+        auto waveIt = interpState.waves.find(0);
+        if (waveIt == interpState.waves.end())
             return StepType::halt();
+        auto &waveCtx = waveIt->second;
+        // Identify the current dynamic block key we are executing inside.
+        DynamicBlockKey parentKey{block, 0};
+        for (const auto &entry : waveCtx.blocks) {
+            if (entry.first.block == block) {
+                parentKey = entry.first;
+                break;
+            }
+        }
+        auto parentBlockIt = waveCtx.blocks.find(parentKey);
+        if (parentBlockIt == waveCtx.blocks.end())
+            return StepType::halt();
+        auto &parentBlock = parentBlockIt->second;
+
+        std::uint64_t trueMask = 0;
+        std::uint64_t falseMask = 0;
+        // Evaluate condition per active lane in this block.
+        std::uint64_t activeMask = parentBlock.activeMask;
+        while (activeMask) {
+            unsigned laneId = std::countr_zero(activeMask);
+            activeMask &= activeMask - 1;
+            SemanticsContext condContext = context;
+            condContext.laneId = laneId;
+            condContext.activeMask = parentBlock.activeMask;
+            auto condOrErr = evaluateBool(ifOp.getCondition(), condContext);
+            if (!condOrErr) {
+                llvm::consumeError(condOrErr.takeError());
+                continue;
+            }
+            if (*condOrErr)
+                trueMask |= (1ull << laneId);
+            else
+                falseMask |= (1ull << laneId);
         }
 
-        mlir::Block *selectedBlock = *condOrErr
-                                         ? &ifOp.getThenRegion().front()
-                                         : (ifOp.getElseRegion().empty()
-                                                ? nullptr
-                                                : &ifOp.getElseRegion().front());
+        // If there is no else region, lanes falling through rejoin the parent
+        // immediately rather than spawning a child block.
+        if (ifOp.getElseRegion().empty())
+            falseMask = 0;
 
         auto nextIt = std::next(it);
-        bool continueAfterBranch =
-            !selectedBlock || selectedBlock->empty();
-        StepType branchStep =
-            selectedBlock && !selectedBlock->empty()
-                ? buildStepForIterator(selectedBlock, selectedBlock->begin(),
-                                       context, lane)
-                : StepType::halt();
+        // Parent continuation to resume after reconvergence.
+        StepType parentCont = StepType::continueWith(
+            [this, block, nextIt, context, lane]() mutable -> StepType {
+                return buildStepForIterator(block, nextIt, context, lane);
+            });
+        parentBlock.continuations[lane] = parentCont;
 
-        return evaluateAndChain(std::move(branchStep), block, nextIt, context,
-                                lane,
-                                /*isTerminator=*/false,
-                                /*continueAfterResult=*/continueAfterBranch);
+        // Create child dynamic blocks.
+        auto makeChildKey = [&](mlir::Block *b, std::uint32_t iter) {
+            return DynamicBlockKey{b, iter};
+        };
+        std::uint32_t baseIter = parentKey.iteration + 1;
+
+        std::optional<DynamicBlockKey> thenKey;
+        std::optional<DynamicBlockKey> elseKey;
+
+        if (trueMask) {
+            DynamicBlockKey key =
+                makeChildKey(&ifOp.getThenRegion().front(), baseIter);
+            thenKey = key;
+            auto &childBlock = waveCtx.blocks[key];
+            childBlock.block = key.block;
+            childBlock.iteration = key.iteration;
+            childBlock.expectedMask = trueMask;
+            childBlock.activeMask = trueMask;
+            childBlock.completedMask = 0;
+        }
+
+        if (falseMask && !ifOp.getElseRegion().empty()) {
+            DynamicBlockKey key =
+                makeChildKey(&ifOp.getElseRegion().front(), baseIter + 1);
+            elseKey = key;
+            auto &childBlock = waveCtx.blocks[key];
+            childBlock.block = key.block;
+            childBlock.iteration = key.iteration;
+            childBlock.expectedMask = falseMask;
+            childBlock.activeMask = falseMask;
+            childBlock.completedMask = 0;
+        }
+
+        // Push merge entry.
+        MergeStackEntry<SemValue, StepType> entry;
+        entry.parent = parentKey;
+        if (thenKey) {
+            entry.pendingChildren.push_back(*thenKey);
+            entry.childMasks.push_back(trueMask);
+        }
+        if (elseKey) {
+            entry.pendingChildren.push_back(*elseKey);
+            entry.childMasks.push_back(falseMask);
+        }
+        entry.expectedMask = trueMask | falseMask;
+        entry.completedMask = 0;
+        waveCtx.mergeStack.push_back(entry);
+
+        // Remove lanes from parent active mask; they will resume on reconvergence.
+        parentBlock.activeMask &= ~(trueMask | falseMask);
+
+        // Enqueue child continuations per lane.
+        if (thenKey) {
+            std::uint64_t mask = trueMask;
+            while (mask) {
+                unsigned l = std::countr_zero(mask);
+                mask &= mask - 1;
+                SemanticsContext laneCtx = context;
+                laneCtx.activeMask = trueMask;
+                laneCtx.laneId = l;
+                auto *childBlock = const_cast<mlir::Block *>(thenKey->block);
+                StepType childStep =
+                    buildStepForIterator(childBlock, childBlock->begin(), laneCtx, l);
+                interpreter_.enqueue(0, *thenKey, l, std::move(childStep));
+            }
+        }
+        if (elseKey) {
+            std::uint64_t mask = falseMask;
+            while (mask) {
+                unsigned l = std::countr_zero(mask);
+                mask &= mask - 1;
+                SemanticsContext laneCtx = context;
+                laneCtx.activeMask = falseMask;
+                laneCtx.laneId = l;
+                auto *childBlock = const_cast<mlir::Block *>(elseKey->block);
+                StepType childStep =
+                    buildStepForIterator(childBlock, childBlock->begin(), laneCtx, l);
+                interpreter_.enqueue(0, *elseKey, l, std::move(childStep));
+            }
+        }
+
+        // Stop current lane; scheduler will pick up children.
+        return StepType::halt();
     }
 
     mlir::Operation *op = &*it;

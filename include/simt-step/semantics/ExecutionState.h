@@ -1,6 +1,6 @@
 #pragma once
 
-#include "simt-step/semantics/CPSInterpreter.h"
+#include "simt-step/semantics/Effects.h"
 #include "simt-step/semantics/SemValue.h"
 
 #include <cstdint>
@@ -21,6 +21,9 @@ namespace simt::semantics {
 
 using LaneId = std::uint32_t;
 using WaveId = std::uint32_t;
+
+template <typename ValueT>
+class Step;
 
 struct DynamicBlockKey {
     const mlir::Block *block = nullptr;
