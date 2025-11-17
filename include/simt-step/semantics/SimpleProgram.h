@@ -26,10 +26,12 @@ public:
 private:
     StepType buildStepForIterator(mlir::Block *block,
                                   mlir::Block::iterator it,
-                                  SemanticsContext context);
+                                  SemanticsContext context,
+                                  LaneId lane);
     StepType evaluateAndChain(StepType step, mlir::Block *block,
                               mlir::Block::iterator nextIt,
                               SemanticsContext context,
+                              LaneId lane,
                               bool isTerminator,
                               bool continueAfterResult);
 

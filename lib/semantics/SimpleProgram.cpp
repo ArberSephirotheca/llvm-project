@@ -28,7 +28,7 @@ llvm::Error SimpleProgramRunner::runBlock(mlir::Block *block,
         return llvm::Error::success();
 
     constexpr WaveId wave = 0;
-    constexpr LaneId lane = 0;
+    std::uint64_t laneMask = context.activeMask ? context.activeMask : 0x1ull;
 
     auto &waveCtx = state.waves[wave];
     waveCtx.currentMask = 0;
@@ -38,22 +38,30 @@ llvm::Error SimpleProgramRunner::runBlock(mlir::Block *block,
     dynamicBlock.block = block;
     dynamicBlock.iteration = 0;
 
-    std::uint64_t laneMask = 1ull << lane;
     dynamicBlock.expectedMask = laneMask;
     dynamicBlock.activeMask = laneMask;
     dynamicBlock.completedMask = 0;
 
     waveCtx.currentMask = laneMask;
 
-    auto &laneCtx = waveCtx.lanes[lane];
-    laneCtx.values.clear();
-    laneCtx.hasReturned = false;
-    laneCtx.returnValue.reset();
-    laneCtx.phase = decltype(laneCtx.phase)::Running;
-    laneCtx.currentBlock = entryKey;
+    for (LaneId lane = 0; lane < 64; ++lane) {
+        if ((laneMask & (1ull << lane)) == 0)
+            continue;
+        auto &laneCtx = waveCtx.lanes[lane];
+        laneCtx.values.clear();
+        laneCtx.hasReturned = false;
+        laneCtx.returnValue.reset();
+        laneCtx.phase = decltype(laneCtx.phase)::Running;
+        laneCtx.currentBlock = entryKey;
 
-    StepType initialStep = buildStepForIterator(block, block->begin(), context);
-    interpreter_.enqueue(wave, entryKey, lane, std::move(initialStep));
+        SemanticsContext laneContext = context;
+        laneContext.activeMask = laneMask;
+        laneContext.laneId = lane;
+
+        StepType initialStep =
+            buildStepForIterator(block, block->begin(), laneContext, lane);
+        interpreter_.enqueue(wave, entryKey, lane, std::move(initialStep));
+    }
 
     if (llvm::Error err = interpreter_.run())
         return err;
@@ -64,9 +72,12 @@ llvm::Error SimpleProgramRunner::runBlock(mlir::Block *block,
 SimpleProgramRunner::StepType
 SimpleProgramRunner::buildStepForIterator(mlir::Block *block,
                                           mlir::Block::iterator it,
-                                          SemanticsContext context) {
+                                          SemanticsContext context,
+                                          LaneId lane) {
     if (it == block->end())
         return StepType::halt();
+
+    context.laneId = lane;
 
     if (auto ifOp = llvm::dyn_cast<simt::dialect::IfOp>(&*it)) {
         SemanticsContext condContext = context;
@@ -88,22 +99,23 @@ SimpleProgramRunner::buildStepForIterator(mlir::Block *block,
         StepType branchStep =
             selectedBlock && !selectedBlock->empty()
                 ? buildStepForIterator(selectedBlock, selectedBlock->begin(),
-                                       context)
+                                       context, lane)
                 : StepType::halt();
 
         return evaluateAndChain(std::move(branchStep), block, nextIt, context,
+                                lane,
                                 /*isTerminator=*/false,
                                 /*continueAfterResult=*/continueAfterBranch);
     }
 
-mlir::Operation *op = &*it;
+    mlir::Operation *op = &*it;
 auto nextIt = std::next(it);
 bool isTerminator = op->hasTrait<mlir::OpTrait::IsTerminator>();
 
-StepType step = semantics_.evalOperation(op, context);
-return evaluateAndChain(std::move(step), block, nextIt, context,
-                        isTerminator,
-                        /*continueAfterResult=*/true);
+    StepType step = semantics_.evalOperation(op, context);
+    return evaluateAndChain(std::move(step), block, nextIt, context, lane,
+                            isTerminator,
+                            /*continueAfterResult=*/true);
 }
 
 SimpleProgramRunner::StepType
@@ -111,6 +123,7 @@ SimpleProgramRunner::evaluateAndChain(StepType step,
                                       mlir::Block *block,
                                       mlir::Block::iterator nextIt,
                                       SemanticsContext context,
+                                      LaneId lane,
                                       bool isTerminator,
                                       bool continueAfterResult) {
     StepType current = std::move(step);
@@ -132,11 +145,12 @@ SimpleProgramRunner::evaluateAndChain(StepType step,
             auto resume = std::move(suspend->resume);
             auto chainedResume =
                 [this, resume = std::move(resume), block, nextIt, context,
+                 lane,
                  isTerminator,
                  continueAfterResult]() mutable -> StepType {
                 StepType resumed = resume();
                 return evaluateAndChain(std::move(resumed), block, nextIt,
-                                        context, isTerminator,
+                                        context, lane, isTerminator,
                                         continueAfterResult);
             };
             return StepType::suspend(std::move(effect), std::move(chainedResume));
@@ -147,8 +161,8 @@ SimpleProgramRunner::evaluateAndChain(StepType step,
                 std::get_if<typename StepType::Produce>(&stateVariant)) {
             if (continueAfterResult && !isTerminator && hasNext) {
                 return StepType::continueWith(
-                    [this, block, nextIt, context]() mutable -> StepType {
-                        return buildStepForIterator(block, nextIt, context);
+                    [this, block, nextIt, context, lane]() mutable -> StepType {
+                        return buildStepForIterator(block, nextIt, context, lane);
                     });
             }
             return StepType::produce(std::move(prod->value));
@@ -157,8 +171,8 @@ SimpleProgramRunner::evaluateAndChain(StepType step,
         if (std::holds_alternative<typename StepType::Halt>(stateVariant)) {
             if (continueAfterResult && !isTerminator && hasNext) {
                 return StepType::continueWith(
-                    [this, block, nextIt, context]() mutable -> StepType {
-                        return buildStepForIterator(block, nextIt, context);
+                    [this, block, nextIt, context, lane]() mutable -> StepType {
+                        return buildStepForIterator(block, nextIt, context, lane);
                     });
             }
             return StepType::halt();
@@ -166,8 +180,8 @@ SimpleProgramRunner::evaluateAndChain(StepType step,
 
         if (continueAfterResult && !isTerminator && hasNext) {
             return StepType::continueWith(
-                [this, block, nextIt, context]() mutable -> StepType {
-                    return buildStepForIterator(block, nextIt, context);
+                [this, block, nextIt, context, lane]() mutable -> StepType {
+                    return buildStepForIterator(block, nextIt, context, lane);
                 });
         }
 

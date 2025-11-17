@@ -191,6 +191,10 @@ struct DynamicBlockKey;
 template <typename ValueT, typename StepT>
 struct ReadyContinuation;
 template <typename ValueT, typename StepT>
+struct DynamicBlock;
+template <typename ValueT, typename StepT>
+struct WaveContext;
+template <typename ValueT, typename StepT>
 struct InterpreterState;
 using WaveId = std::uint32_t;
 using LaneId = std::uint32_t;
@@ -263,11 +267,21 @@ private:
                     std::get<typename StepType::Produce>(std::move(stateVariant));
                 laneCtx.hasReturned = true;
                 laneCtx.returnValue = std::move(prod.value);
+                if (auto *blockCtx = getBlock(waveCtx, item.block)) {
+                    std::uint64_t laneBit = 1ull << item.lane;
+                    blockCtx->activeMask &= ~laneBit;
+                    blockCtx->completedMask |= laneBit;
+                }
                 return llvm::Error::success();
             }
 
             if (std::holds_alternative<typename StepType::Halt>(stateVariant)) {
                 laneCtx.hasReturned = true;
+                if (auto *blockCtx = getBlock(waveCtx, item.block)) {
+                    std::uint64_t laneBit = 1ull << item.lane;
+                    blockCtx->activeMask &= ~laneBit;
+                    blockCtx->completedMask |= laneBit;
+                }
                 return llvm::Error::success();
             }
 
@@ -310,6 +324,13 @@ private:
             blockIt->second.activeMask = 0;
         }
         waveCtx.lanes.try_emplace(lane);
+    }
+
+    static DynamicBlock<ValueType, StepType> *
+    getBlock(WaveContext<ValueType, StepType> &waveCtx,
+             const DynamicBlockKey &key) {
+        auto it = waveCtx.blocks.find(key);
+        return it == waveCtx.blocks.end() ? nullptr : &it->second;
     }
 
     SemanticsT semantics_;
