@@ -65,6 +65,20 @@ struct Effect {
     }
 
     template <typename EffectT>
+    EffectT *get_if() {
+        if (auto *ptr = std::get_if<EffectT>(&payload_))
+            return ptr;
+        return nullptr;
+    }
+
+    template <typename EffectT>
+    const EffectT *get_if() const {
+        if (auto *ptr = std::get_if<EffectT>(&payload_))
+            return ptr;
+        return nullptr;
+    }
+
+    template <typename EffectT>
     EffectT &get() {
         return std::get<EffectT>(payload_);
     }

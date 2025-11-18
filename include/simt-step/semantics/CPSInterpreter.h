@@ -5,6 +5,7 @@
 #include "simt-step/semantics/SemanticsContext.h"
 
 #include <algorithm>
+#include <bit>
 #include <cstdint>
 #include <functional>
 #include <optional>
@@ -231,8 +232,96 @@ private:
             return llvm::Error::success();
         }
 
+        if (auto *collective =
+                suspend.effect.template get_if<CollectiveEffect>()) {
+            auto &waveCtx = state_.waves[wave];
+            auto *blockCtx = getBlock(waveCtx, block);
+            if (!blockCtx) {
+                return llvm::make_error<llvm::StringError>(
+                    "collective effect missing dynamic block context",
+                    llvm::inconvertibleErrorCode());
+            }
+            std::uint32_t key =
+                collective->token.value_or(collective->operation);
+            auto &syncPoint = waveCtx.collectives[key];
+            syncPoint.effect = *collective;
+            syncPoint.block = block;
+            if (syncPoint.expectedMask == 0)
+                syncPoint.expectedMask = collective->activeMask
+                                             ? collective->activeMask
+                                             : blockCtx->activeMask;
+            syncPoint.arrivals.insert(lane);
+            syncPoint.continuations[lane] =
+                StepType::continueWith(
+                    [resume = std::move(suspend.resume)]() mutable -> StepType {
+                        return resume();
+                    });
+
+            auto expectedCount =
+                static_cast<unsigned>(std::popcount(syncPoint.expectedMask));
+            if (syncPoint.arrivals.size() == expectedCount) {
+                std::uint64_t mask = syncPoint.expectedMask;
+                while (mask) {
+                    unsigned l = std::countr_zero(mask);
+                    mask &= mask - 1;
+                    auto contIt = syncPoint.continuations.find(l);
+                    if (contIt != syncPoint.continuations.end()) {
+                        blockCtx->activeMask |= (1ull << l);
+                        state_.readyQueue.push(
+                            ReadyContinuation<ValueType, StepType>{wave, block, l,
+                                                                   contIt->second});
+                    }
+                }
+                waveCtx.collectives.erase(key);
+            }
+            return llvm::Error::success();
+        }
+
+        if (auto *sync =
+                suspend.effect.template get_if<SynchronizationEffect>()) {
+            auto &waveCtx = state_.waves[wave];
+            auto *blockCtx = getBlock(waveCtx, block);
+            if (!blockCtx) {
+                return llvm::make_error<llvm::StringError>(
+                    "synchronization effect missing dynamic block context",
+                    llvm::inconvertibleErrorCode());
+            }
+            std::uint32_t key = sync->token.value_or(sync->operation);
+            auto &syncPoint = waveCtx.syncPoints[key];
+            syncPoint.effect = *sync;
+            syncPoint.block = block;
+            if (syncPoint.expectedMask == 0)
+                syncPoint.expectedMask =
+                    sync->activeMask ? sync->activeMask : blockCtx->activeMask;
+            syncPoint.arrivals.insert(lane);
+            syncPoint.continuations[lane] =
+                StepType::continueWith(
+                    [resume = std::move(suspend.resume)]() mutable -> StepType {
+                        return resume();
+                    });
+
+            auto expectedCount =
+                static_cast<unsigned>(std::popcount(syncPoint.expectedMask));
+            if (syncPoint.arrivals.size() == expectedCount) {
+                std::uint64_t mask = syncPoint.expectedMask;
+                while (mask) {
+                    unsigned l = std::countr_zero(mask);
+                    mask &= mask - 1;
+                    auto contIt = syncPoint.continuations.find(l);
+                    if (contIt != syncPoint.continuations.end()) {
+                        blockCtx->activeMask |= (1ull << l);
+                        state_.readyQueue.push(
+                            ReadyContinuation<ValueType, StepType>{wave, block, l,
+                                                                   contIt->second});
+                    }
+                }
+                waveCtx.syncPoints.erase(key);
+            }
+            return llvm::Error::success();
+        }
+
         return llvm::make_error<llvm::StringError>(
-            "collective/synchronization effects are not implemented in CPS interpreter yet",
+            "encountered suspend with unsupported effect",
             llvm::inconvertibleErrorCode());
     }
 
