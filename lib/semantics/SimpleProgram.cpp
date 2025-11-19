@@ -156,6 +156,12 @@ SimpleProgramRunner::buildStepForIterator(mlir::Block *block,
         std::optional<DynamicBlockKey> thenKey;
         std::optional<DynamicBlockKey> elseKey;
 
+        // Use parent.expectedMask to conservatively seed child expected masks.
+        std::uint64_t parentExpected = parentBlock.expectedMask ? parentBlock.expectedMask
+                                                                 : parentBlock.activeMask;
+        std::uint64_t childTrueExpected = parentExpected & trueMask;
+        std::uint64_t childFalseExpected = parentExpected & falseMask;
+
         if (trueMask) {
             DynamicBlockKey key =
                 makeChildKey(&ifOp.getThenRegion().front(), baseIter);
@@ -163,7 +169,7 @@ SimpleProgramRunner::buildStepForIterator(mlir::Block *block,
             auto &childBlock = waveCtx.blocks[key];
             childBlock.block = key.block;
             childBlock.iteration = key.iteration;
-            childBlock.expectedMask = trueMask;
+            childBlock.expectedMask = childTrueExpected ? childTrueExpected : trueMask;
             childBlock.activeMask = trueMask;
             childBlock.completedMask = 0;
         }
@@ -175,7 +181,8 @@ SimpleProgramRunner::buildStepForIterator(mlir::Block *block,
             auto &childBlock = waveCtx.blocks[key];
             childBlock.block = key.block;
             childBlock.iteration = key.iteration;
-            childBlock.expectedMask = falseMask;
+            childBlock.expectedMask =
+                childFalseExpected ? childFalseExpected : falseMask;
             childBlock.activeMask = falseMask;
             childBlock.completedMask = 0;
         }
@@ -191,11 +198,12 @@ SimpleProgramRunner::buildStepForIterator(mlir::Block *block,
             entry.pendingChildren.push_back(*elseKey);
             entry.childMasks.push_back(falseMask);
         }
-        entry.expectedMask = trueMask | falseMask;
+        entry.expectedMask = (childTrueExpected ? childTrueExpected : trueMask) |
+                             (childFalseExpected ? childFalseExpected : falseMask);
         entry.completedMask = 0;
         waveCtx.mergeStack.push_back(entry);
 
-        // Remove lanes from parent active mask; they will resume on reconvergence.
+        // Remove only dispatched lanes from the parent; others keep executing.
         parentBlock.activeMask &= ~(trueMask | falseMask);
 
         // Enqueue child continuations per lane.
@@ -211,6 +219,12 @@ SimpleProgramRunner::buildStepForIterator(mlir::Block *block,
                 StepType childStep =
                     buildStepForIterator(childBlock, childBlock->begin(), laneCtx, l);
                 interpreter_.enqueue(0, *thenKey, l, std::move(childStep));
+                // This lane will not participate in other children; clear it from
+                // their expected masks.
+                if (elseKey) {
+                    waveCtx.blocks[*elseKey].expectedMask &= ~(1ull << l);
+                }
+                parentBlock.expectedMask &= ~(1ull << l);
             }
         }
         if (elseKey) {
@@ -225,6 +239,12 @@ SimpleProgramRunner::buildStepForIterator(mlir::Block *block,
                 StepType childStep =
                     buildStepForIterator(childBlock, childBlock->begin(), laneCtx, l);
                 interpreter_.enqueue(0, *elseKey, l, std::move(childStep));
+                // This lane will not participate in other children; clear it from
+                // their expected masks.
+                if (thenKey) {
+                    waveCtx.blocks[*thenKey].expectedMask &= ~(1ull << l);
+                }
+                parentBlock.expectedMask &= ~(1ull << l);
             }
         }
 

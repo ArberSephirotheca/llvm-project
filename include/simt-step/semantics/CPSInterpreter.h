@@ -189,6 +189,8 @@ private:
                     std::uint64_t laneBit = 1ull << item.lane;
                     blockCtx->activeMask &= ~laneBit;
                     blockCtx->completedMask |= laneBit;
+                    shrinkExpectedForLane(item.wave, waveCtx, item.lane);
+                    // Resume parent execution for this lane.
                     handleReconvergence(item.wave, waveCtx, item.block, item.lane);
                 }
                 return llvm::Error::success();
@@ -200,7 +202,10 @@ private:
                     std::uint64_t laneBit = 1ull << item.lane;
                     blockCtx->activeMask &= ~laneBit;
                     blockCtx->completedMask |= laneBit;
-                    handleReconvergence(item.wave, waveCtx, item.block, item.lane);
+                    shrinkExpectedForLane(item.wave, waveCtx, item.lane);
+                    // Do not re-add returned lanes to parent activeMask; just
+                    // account for completion in merge tracking.
+                    markMergeCompletion(item.wave, waveCtx, item.block, item.lane);
                 }
                 return llvm::Error::success();
             }
@@ -341,6 +346,107 @@ private:
         return it == waveCtx.blocks.end() ? nullptr : &it->second;
     }
 
+    void shrinkExpectedForLane(WaveId waveId,
+                               WaveContext<ValueType, StepType> &waveCtx,
+                               LaneId lane) {
+        // Clear from dynamic blocks.
+        for (auto &entry : waveCtx.blocks) {
+            entry.second.expectedMask &= ~(1ull << lane);
+        }
+        // Clear from merge entries.
+        for (auto &merge : waveCtx.mergeStack) {
+            merge.expectedMask &= ~(1ull << lane);
+        }
+        // Clear from collectives and release if now satisfied.
+        for (auto it = waveCtx.collectives.begin();
+             it != waveCtx.collectives.end();) {
+            it->second.expectedMask &= ~(1ull << lane);
+            it->second.arrivals.erase(lane);
+            it->second.continuations.erase(lane);
+            bool ready = it->second.expectedMask &&
+                         it->second.arrivals.size() ==
+                             static_cast<unsigned>(
+                                 std::popcount(it->second.expectedMask));
+            if (ready) {
+                auto *blockCtx = getBlock(waveCtx, it->second.block);
+                if (blockCtx) {
+                    std::uint64_t mask = it->second.expectedMask;
+                    while (mask) {
+                        unsigned l = std::countr_zero(mask);
+                        mask &= mask - 1;
+                        auto contIt = it->second.continuations.find(l);
+                        if (contIt != it->second.continuations.end()) {
+                            blockCtx->activeMask |= (1ull << l);
+                            state_.readyQueue.push(
+                                ReadyContinuation<ValueType, StepType>{
+                                    waveId, it->second.block, l, contIt->second});
+                        }
+                    }
+                }
+                auto cur = it;
+                ++it;
+                waveCtx.collectives.erase(cur);
+                continue;
+            }
+            ++it;
+        }
+        // Clear from sync points and release if now satisfied.
+        for (auto it = waveCtx.syncPoints.begin();
+             it != waveCtx.syncPoints.end();) {
+            it->second.expectedMask &= ~(1ull << lane);
+            it->second.arrivals.erase(lane);
+            it->second.continuations.erase(lane);
+            bool ready = it->second.expectedMask &&
+                         it->second.arrivals.size() ==
+                             static_cast<unsigned>(
+                                 std::popcount(it->second.expectedMask));
+            if (ready) {
+                auto *blockCtx = getBlock(waveCtx, it->second.block);
+                if (blockCtx) {
+                    std::uint64_t mask = it->second.expectedMask;
+                    while (mask) {
+                        unsigned l = std::countr_zero(mask);
+                        mask &= mask - 1;
+                        auto contIt = it->second.continuations.find(l);
+                        if (contIt != it->second.continuations.end()) {
+                            blockCtx->activeMask |= (1ull << l);
+                            state_.readyQueue.push(
+                                ReadyContinuation<ValueType, StepType>{
+                                    waveId, it->second.block, l, contIt->second});
+                        }
+                    }
+                }
+                auto cur = it;
+                ++it;
+                waveCtx.syncPoints.erase(cur);
+                continue;
+            }
+            ++it;
+        }
+    }
+
+    void markMergeCompletion(WaveId,
+                             WaveContext<ValueType, StepType> &waveCtx,
+                             const DynamicBlockKey &childKey,
+                             LaneId lane) {
+        if (waveCtx.mergeStack.empty())
+            return;
+        for (auto it = waveCtx.mergeStack.rbegin();
+             it != waveCtx.mergeStack.rend(); ++it) {
+            bool matchesChild = llvm::any_of(it->pendingChildren,
+                                             [&](const DynamicBlockKey &k) {
+                                                 return k == childKey;
+                                             });
+            if (!matchesChild)
+                continue;
+            it->completedMask |= (1ull << lane);
+            if (it->completedMask == it->expectedMask) {
+                waveCtx.mergeStack.pop_back();
+            }
+            break;
+        }
+    }
+
     void handleReconvergence(WaveId waveId,
                              WaveContext<ValueType, StepType> &waveCtx,
                              const DynamicBlockKey &childKey,
@@ -357,28 +463,25 @@ private:
                 continue;
 
             it->completedMask |= (1ull << lane);
-            if (it->completedMask != it->expectedMask)
-                return;
 
             DynamicBlockKey parentKey = it->parent;
             auto parentBlockIt = waveCtx.blocks.find(parentKey);
             if (parentBlockIt != waveCtx.blocks.end()) {
                 auto &parentBlock = parentBlockIt->second;
-                parentBlock.activeMask |= it->expectedMask;
-                // Resume parent continuation for each lane in the mask.
-                std::uint64_t mask = it->expectedMask;
-                while (mask) {
-                    unsigned l = std::countr_zero(mask);
-                    mask &= mask - 1;
-                    auto contIt = parentBlock.continuations.find(l);
-                    if (contIt != parentBlock.continuations.end()) {
-                        state_.readyQueue.push(
-                            ReadyContinuation<ValueType, StepType>{waveId, parentKey, l,
-                                                                   contIt->second});
-                    }
+                parentBlock.activeMask |= (1ull << lane);
+                // Resume parent continuation for this lane only.
+                auto contIt = parentBlock.continuations.find(lane);
+                if (contIt != parentBlock.continuations.end()) {
+                    state_.readyQueue.push(
+                        ReadyContinuation<ValueType, StepType>{waveId, parentKey, lane,
+                                                               contIt->second});
+                    parentBlock.continuations.erase(contIt);
                 }
             }
-            waveCtx.mergeStack.pop_back();
+            // Pop the merge entry only when all expected lanes are done.
+            if (it->completedMask == it->expectedMask) {
+                waveCtx.mergeStack.pop_back();
+            }
             break;
         }
     }
