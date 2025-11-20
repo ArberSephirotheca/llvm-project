@@ -3,23 +3,26 @@
 
 #include "simt-step/Dialect/SimtStep/SimtStepDialect.h"
 
+#include <cstring>
 #include <mlir/Dialect/Arith/IR/Arith.h>
 #include <mlir/Dialect/Func/IR/FuncOps.h>
 #include <mlir/IR/Builders.h>
 #include <mlir/IR/BuiltinDialect.h>
 #include <mlir/IR/BuiltinOps.h>
-#include <mlir/Parser/Parser.h>
 #include <mlir/IR/DialectRegistry.h>
 #include <mlir/IR/MLIRContext.h>
+#include <mlir/Parser/Parser.h>
 
 #include <llvm/Support/Error.h>
+#include <llvm/Support/Format.h>
 #include <llvm/Support/raw_ostream.h>
 
 using namespace simt::semantics;
 
 namespace {
 
-llvm::Expected<int> run(llvm::StringRef path) {
+llvm::Expected<int> run(llvm::StringRef path, SimpleProgramRunner &runner,
+                        SemanticsContext &semaCtx, LaneId resultLane) {
     mlir::DialectRegistry registry;
     simt::dialect::registerSimtStepDialect(registry);
     registry.insert<mlir::BuiltinDialect, mlir::arith::ArithDialect,
@@ -85,12 +88,6 @@ llvm::Expected<int> run(llvm::StringRef path) {
 
     mlir::Block &block = func.getBody().front();
 
-    SemanticsContext semaCtx;
-    semaCtx.subgroupWidth = 32;
-    semaCtx.activeMask = ~0ull;
-    semaCtx.laneId = 4;
-
-    SimpleProgramRunner runner;
     if (llvm::Error err = runner.runBlock(&block, semaCtx))
         return std::move(err);
 
@@ -100,7 +97,7 @@ llvm::Expected<int> run(llvm::StringRef path) {
         return llvm::make_error<llvm::StringError>(
             "missing wave context", llvm::inconvertibleErrorCode());
 
-    const auto &laneCtx = waveIt->second.lanes.lookup(0);
+    const auto &laneCtx = waveIt->second.lanes.lookup(resultLane);
     if (!laneCtx.returnValue)
         return llvm::make_error<llvm::StringError>(
             "lane produced no value", llvm::inconvertibleErrorCode());
@@ -112,18 +109,80 @@ llvm::Expected<int> run(llvm::StringRef path) {
 
 } // namespace
 
-int main(int argc, char **argv) {
-    llvm::StringRef path;
-    if (argc > 1)
-        path = argv[1];
+static void dumpInterpreterState(const SimpleProgramRunner &runner) {
+    const auto &state = runner.state();
+    llvm::outs() << "readyQueue=" << state.readyQueue.size() << "\n";
+    for (const auto &waveIt : state.waves) {
+        llvm::outs() << "Wave " << waveIt.first << "\n";
+        const auto &waveCtx = waveIt.second;
+        for (const auto &blockIt : waveCtx.blocks) {
+            const auto &key = blockIt.first;
+            const auto &block = blockIt.second;
+            llvm::outs() << "  Block " << key.block << " iter "
+                         << key.iteration << " exp=0x"
+                         << llvm::format_hex(block.expectedMask, 10)
+                         << " act=0x"
+                         << llvm::format_hex(block.activeMask, 10)
+                         << " completed=0x"
+                         << llvm::format_hex(block.completedMask, 10) << "\n";
+        }
+        for (const auto &laneIt : waveCtx.lanes) {
+            const auto &laneCtx = laneIt.second;
+            llvm::outs() << "    Lane " << laneIt.first
+                         << " hasReturned=" << laneCtx.hasReturned;
+            if (laneCtx.returnValue)
+                llvm::outs() << " value=" << laneCtx.returnValue->asInt64();
+            llvm::outs() << "\n";
+        }
+    }
+}
 
-    auto resultOrErr = run(path);
+int main(int argc, char **argv) {
+    bool dumpState = false;
+    uint64_t maskOverride = 0;
+    LaneId resultLane = 0;
+    llvm::StringRef path;
+    for (int i = 1; i < argc; ++i) {
+        llvm::StringRef arg(argv[i]);
+        if (arg == "--dump-blocks") {
+            dumpState = true;
+            continue;
+        }
+        if (arg.starts_with("--mask=")) {
+            arg = arg.drop_front(strlen("--mask="));
+            unsigned long long value = 0;
+            if (!arg.getAsInteger(0, value))
+                maskOverride = value;
+            continue;
+        }
+        if (arg.starts_with("--lane=")) {
+            arg = arg.drop_front(strlen("--lane="));
+            unsigned long long value = 0;
+            if (!arg.getAsInteger(0, value))
+                resultLane = static_cast<LaneId>(value);
+            continue;
+        }
+        if (path.empty())
+            path = argv[i];
+    }
+
+    SemanticsContext semaCtx;
+    semaCtx.subgroupWidth = 32;
+    semaCtx.activeMask =
+        maskOverride ? maskOverride : ((1ull << 4) - 1ull);
+    semaCtx.laneId = resultLane;
+
+    SimpleProgramRunner runner;
+
+    auto resultOrErr = run(path, runner, semaCtx, resultLane);
     if (!resultOrErr) {
         llvm::errs() << llvm::toString(resultOrErr.takeError()) << "\n";
         return 1;
     }
+    if (dumpState)
+        dumpInterpreterState(runner);
     if (!path.empty() && path != "-")
         return 0;
-    // Default in-memory program: expect lane id (4).
-    return *resultOrErr == 4 ? 0 : 1;
+    // Default in-memory program: expect lane id for the chosen lane.
+    return *resultOrErr == static_cast<int>(resultLane) ? 0 : 1;
 }
