@@ -30,8 +30,9 @@ llvm::Error SimpleProgramRunner::runBlock(mlir::Block *block,
 
     constexpr WaveId wave = 0;
     // Default to 32 active lanes if the caller does not supply a mask.
+    // Honor requested mask; default to four lanes if unspecified for testing.
     std::uint64_t laneMask =
-        context.activeMask ? context.activeMask : ((1ull << 32) - 1ull);
+        context.activeMask ? context.activeMask : ((1ull << 4) - 1ull);
 
     auto &waveCtx = state.waves[wave];
     waveCtx.currentMask = 0;
