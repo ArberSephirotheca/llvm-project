@@ -86,8 +86,16 @@ SimpleSemantics::evaluateValue(mlir::Value value,
     if (auto laneOp = value.getDefiningOp<simt::dialect::LaneIdOp>())
         return SemValue::fromInt32(static_cast<int32_t>(context.laneId));
 
-    if (value.getDefiningOp<simt::dialect::DispatchThreadIdOp>())
-        return SemValue::fromInt32(0);
+    if (auto didOp = value.getDefiningOp<simt::dialect::DispatchThreadIdOp>()) {
+        mlir::Type type = didOp.getType();
+        if (mlir::isa<mlir::IndexType>(type) ||
+            mlir::isa<mlir::IntegerType>(type)) {
+            return SemValue::fromInt32(static_cast<int32_t>(context.laneId));
+        }
+        return llvm::make_error<llvm::StringError>(
+            "dispatch_thread_id: unsupported result type",
+            llvm::inconvertibleErrorCode());
+    }
 
     if (auto cmpOp = value.getDefiningOp<mlir::arith::CmpIOp>()) {
         auto step = handleCmpIOp(cmpOp, context);
@@ -127,9 +135,10 @@ auto SimpleSemantics::handleCmpIOp(mlir::arith::CmpIOp op,
     return StepType::produce(SemValue::fromBool(result));
 }
 
-auto SimpleSemantics::handleDispatchThreadId(SemanticsContext &)
+auto SimpleSemantics::handleDispatchThreadId(SemanticsContext &context)
     -> StepType {
-    return StepType::produce(SemValue::fromInt32(0));
+    return StepType::produce(
+        SemValue::fromInt32(static_cast<int32_t>(context.laneId)));
 }
 
 auto SimpleSemantics::handleYieldOp(simt::dialect::YieldOp op,
