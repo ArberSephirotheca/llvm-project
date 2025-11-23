@@ -353,10 +353,6 @@ private:
         for (auto &entry : waveCtx.blocks) {
             entry.second.expectedMask &= ~(1ull << lane);
         }
-        // Clear from merge entries.
-        for (auto &merge : waveCtx.mergeStack) {
-            merge.expectedMask &= ~(1ull << lane);
-        }
         // Clear from collectives and release if now satisfied.
         for (auto it = waveCtx.collectives.begin();
              it != waveCtx.collectives.end();) {

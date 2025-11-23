@@ -202,7 +202,8 @@ SimpleProgramRunner::buildStepForIterator(mlir::Block *block,
         entry.expectedMask = (childTrueExpected ? childTrueExpected : trueMask) |
                              (childFalseExpected ? childFalseExpected : falseMask);
         entry.completedMask = 0;
-        waveCtx.mergeStack.push_back(entry);
+        if (entry.expectedMask != 0)
+            waveCtx.mergeStack.push_back(entry);
 
         // Remove only dispatched lanes from the parent; others keep executing.
         parentBlock.activeMask &= ~(trueMask | falseMask);

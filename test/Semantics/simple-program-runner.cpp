@@ -115,6 +115,15 @@ static void dumpInterpreterState(const SimpleProgramRunner &runner) {
     for (const auto &waveIt : state.waves) {
         llvm::outs() << "Wave " << waveIt.first << "\n";
         const auto &waveCtx = waveIt.second;
+        if (!waveCtx.mergeStack.empty()) {
+            llvm::outs() << "  MergeStack:\n";
+            for (const auto &entry : llvm::enumerate(waveCtx.mergeStack)) {
+                llvm::outs() << "    [" << entry.index() << "] parent=" << entry.value().parent.block
+                             << " exp=0x" << llvm::format_hex(entry.value().expectedMask, 10)
+                             << " completed=0x" << llvm::format_hex(entry.value().completedMask, 10)
+                             << " children=" << entry.value().pendingChildren.size() << "\n";
+            }
+        }
         for (const auto &blockIt : waveCtx.blocks) {
             const auto &key = blockIt.first;
             const auto &block = blockIt.second;
@@ -124,7 +133,9 @@ static void dumpInterpreterState(const SimpleProgramRunner &runner) {
                          << " act=0x"
                          << llvm::format_hex(block.activeMask, 10)
                          << " completed=0x"
-                         << llvm::format_hex(block.completedMask, 10) << "\n";
+                         << llvm::format_hex(block.completedMask, 10)
+                         << " pending=" << block.pendingOps.size()
+                         << "\n";
         }
         for (const auto &laneIt : waveCtx.lanes) {
             const auto &laneCtx = laneIt.second;
@@ -132,6 +143,9 @@ static void dumpInterpreterState(const SimpleProgramRunner &runner) {
                          << " hasReturned=" << laneCtx.hasReturned;
             if (laneCtx.returnValue)
                 llvm::outs() << " value=" << laneCtx.returnValue->asInt64();
+            if (laneCtx.currentBlock)
+                llvm::outs() << " currentBlock=" << laneCtx.currentBlock->block
+                             << " iter=" << laneCtx.currentBlock->iteration;
             llvm::outs() << "\n";
         }
     }
