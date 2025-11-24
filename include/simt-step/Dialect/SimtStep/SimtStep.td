@@ -540,7 +540,7 @@ def SimtStep_DispatchThreadIdOp : Op<SimtStep_Dialect, "dispatch_thread_id",
 
   let results = (outs AnyType:$id);
 
-  let hasCustomAssemblyFormat = 1;
+  // let hasCustomAssemblyFormat = 1;
 }
 
 def SimtStep_GroupThreadIdOp : Op<SimtStep_Dialect, "group_thread_id",

@@ -152,12 +152,17 @@ static void dumpInterpreterState(const SimpleProgramRunner &runner) {
 }
 
 int main(int argc, char **argv) {
+    bool listDialects = false;
     bool dumpState = false;
     uint64_t maskOverride = 0;
     LaneId resultLane = 0;
     llvm::StringRef path;
     for (int i = 1; i < argc; ++i) {
         llvm::StringRef arg(argv[i]);
+        if (arg == "--list-dialects") {
+            listDialects = true;
+            continue;
+        }
         if (arg == "--dump-blocks") {
             dumpState = true;
             continue;
@@ -187,6 +192,17 @@ int main(int argc, char **argv) {
     semaCtx.laneId = resultLane;
 
     SimpleProgramRunner runner;
+
+    if (listDialects) {
+        mlir::DialectRegistry registry;
+        simt::dialect::registerSimtStepDialect(registry);
+        registry.insert<mlir::BuiltinDialect, mlir::arith::ArithDialect,
+                        mlir::func::FuncDialect, simt::dialect::SimtStepDialect>();
+        mlir::MLIRContext context(registry);
+        llvm::outs() << "Registered dialects:\n"
+                     << "  builtin\n  arith\n  func\n  simt_step\n";
+        return 0;
+    }
 
     auto resultOrErr = run(path, runner, semaCtx, resultLane);
     if (!resultOrErr) {

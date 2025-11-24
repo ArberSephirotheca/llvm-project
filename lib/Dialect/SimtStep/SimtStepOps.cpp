@@ -114,14 +114,14 @@ static void printStateQueryOp(mlir::Operation *op,
   printer.getStream() << " : " << op->getResult(0).getType();
 }
 
-mlir::ParseResult DispatchThreadIdOp::parse(mlir::OpAsmParser &parser,
-                                            mlir::OperationState &state) {
-  return parseStateQueryOp(parser, state);
-}
+// mlir::ParseResult DispatchThreadIdOp::parse(mlir::OpAsmParser &parser,
+//                                             mlir::OperationState &state) {
+//   return parseStateQueryOp(parser, state);
+// }
 
-void DispatchThreadIdOp::print(mlir::OpAsmPrinter &printer) {
-  printStateQueryOp(getOperation(), printer);
-}
+// void DispatchThreadIdOp::print(mlir::OpAsmPrinter &printer) {
+//   printStateQueryOp(getOperation(), printer);
+// }
 
 mlir::ParseResult GroupThreadIdOp::parse(mlir::OpAsmParser &parser,
                                          mlir::OperationState &state) {

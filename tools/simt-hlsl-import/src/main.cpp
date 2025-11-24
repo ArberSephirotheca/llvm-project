@@ -146,25 +146,7 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  std::string buffer;
-  llvm::raw_string_ostream os(buffer);
-  module.print(os);
-  os.flush();
-
-  auto replaceAll = [](std::string &str, llvm::StringRef from,
-                       llvm::StringRef to) {
-    size_t pos = 0;
-    while ((pos = str.find(from.str(), pos)) != std::string::npos) {
-      str.replace(pos, from.size(), to.str());
-    }
-  };
-
-  replaceAll(buffer, "\"builtin.module\"() ({\n", "module {\n");
-  replaceAll(buffer, "}) : () -> ()", "}");
-  replaceAll(buffer, "\"func.func\"", "func.func");
-  replaceAll(buffer, "\"func.return\"", "return");
-  replaceAll(buffer, "INVALIDBLOCK", "");
-
-  llvm::outs() << buffer << "\n";
+  module.print(llvm::outs());
+  llvm::outs() << '\n';
   return 0;
 }
