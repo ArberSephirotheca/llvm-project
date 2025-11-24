@@ -127,8 +127,8 @@ static void dumpInterpreterState(const SimpleProgramRunner &runner) {
         for (const auto &blockIt : waveCtx.blocks) {
             const auto &key = blockIt.first;
             const auto &block = blockIt.second;
-            llvm::outs() << "  Block " << key.block << " iter "
-                         << key.iteration << " exp=0x"
+            llvm::outs() << "  Block " << key.block << " seq "
+                         << key.sequenceId << " exp=0x"
                          << llvm::format_hex(block.expectedMask, 10)
                          << " act=0x"
                          << llvm::format_hex(block.activeMask, 10)
@@ -145,7 +145,7 @@ static void dumpInterpreterState(const SimpleProgramRunner &runner) {
                 llvm::outs() << " value=" << laneCtx.returnValue->asInt64();
             if (laneCtx.currentBlock)
                 llvm::outs() << " currentBlock=" << laneCtx.currentBlock->block
-                             << " iter=" << laneCtx.currentBlock->iteration;
+                             << " seq=" << laneCtx.currentBlock->sequenceId;
             llvm::outs() << "\n";
         }
     }

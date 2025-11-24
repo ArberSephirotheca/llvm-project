@@ -27,17 +27,17 @@ class Step;
 
 struct DynamicBlockKey {
     const mlir::Block *block = nullptr;
-    std::uint32_t iteration = 0;
+    std::uint32_t sequenceId = 0;
 
     friend bool operator==(const DynamicBlockKey &lhs, const DynamicBlockKey &rhs) {
-        return lhs.block == rhs.block && lhs.iteration == rhs.iteration;
+        return lhs.block == rhs.block && lhs.sequenceId == rhs.sequenceId;
     }
 };
 
 template <typename ValueT, typename StepT>
 struct DynamicBlock {
     const mlir::Block *block = nullptr;
-    std::uint32_t iteration = 0;
+    std::uint32_t sequenceId = 0;
 
     std::uint64_t expectedMask = 0;
     std::uint64_t activeMask = 0;
@@ -134,7 +134,7 @@ struct DenseMapInfo<simt::semantics::DynamicBlockKey> {
 
     static unsigned getHashValue(const Key &key) {
         return static_cast<unsigned>(reinterpret_cast<std::uintptr_t>(key.block)) ^
-               (key.iteration * 37u + 0x9e3779b9u);
+               (key.sequenceId * 37u + 0x9e3779b9u);
     }
 
     static bool isEqual(const Key &lhs, const Key &rhs) {

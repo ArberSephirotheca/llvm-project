@@ -40,7 +40,7 @@ llvm::Error SimpleProgramRunner::runBlock(mlir::Block *block,
     DynamicBlockKey entryKey{block, 0};
     auto &dynamicBlock = waveCtx.blocks[entryKey];
     dynamicBlock.block = block;
-    dynamicBlock.iteration = 0;
+    dynamicBlock.sequenceId = 0;
 
     dynamicBlock.expectedMask = laneMask;
     dynamicBlock.activeMask = laneMask;
@@ -152,7 +152,7 @@ SimpleProgramRunner::buildStepForIterator(mlir::Block *block,
         auto makeChildKey = [&](mlir::Block *b, std::uint32_t iter) {
             return DynamicBlockKey{b, iter};
         };
-        std::uint32_t baseIter = parentKey.iteration + 1;
+        std::uint32_t baseSeq = parentKey.sequenceId + 1;
 
         std::optional<DynamicBlockKey> thenKey;
         std::optional<DynamicBlockKey> elseKey;
@@ -165,11 +165,11 @@ SimpleProgramRunner::buildStepForIterator(mlir::Block *block,
 
         if (trueMask) {
             DynamicBlockKey key =
-                makeChildKey(&ifOp.getThenRegion().front(), baseIter);
+                makeChildKey(&ifOp.getThenRegion().front(), baseSeq);
             thenKey = key;
             auto &childBlock = waveCtx.blocks[key];
             childBlock.block = key.block;
-            childBlock.iteration = key.iteration;
+            childBlock.sequenceId = key.sequenceId;
             childBlock.expectedMask = childTrueExpected ? childTrueExpected : trueMask;
             childBlock.activeMask = trueMask;
             childBlock.completedMask = 0;
@@ -177,11 +177,11 @@ SimpleProgramRunner::buildStepForIterator(mlir::Block *block,
 
         if (falseMask && !ifOp.getElseRegion().empty()) {
             DynamicBlockKey key =
-                makeChildKey(&ifOp.getElseRegion().front(), baseIter + 1);
+                makeChildKey(&ifOp.getElseRegion().front(), baseSeq + 1);
             elseKey = key;
             auto &childBlock = waveCtx.blocks[key];
             childBlock.block = key.block;
-            childBlock.iteration = key.iteration;
+            childBlock.sequenceId = key.sequenceId;
             childBlock.expectedMask =
                 childFalseExpected ? childFalseExpected : falseMask;
             childBlock.activeMask = falseMask;
