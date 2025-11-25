@@ -226,7 +226,6 @@ SimpleProgramRunner::buildStepForIterator(mlir::Block *block,
                 if (elseKey) {
                     waveCtx.blocks[*elseKey].expectedMask &= ~(1ull << l);
                 }
-                parentBlock.expectedMask &= ~(1ull << l);
             }
         }
         if (elseKey) {
@@ -246,7 +245,6 @@ SimpleProgramRunner::buildStepForIterator(mlir::Block *block,
                 if (thenKey) {
                     waveCtx.blocks[*thenKey].expectedMask &= ~(1ull << l);
                 }
-                parentBlock.expectedMask &= ~(1ull << l);
             }
         }
 

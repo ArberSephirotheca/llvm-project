@@ -251,10 +251,13 @@ private:
             auto &syncPoint = waveCtx.collectives[key];
             syncPoint.effect = *collective;
             syncPoint.block = block;
-            if (syncPoint.expectedMask == 0)
+            if (syncPoint.expectedMask == 0) {
+                std::uint64_t fallbackMask =
+                    blockCtx->expectedMask ? blockCtx->expectedMask : blockCtx->activeMask;
                 syncPoint.expectedMask = collective->activeMask
                                              ? collective->activeMask
-                                             : blockCtx->activeMask;
+                                             : fallbackMask;
+            }
             syncPoint.arrivals.insert(lane);
             syncPoint.continuations[lane] =
                 StepType::continueWith(
@@ -295,9 +298,12 @@ private:
             auto &syncPoint = waveCtx.syncPoints[key];
             syncPoint.effect = *sync;
             syncPoint.block = block;
-            if (syncPoint.expectedMask == 0)
+            if (syncPoint.expectedMask == 0) {
+                std::uint64_t fallbackMask =
+                    blockCtx->expectedMask ? blockCtx->expectedMask : blockCtx->activeMask;
                 syncPoint.expectedMask =
-                    sync->activeMask ? sync->activeMask : blockCtx->activeMask;
+                    sync->activeMask ? sync->activeMask : fallbackMask;
+            }
             syncPoint.arrivals.insert(lane);
             syncPoint.continuations[lane] =
                 StepType::continueWith(
