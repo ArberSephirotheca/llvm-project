@@ -304,5 +304,105 @@ Finally wire up effect cases (`Step::suspend` for collectives/barriers).
 
 ---
 
+## 7. Loop Scheduling Plan
+
+The final stage is to drive `simt_step.loop` through the CPS scheduler. Loops
+must allow different lanes to sit in different iterations independently while
+still honoring collectives and reconvergence.
+
+### 7.1 Loop Frame State
+
+Each loop merge entry carries a `LoopFrameState`:
+
+```c++
+struct IterationState {
+  DynamicBlockKey prepareKey;
+  DynamicBlockKey bodyKey;
+  std::uint64_t expectedMask;  // conservative participants for this iteration
+  std::uint64_t activeMask;    // lanes currently executing it
+};
+
+struct LoopFrameState {
+  const mlir::Operation *loopOp = nullptr;
+  std::uint32_t nextSequenceId = 0;
+
+  llvm::DenseMap<unsigned, IterationState> liveIterations;
+  llvm::DenseMap<LaneId, unsigned> laneIteration;
+  llvm::DenseMap<LaneId, llvm::SmallVector<SemValue, 4>> carriedTuples;
+};
+```
+
+`liveIterations[i]` records the prepare/body dynamic block keys for iteration
+`i` plus its masks. `laneIteration[lane]` tells us which iteration a lane is in,
+and `carriedTuples` stores the loop-carried SSA tuple per lane.
+
+### 7.2 Loop Entry
+
+1. Compute the conservative participant mask
+   (`parent.expectedMask ? parent.expectedMask : parent.activeMask`).
+2. Create iteration 0: allocate prepare/body keys with fresh sequence IDs, seed
+   `expectedMask` with the conservative mask, and set `activeMask` to the lanes
+   currently entering.
+3. Evaluate the loop inits per lane, store them in `carriedTuples`, and populate
+   the prepare block’s per-lane value environment.
+4. Push a merge entry containing the `LoopFrameState`, capture the parent
+   continuation, enqueue the prepare block for each active lane, and remove those
+   lanes from the parent block’s `activeMask`.
+
+Late arrivals reuse iteration 0 if it is still live; otherwise we allocate a new
+iteration entry for that cohort.
+
+### 7.3 `simt_step.condition`
+
+When a lane hits the condition terminator:
+
+* If the predicate is false:
+  - Remove its bit from the iteration’s `expectedMask`/`activeMask`.
+  - Call `shrinkExpectedForLane` so collectives stop waiting for it.
+  - Record the forwarded operands as the loop’s SSA results (store them in the
+    parent block’s per-lane value environment).
+  - Mark completion in the loop merge entry and call `handleReconvergence`.
+  - Erase the lane from `laneIteration`/`carriedTuples`.
+
+* If true:
+  - Store the forwarded operands in `carriedTuples[lane]`.
+  - Ensure the body block for this iteration exists, enqueue the lane at the
+    body entry using that iteration’s `bodyKey`, and keep the iteration’s
+    `activeMask` up to date.
+
+### 7.4 `simt_step.yield` / `continue`
+
+* Update `carriedTuples[lane]` with the yielded tuple.
+* Increment `laneIteration[lane]` to the next iteration index.
+* Look up (or create) the next `IterationState`. If we create a new iteration we
+  allocate prepare/body keys with `nextSequenceId`.
+* Seed the new prepare block’s value environment and enqueue the lane there.
+
+### 7.5 `simt_step.break`
+
+Break acts like “condition false” immediately: shrink expectations, mark
+completion, and reconverge the parent continuation for that lane.
+
+### 7.6 Cleanup & Collectives
+
+* When an iteration’s `activeMask` drops to zero, erase it from `liveIterations`.
+* When the loop merge entry sees `completedMask == expectedMask`, pop it and
+  resume the parent continuation.
+* Each iteration has its own `DynamicBlockKey`, so collectives automatically
+  scope themselves per iteration. `IterationState.expectedMask` carries the
+  conservative set; `shrinkExpectedForLane` removes bits when lanes exit for
+  good.
+
+### 7.7 Tests
+
+1. Single-lane loop – verify CPS output matches the old evaluator.
+2. Divergent loop – late arrivals should get their own iteration entries and
+   collectives should wait appropriately.
+3. Loop with a collective – ensure collectives block until every expected lane
+   arrives or is shrunk away.
+4. Nested loops – push multiple loop frames to verify nesting works.
+
+---
+
 This plan gets us from a linear, single-lane runner to a proper CPS interpreter
 with mask-aware control flow, ready for the more advanced semantics work.

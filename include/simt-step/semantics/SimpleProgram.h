@@ -45,6 +45,7 @@ private:
 
     SimpleSemantics semantics_;
     CPSInterpreter<SimpleSemantics> interpreter_;
+    bool enableLoopDispatch_ = false;
 };
 
 } // namespace simt::semantics
