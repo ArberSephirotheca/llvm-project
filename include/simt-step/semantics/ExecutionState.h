@@ -43,9 +43,22 @@ struct DynamicBlock {
     std::uint64_t activeMask = 0;
     std::uint64_t completedMask = 0;
 
+    const mlir::Operation *loopOp = nullptr;
+    bool isLoopPrepare = false;
+    bool isLoopBody = false;
+
     llvm::DenseMap<LaneId, StepT> continuations;
     llvm::DenseMap<LaneId, StepT> pendingOps;
-    llvm::DenseMap<mlir::Value, ValueT> carriedValues;
+    llvm::DenseMap<LaneId, llvm::DenseMap<mlir::Value, ValueT>> valueEnvs;
+};
+
+template <typename ValueT>
+struct LoopFrameState {
+    const mlir::Operation *loopOp = nullptr;
+    DynamicBlockKey prepareKey;
+    DynamicBlockKey bodyKey;
+    std::uint32_t nextSequenceId = 0;
+    llvm::DenseMap<LaneId, llvm::SmallVector<ValueT, 4>> carried;
 };
 
 template <typename ValueT, typename StepT>
@@ -83,6 +96,7 @@ struct MergeStackEntry {
     llvm::SmallVector<std::uint64_t, 4> childMasks;
     std::uint64_t expectedMask = 0;
     std::uint64_t completedMask = 0;
+    std::optional<LoopFrameState<ValueT>> loopFrame;
 };
 
 template <typename ValueT, typename StepT>
