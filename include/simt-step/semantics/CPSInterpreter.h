@@ -167,6 +167,143 @@ public:
             return StepType::halt();
 
         context.laneId = lane;
+        // Handle structured if here; loops remain runner-driven for now.
+        if (auto ifOp = llvm::dyn_cast<simt::dialect::IfOp>(&*it)) {
+            auto waveIt = state_.waves.find(wave);
+            if (waveIt == state_.waves.end())
+                return StepType::halt();
+            auto &waveCtx = waveIt->second;
+            auto parentBlockIt = waveCtx.blocks.find(key);
+            if (parentBlockIt == waveCtx.blocks.end())
+                return StepType::halt();
+            auto &parentBlock = parentBlockIt->second;
+
+            std::uint64_t trueMask = 0;
+            std::uint64_t falseMask = 0;
+            std::uint64_t activeMask = parentBlock.activeMask;
+            while (activeMask) {
+                unsigned laneId = std::countr_zero(activeMask);
+                activeMask &= activeMask - 1;
+                auto condOrErr = evaluateBool(waveCtx, key, ifOp.getCondition(),
+                                              laneId, parentBlock.activeMask);
+                if (!condOrErr) {
+                    llvm::consumeError(condOrErr.takeError());
+                    continue;
+                }
+                if (*condOrErr)
+                    trueMask |= (1ull << laneId);
+                else
+                    falseMask |= (1ull << laneId);
+            }
+
+            if (ifOp.getElseRegion().empty())
+                falseMask = 0;
+
+            auto nextIt = std::next(it);
+            StepType parentCont = StepType::continueWith(
+                [this, wave, key, block, nextIt, context, lane]() mutable -> StepType {
+                    return makeNextOp(wave, key, block, nextIt, context, lane);
+                });
+            parentBlock.continuations[lane] = parentCont;
+
+            auto makeChildKey = [&](mlir::Block *b, std::uint32_t seq) {
+                return DynamicBlockKey{b, seq};
+            };
+            std::uint32_t baseSeq = key.sequenceId + 1;
+
+            std::optional<DynamicBlockKey> thenKey;
+            std::optional<DynamicBlockKey> elseKey;
+
+            std::uint64_t parentExpected =
+                parentBlock.expectedMask ? parentBlock.expectedMask
+                                         : parentBlock.activeMask;
+            std::uint64_t childTrueExpected = parentExpected & trueMask;
+            std::uint64_t childFalseExpected = parentExpected & falseMask;
+
+            if (trueMask) {
+                DynamicBlockKey k =
+                    makeChildKey(&ifOp.getThenRegion().front(), baseSeq);
+                thenKey = k;
+                auto &childBlock = waveCtx.blocks[k];
+                childBlock.block = k.block;
+                childBlock.sequenceId = k.sequenceId;
+                childBlock.expectedMask =
+                    childTrueExpected ? childTrueExpected : trueMask;
+                childBlock.activeMask = trueMask;
+                childBlock.completedMask = 0;
+            }
+
+            if (falseMask && !ifOp.getElseRegion().empty()) {
+                DynamicBlockKey k =
+                    makeChildKey(&ifOp.getElseRegion().front(), baseSeq + 1);
+                elseKey = k;
+                auto &childBlock = waveCtx.blocks[k];
+                childBlock.block = k.block;
+                childBlock.sequenceId = k.sequenceId;
+                childBlock.expectedMask =
+                    childFalseExpected ? childFalseExpected : falseMask;
+                childBlock.activeMask = falseMask;
+                childBlock.completedMask = 0;
+            }
+
+            MergeStackEntry<ValueType, StepType> entry;
+            entry.parent = key;
+            if (thenKey) {
+                entry.pendingChildren.push_back(*thenKey);
+                entry.childMasks.push_back(trueMask);
+            }
+            if (elseKey) {
+                entry.pendingChildren.push_back(*elseKey);
+                entry.childMasks.push_back(falseMask);
+            }
+            entry.expectedMask = (childTrueExpected ? childTrueExpected : trueMask) |
+                                 (childFalseExpected ? childFalseExpected : falseMask);
+            entry.completedMask = 0;
+            if (entry.expectedMask != 0)
+                waveCtx.mergeStack.push_back(entry);
+
+            parentBlock.activeMask &= ~(trueMask | falseMask);
+
+            if (thenKey) {
+                std::uint64_t mask = trueMask;
+                while (mask) {
+                    unsigned l = std::countr_zero(mask);
+                    mask &= mask - 1;
+                    SemanticsContext laneCtx = context;
+                    laneCtx.activeMask = trueMask;
+                    laneCtx.laneId = l;
+                    auto *childBlock = const_cast<mlir::Block *>(thenKey->block);
+                    StepType childStep = makeNextOp(wave, *thenKey, childBlock,
+                                                    childBlock->begin(), laneCtx, l);
+                    enqueue(wave, *thenKey, l, std::move(childStep));
+                    if (elseKey) {
+                        waveCtx.blocks[*elseKey].expectedMask &= ~(1ull << l);
+                    }
+                    parentBlock.expectedMask &= ~(1ull << l);
+                }
+            }
+            if (elseKey) {
+                std::uint64_t mask = falseMask;
+                while (mask) {
+                    unsigned l = std::countr_zero(mask);
+                    mask &= mask - 1;
+                    SemanticsContext laneCtx = context;
+                    laneCtx.activeMask = falseMask;
+                    laneCtx.laneId = l;
+                    auto *childBlock = const_cast<mlir::Block *>(elseKey->block);
+                    StepType childStep = makeNextOp(wave, *elseKey, childBlock,
+                                                    childBlock->begin(), laneCtx, l);
+                    enqueue(wave, *elseKey, l, std::move(childStep));
+                    if (thenKey) {
+                        waveCtx.blocks[*thenKey].expectedMask &= ~(1ull << l);
+                    }
+                    parentBlock.expectedMask &= ~(1ull << l);
+                }
+            }
+
+            return StepType::halt();
+        }
+
         StepType current = adaptor_.eval(semantics_, &*it, context);
         mlir::Block::iterator nextIt = std::next(it);
         bool isTerminator = it->hasTrait<mlir::OpTrait::IsTerminator>();

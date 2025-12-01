@@ -30,11 +30,6 @@ private:
                                   SemanticsContext context,
                                   LaneId lane);
 
-    llvm::Expected<bool> evaluateBool(mlir::Value value,
-                                      SemanticsContext &context);
-    llvm::Error handleIfOp(simt::dialect::IfOp ifOp,
-                           SemanticsContext context);
-
     SimpleSemantics semantics_;
     CPSInterpreter<SimpleSemantics> interpreter_;
     bool enableLoopDispatch_ = false;
