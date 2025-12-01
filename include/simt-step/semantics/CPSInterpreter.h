@@ -231,6 +231,53 @@ public:
     }
 
 private:
+    /// Evaluate an SSA value to a SemValue for a given lane in a block.
+    llvm::Expected<ValueType> evaluateValue(WaveContext<ValueType, StepType> &waveCtx,
+                                            const DynamicBlockKey &blockKey,
+                                            mlir::Value value,
+                                            LaneId lane,
+                                            std::uint64_t activeMask) {
+        SemanticsContext ctx;
+        ctx.laneId = lane;
+        ctx.activeMask = activeMask;
+        if (auto *blockCtx = getBlock(waveCtx, blockKey)) {
+            auto envIt = blockCtx->valueEnvs.find(lane);
+            if (envIt != blockCtx->valueEnvs.end())
+                ctx.valueEnv = &envIt->second;
+        }
+        // If the value has a defining op, ask the semantics to evaluate it.
+        if (auto *defOp = value.getDefiningOp()) {
+            StepType step = adaptor_.eval(semantics_, defOp, ctx);
+            if (!step.isProduce())
+                return llvm::make_error<llvm::StringError>(
+                    "value evaluation did not produce",
+                    llvm::inconvertibleErrorCode());
+            auto state = std::move(step).takeState();
+            return std::get<typename StepType::Produce>(std::move(state)).value;
+        }
+        // Block arguments should be present in the value environment.
+        if (ctx.valueEnv) {
+            auto it = ctx.valueEnv->find(value);
+            if (it != ctx.valueEnv->end())
+                return it->second;
+        }
+        return llvm::make_error<llvm::StringError>(
+            "unsupported SSA value in interpreter evaluateValue",
+            llvm::inconvertibleErrorCode());
+    }
+
+    /// Evaluate a boolean SSA value for a given lane.
+    llvm::Expected<bool> evaluateBool(WaveContext<ValueType, StepType> &waveCtx,
+                                      const DynamicBlockKey &blockKey,
+                                      mlir::Value value,
+                                      LaneId lane,
+                                      std::uint64_t activeMask) {
+        auto valOrErr = evaluateValue(waveCtx, blockKey, value, lane, activeMask);
+        if (!valOrErr)
+            return valOrErr.takeError();
+        return valOrErr->asBool();
+    }
+
     llvm::Error processReady(ReadyContinuation<ValueType, StepType> item) {
         ensureWaveBlock(item.wave, item.block, item.lane);
         auto &waveCtx = state_.waves[item.wave];
