@@ -339,6 +339,7 @@ public:
             if (takeBody) {
                 DynamicBlockKey bodyKey{loopFrame.bodyKey.block,
                                         static_cast<std::uint32_t>(key.sequenceId + 1)};
+                bool isNew = !waveCtx.blocks.contains(bodyKey);
                 auto &bodyCtx = waveCtx.blocks[bodyKey];
                 bodyCtx.block = bodyKey.block;
                 bodyCtx.sequenceId = bodyKey.sequenceId;
@@ -360,7 +361,7 @@ public:
                         env[indexed.value()] = forwarded[indexed.index()];
                 }
 
-                if (!llvm::is_contained(entry->pendingChildren, bodyKey)) {
+                if (isNew && !llvm::is_contained(entry->pendingChildren, bodyKey)) {
                     entry->pendingChildren.push_back(bodyKey);
                     entry->childMasks.push_back(bodyCtx.activeMask);
                 }
@@ -432,12 +433,17 @@ public:
             blockCtx->activeMask &= ~laneBit;
             blockCtx->completedMask |= laneBit;
 
-            // Spawn next iteration prepare/body pair.
-            DynamicBlockKey nextPrep{loopFrame.prepareKey.block,
-                                     loopFrame.nextSequenceId};
-            DynamicBlockKey nextBody{loopFrame.bodyKey.block,
-                                     static_cast<std::uint32_t>(loopFrame.nextSequenceId + 1)};
-            loopFrame.nextSequenceId += 2;
+            // Spawn next iteration prepare/body pair (shared across lanes).
+            if (!loopFrame.pendingNextPrepare || !loopFrame.pendingNextBody) {
+                loopFrame.pendingNextPrepare =
+                    DynamicBlockKey{loopFrame.prepareKey.block, loopFrame.nextSequenceId};
+                loopFrame.pendingNextBody = DynamicBlockKey{
+                    loopFrame.bodyKey.block,
+                    static_cast<std::uint32_t>(loopFrame.nextSequenceId + 1)};
+            }
+            DynamicBlockKey nextPrep = *loopFrame.pendingNextPrepare;
+            DynamicBlockKey nextBody = *loopFrame.pendingNextBody;
+            bool nextExists = waveCtx.blocks.contains(nextPrep);
 
             auto &prepCtx = waveCtx.blocks[nextPrep];
             prepCtx.block = nextPrep.block;
@@ -461,11 +467,11 @@ public:
             bodyCtx.isLoopPrepare = false;
             bodyCtx.isLoopBody = true;
 
-            if (!llvm::is_contained(entry->pendingChildren, nextPrep)) {
+            if (!nextExists && !llvm::is_contained(entry->pendingChildren, nextPrep)) {
                 entry->pendingChildren.push_back(nextPrep);
                 entry->childMasks.push_back(prepCtx.activeMask);
             }
-            if (!llvm::is_contained(entry->pendingChildren, nextBody)) {
+            if (!nextExists && !llvm::is_contained(entry->pendingChildren, nextBody)) {
                 entry->pendingChildren.push_back(nextBody);
                 entry->childMasks.push_back(bodyCtx.activeMask);
             }
@@ -576,11 +582,17 @@ public:
             blockCtx->activeMask &= ~laneBit;
             blockCtx->completedMask |= laneBit;
 
-            DynamicBlockKey nextPrep{loopFrame.prepareKey.block,
-                                     loopFrame.nextSequenceId};
-            DynamicBlockKey nextBody{loopFrame.bodyKey.block,
-                                     static_cast<std::uint32_t>(loopFrame.nextSequenceId + 1)};
-            loopFrame.nextSequenceId += 2;
+            // Spawn next iteration prepare/body pair (shared across lanes).
+            if (!loopFrame.pendingNextPrepare || !loopFrame.pendingNextBody) {
+                loopFrame.pendingNextPrepare =
+                    DynamicBlockKey{loopFrame.prepareKey.block, loopFrame.nextSequenceId};
+                loopFrame.pendingNextBody = DynamicBlockKey{
+                    loopFrame.bodyKey.block,
+                    static_cast<std::uint32_t>(loopFrame.nextSequenceId + 1)};
+            }
+            DynamicBlockKey nextPrep = *loopFrame.pendingNextPrepare;
+            DynamicBlockKey nextBody = *loopFrame.pendingNextBody;
+            bool nextExists = waveCtx.blocks.contains(nextPrep);
 
             auto &prepCtx = waveCtx.blocks[nextPrep];
             prepCtx.block = nextPrep.block;
@@ -604,11 +616,11 @@ public:
             bodyCtx.isLoopPrepare = false;
             bodyCtx.isLoopBody = true;
 
-            if (!llvm::is_contained(entry->pendingChildren, nextPrep)) {
+            if (!nextExists && !llvm::is_contained(entry->pendingChildren, nextPrep)) {
                 entry->pendingChildren.push_back(nextPrep);
                 entry->childMasks.push_back(prepCtx.activeMask);
             }
-            if (!llvm::is_contained(entry->pendingChildren, nextBody)) {
+            if (!nextExists && !llvm::is_contained(entry->pendingChildren, nextBody)) {
                 entry->pendingChildren.push_back(nextBody);
                 entry->childMasks.push_back(bodyCtx.activeMask);
             }
