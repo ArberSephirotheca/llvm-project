@@ -155,6 +155,81 @@ public:
         return llvm::Error::success();
     }
 
+    /// Build a continuation that executes the operation at `it` for the given
+    /// wave/block/lane and chains to the next iterator.
+    StepType makeNextOp(WaveId wave,
+                        const DynamicBlockKey &key,
+                        mlir::Block *block,
+                        mlir::Block::iterator it,
+                        SemanticsContext context,
+                        LaneId lane) {
+        if (it == block->end())
+            return StepType::halt();
+
+        context.laneId = lane;
+        StepType current = adaptor_.eval(semantics_, &*it, context);
+        mlir::Block::iterator nextIt = std::next(it);
+        bool isTerminator = it->hasTrait<mlir::OpTrait::IsTerminator>();
+        const bool hasNext = nextIt != block->end();
+
+        while (true) {
+            typename StepType::State stateVariant = std::move(current).takeState();
+
+            if (auto *cont =
+                    std::get_if<typename StepType::Continue>(&stateVariant)) {
+                if (!cont->next)
+                    return StepType::halt();
+                current = cont->next();
+                continue;
+            }
+
+            if (auto *suspend =
+                    std::get_if<typename StepType::Suspend>(&stateVariant)) {
+                Effect effect = std::move(suspend->effect);
+                auto resume = std::move(suspend->resume);
+                auto chainedResume =
+                    [this, wave, key, resume = std::move(resume), block, nextIt, context,
+                     lane]() mutable -> StepType {
+                    StepType resumed = resume();
+                    return makeNextOp(wave, key, block, nextIt, context, lane);
+                };
+                return StepType::suspend(std::move(effect), std::move(chainedResume));
+            }
+
+            if (auto *prod =
+                    std::get_if<typename StepType::Produce>(&stateVariant)) {
+                if (!isTerminator && hasNext) {
+                    return StepType::continueWith(
+                        [this, wave, key, block, nextIt, context, lane]() mutable
+                        -> StepType {
+                            return makeNextOp(wave, key, block, nextIt, context, lane);
+                        });
+                }
+                return StepType::produce(std::move(prod->value));
+            }
+
+            if (std::holds_alternative<typename StepType::Halt>(stateVariant)) {
+                if (!isTerminator && hasNext) {
+                    return StepType::continueWith(
+                        [this, wave, key, block, nextIt, context, lane]() mutable
+                        -> StepType {
+                            return makeNextOp(wave, key, block, nextIt, context, lane);
+                        });
+                }
+                return StepType::halt();
+            }
+
+            if (!isTerminator && hasNext) {
+                return StepType::continueWith(
+                    [this, wave, key, block, nextIt, context, lane]() mutable -> StepType {
+                        return makeNextOp(wave, key, block, nextIt, context, lane);
+                    });
+            }
+
+            return StepType::halt();
+        }
+    }
+
 private:
     llvm::Error processReady(ReadyContinuation<ValueType, StepType> item) {
         ensureWaveBlock(item.wave, item.block, item.lane);
@@ -488,6 +563,7 @@ private:
         }
     }
 
+    SimtStepSemanticsAdaptor<SemanticsT> adaptor_;
     SemanticsT semantics_;
     StateType state_;
 };

@@ -29,14 +29,6 @@ private:
                                   mlir::Block::iterator it,
                                   SemanticsContext context,
                                   LaneId lane);
-    StepType evaluateAndChain(const DynamicBlockKey &key,
-                              StepType step,
-                              mlir::Block *block,
-                              mlir::Block::iterator nextIt,
-                              SemanticsContext context,
-                              LaneId lane,
-                              bool isTerminator,
-                              bool continueAfterResult);
 
     llvm::Expected<bool> evaluateBool(mlir::Value value,
                                       SemanticsContext &context);
