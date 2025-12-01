@@ -167,7 +167,451 @@ public:
             return StepType::halt();
 
         context.laneId = lane;
-        // Handle structured if here; loops remain runner-driven for now.
+        // Handle structured loop splitting here.
+        if (auto loopOp = llvm::dyn_cast<simt::dialect::LoopOp>(&*it)) {
+            auto waveIt = state_.waves.find(wave);
+            if (waveIt == state_.waves.end())
+                return StepType::halt();
+            auto &waveCtx = waveIt->second;
+            auto parentBlockIt = waveCtx.blocks.find(key);
+            if (parentBlockIt == waveCtx.blocks.end())
+                return StepType::halt();
+            auto &parentBlock = parentBlockIt->second;
+            std::uint64_t laneBit = 1ull << lane;
+            if ((parentBlock.activeMask & laneBit) == 0)
+                return StepType::halt();
+
+            std::uint64_t activeMask = parentBlock.activeMask;
+            if (activeMask == 0)
+                return StepType::halt();
+            std::uint64_t parentExpected =
+                parentBlock.expectedMask ? parentBlock.expectedMask : activeMask;
+
+            mlir::Block *prepareBlock = &loopOp.getPrepareRegion().front();
+            mlir::Block *bodyBlock = &loopOp.getBodyRegion().front();
+
+            std::uint32_t baseSeq = key.sequenceId + 1;
+            DynamicBlockKey prepKey{prepareBlock, baseSeq};
+            DynamicBlockKey bodyKey{bodyBlock, baseSeq + 1};
+
+            auto &prepareCtx = waveCtx.blocks[prepKey];
+            prepareCtx.block = prepareBlock;
+            prepareCtx.sequenceId = prepKey.sequenceId;
+            prepareCtx.expectedMask = parentExpected;
+            prepareCtx.activeMask = activeMask;
+            prepareCtx.completedMask = 0;
+            prepareCtx.loopOp = loopOp.getOperation();
+            prepareCtx.isLoopPrepare = true;
+            prepareCtx.isLoopBody = false;
+
+            auto &bodyCtx = waveCtx.blocks[bodyKey];
+            bodyCtx.block = bodyBlock;
+            bodyCtx.sequenceId = bodyKey.sequenceId;
+            bodyCtx.expectedMask = parentExpected;
+            bodyCtx.activeMask = 0;
+            bodyCtx.completedMask = 0;
+            bodyCtx.loopOp = loopOp.getOperation();
+            bodyCtx.isLoopPrepare = false;
+            bodyCtx.isLoopBody = true;
+
+            auto nextIt = std::next(it);
+            StepType parentCont = StepType::continueWith(
+                [this, wave, key, block, nextIt, context, lane]() mutable -> StepType {
+                    return makeNextOp(wave, key, block, nextIt, context, lane);
+                });
+            parentBlock.continuations[lane] = parentCont;
+
+            MergeStackEntry<ValueType, StepType> entry;
+            entry.parent = key;
+            entry.pendingChildren.push_back(prepKey);
+            entry.pendingChildren.push_back(bodyKey);
+            entry.childMasks.push_back(activeMask);
+            entry.expectedMask = parentExpected;
+            entry.completedMask = 0;
+            entry.loopFrame.emplace();
+            auto &loopFrame = *entry.loopFrame;
+            loopFrame.loopOp = loopOp.getOperation();
+            loopFrame.prepareKey = prepKey;
+            loopFrame.bodyKey = bodyKey;
+            loopFrame.nextSequenceId = bodyKey.sequenceId + 1;
+
+            auto inits = loopOp.getInits();
+            llvm::ArrayRef<mlir::BlockArgument> prepArgs = prepareBlock->getArguments();
+            std::uint64_t mask = activeMask;
+            while (mask) {
+                unsigned l = std::countr_zero(mask);
+                mask &= mask - 1;
+                auto &tuple = loopFrame.carried[l];
+                tuple.clear();
+                tuple.reserve(inits.size());
+                for (mlir::Value init : inits) {
+                    auto valueOrErr =
+                        evaluateValue(waveCtx, key, init, l, parentBlock.activeMask);
+                    if (!valueOrErr) {
+                        llvm::consumeError(valueOrErr.takeError());
+                        tuple.push_back(ValueType{});
+                    } else {
+                        tuple.push_back(*valueOrErr);
+                    }
+                }
+
+                auto &env = prepareCtx.valueEnvs[l];
+                env.clear();
+                for (auto indexed : llvm::enumerate(prepArgs)) {
+                    if (indexed.index() < tuple.size())
+                        env[indexed.value()] = tuple[indexed.index()];
+                }
+
+                SemanticsContext childContext = context;
+                childContext.activeMask = activeMask;
+                childContext.laneId = l;
+                StepType childStep = makeNextOp(wave, prepKey, prepareBlock,
+                                                prepareBlock->begin(), childContext, l);
+                enqueue(wave, prepKey, l, std::move(childStep));
+                parentBlock.expectedMask &= ~(1ull << l);
+            }
+
+            parentBlock.activeMask &= ~activeMask;
+            waveCtx.mergeStack.push_back(std::move(entry));
+            return StepType::halt();
+        }
+
+        auto findLoopEntry = [&](WaveContext<ValueType, StepType> &waveCtx,
+                                const mlir::Operation *loopOp)
+            -> MergeStackEntry<ValueType, StepType> * {
+            for (auto it = waveCtx.mergeStack.rbegin();
+                 it != waveCtx.mergeStack.rend(); ++it) {
+                if (it->loopFrame && it->loopFrame->loopOp == loopOp)
+                    return &*it;
+            }
+            return nullptr;
+        };
+
+        // Handle loop prepare terminator.
+        if (auto condOp = llvm::dyn_cast<simt::dialect::ConditionOp>(&*it)) {
+            auto waveIt = state_.waves.find(wave);
+            if (waveIt == state_.waves.end())
+                return StepType::halt();
+            auto &waveCtx = waveIt->second;
+            auto *blockCtx = getBlock(waveCtx, key);
+            if (!blockCtx || !blockCtx->isLoopPrepare || !blockCtx->loopOp)
+                goto if_dispatch;
+
+            auto *entry = findLoopEntry(waveCtx, blockCtx->loopOp);
+            if (!entry || !entry->loopFrame)
+                return StepType::halt();
+            auto &loopFrame = *entry->loopFrame;
+
+            std::uint64_t laneBit = 1ull << lane;
+            auto condOrErr = evaluateBool(waveCtx, key, condOp.getCondition(), lane,
+                                          blockCtx->activeMask);
+            bool takeBody = false;
+            if (condOrErr)
+                takeBody = *condOrErr;
+            else
+                llvm::consumeError(condOrErr.takeError());
+
+            llvm::SmallVector<ValueType, 4> forwarded;
+            forwarded.reserve(condOp.getForwarded().size());
+            for (mlir::Value v : condOp.getForwarded()) {
+                auto valOrErr =
+                    evaluateValue(waveCtx, key, v, lane, blockCtx->activeMask);
+                if (!valOrErr) {
+                    llvm::consumeError(valOrErr.takeError());
+                    forwarded.push_back(ValueType{});
+                } else {
+                    forwarded.push_back(*valOrErr);
+                }
+            }
+            loopFrame.carried[lane].assign(forwarded.begin(), forwarded.end());
+
+            blockCtx->activeMask &= ~laneBit;
+            blockCtx->completedMask |= laneBit;
+
+            if (takeBody) {
+                DynamicBlockKey bodyKey{loopFrame.bodyKey.block,
+                                        static_cast<std::uint32_t>(key.sequenceId + 1)};
+                auto &bodyCtx = waveCtx.blocks[bodyKey];
+                bodyCtx.block = bodyKey.block;
+                bodyCtx.sequenceId = bodyKey.sequenceId;
+                if (bodyCtx.expectedMask == 0)
+                    bodyCtx.expectedMask =
+                        blockCtx->expectedMask ? blockCtx->expectedMask
+                                               : blockCtx->activeMask;
+                bodyCtx.activeMask |= laneBit;
+                bodyCtx.loopOp = blockCtx->loopOp;
+                bodyCtx.isLoopBody = true;
+                bodyCtx.isLoopPrepare = false;
+
+                auto &env = bodyCtx.valueEnvs[lane];
+                env.clear();
+                auto bodyArgs =
+                    const_cast<mlir::Block *>(bodyKey.block)->getArguments();
+                for (auto indexed : llvm::enumerate(bodyArgs)) {
+                    if (indexed.index() < forwarded.size())
+                        env[indexed.value()] = forwarded[indexed.index()];
+                }
+
+                if (!llvm::is_contained(entry->pendingChildren, bodyKey)) {
+                    entry->pendingChildren.push_back(bodyKey);
+                    entry->childMasks.push_back(bodyCtx.activeMask);
+                }
+
+                SemanticsContext laneCtx = context;
+                laneCtx.activeMask = bodyCtx.activeMask;
+                laneCtx.laneId = lane;
+                mlir::Block *childBlock = const_cast<mlir::Block *>(bodyKey.block);
+                StepType childStep =
+                    makeNextOp(wave, bodyKey, childBlock, childBlock->begin(),
+                               laneCtx, lane);
+                enqueue(wave, bodyKey, lane, std::move(childStep));
+                return StepType::halt();
+            }
+
+            // Exit the loop and reconverge to the parent.
+            auto parentIt = waveCtx.blocks.find(entry->parent);
+            if (parentIt != waveCtx.blocks.end()) {
+                auto &parentEnv = parentIt->second.valueEnvs[lane];
+                unsigned idx = 0;
+                auto *loopOp = const_cast<mlir::Operation *>(loopFrame.loopOp);
+                for (mlir::Value res : loopOp->getResults()) {
+                    if (idx < forwarded.size())
+                        parentEnv[res] = forwarded[idx];
+                    ++idx;
+                }
+            }
+            handleReconvergence(wave, waveCtx, key, lane);
+            return StepType::halt();
+        }
+
+        // Handle loop body terminators (yield/continue/break).
+        if (auto yieldOp = llvm::dyn_cast<simt::dialect::YieldOp>(&*it)) {
+            auto waveIt = state_.waves.find(wave);
+            if (waveIt == state_.waves.end())
+                return StepType::halt();
+            auto &waveCtx = waveIt->second;
+            auto *blockCtx = getBlock(waveCtx, key);
+            if (!blockCtx || !blockCtx->isLoopBody || !blockCtx->loopOp)
+                goto if_dispatch;
+
+            auto *entry = findLoopEntry(waveCtx, blockCtx->loopOp);
+            if (!entry || !entry->loopFrame)
+                return StepType::halt();
+            auto &loopFrame = *entry->loopFrame;
+            std::uint64_t laneBit = 1ull << lane;
+
+            llvm::SmallVector<ValueType, 4> nextCarried;
+            nextCarried.reserve(yieldOp.getNumOperands());
+            for (mlir::Value v : yieldOp.getOperands()) {
+                auto valOrErr =
+                    evaluateValue(waveCtx, key, v, lane, blockCtx->activeMask);
+                if (!valOrErr) {
+                    llvm::consumeError(valOrErr.takeError());
+                    nextCarried.push_back(ValueType{});
+                } else {
+                    nextCarried.push_back(*valOrErr);
+                }
+            }
+            loopFrame.carried[lane].assign(nextCarried.begin(), nextCarried.end());
+
+            blockCtx->activeMask &= ~laneBit;
+            blockCtx->completedMask |= laneBit;
+
+            // Spawn next iteration prepare/body pair.
+            DynamicBlockKey nextPrep{loopFrame.prepareKey.block,
+                                     loopFrame.nextSequenceId};
+            DynamicBlockKey nextBody{loopFrame.bodyKey.block,
+                                     static_cast<std::uint32_t>(loopFrame.nextSequenceId + 1)};
+            loopFrame.nextSequenceId += 2;
+
+            auto &prepCtx = waveCtx.blocks[nextPrep];
+            prepCtx.block = nextPrep.block;
+            prepCtx.sequenceId = nextPrep.sequenceId;
+            prepCtx.expectedMask =
+                blockCtx->expectedMask ? blockCtx->expectedMask : blockCtx->activeMask;
+            prepCtx.activeMask |= laneBit;
+            prepCtx.completedMask = 0;
+            prepCtx.loopOp = blockCtx->loopOp;
+            prepCtx.isLoopPrepare = true;
+            prepCtx.isLoopBody = false;
+
+            auto &bodyCtx = waveCtx.blocks[nextBody];
+            bodyCtx.block = nextBody.block;
+            bodyCtx.sequenceId = nextBody.sequenceId;
+            bodyCtx.expectedMask =
+                blockCtx->expectedMask ? blockCtx->expectedMask : blockCtx->activeMask;
+            bodyCtx.activeMask = 0;
+            bodyCtx.completedMask = 0;
+            bodyCtx.loopOp = blockCtx->loopOp;
+            bodyCtx.isLoopPrepare = false;
+            bodyCtx.isLoopBody = true;
+
+            if (!llvm::is_contained(entry->pendingChildren, nextPrep)) {
+                entry->pendingChildren.push_back(nextPrep);
+                entry->childMasks.push_back(prepCtx.activeMask);
+            }
+            if (!llvm::is_contained(entry->pendingChildren, nextBody)) {
+                entry->pendingChildren.push_back(nextBody);
+                entry->childMasks.push_back(bodyCtx.activeMask);
+            }
+
+            auto prepArgs =
+                const_cast<mlir::Block *>(nextPrep.block)->getArguments();
+            auto &env = prepCtx.valueEnvs[lane];
+            env.clear();
+            for (auto indexed : llvm::enumerate(prepArgs)) {
+                if (indexed.index() < nextCarried.size())
+                    env[indexed.value()] = nextCarried[indexed.index()];
+            }
+
+            SemanticsContext laneCtx = context;
+            laneCtx.activeMask = prepCtx.activeMask;
+            laneCtx.laneId = lane;
+            mlir::Block *prepBlock = const_cast<mlir::Block *>(nextPrep.block);
+            StepType childStep =
+                makeNextOp(wave, nextPrep, prepBlock, prepBlock->begin(), laneCtx, lane);
+            enqueue(wave, nextPrep, lane, std::move(childStep));
+            return StepType::halt();
+        }
+
+        if (auto breakOp = llvm::dyn_cast<simt::dialect::BreakOp>(&*it)) {
+            auto waveIt = state_.waves.find(wave);
+            if (waveIt == state_.waves.end())
+                return StepType::halt();
+            auto &waveCtx = waveIt->second;
+            auto *blockCtx = getBlock(waveCtx, key);
+            if (!blockCtx || !blockCtx->isLoopBody || !blockCtx->loopOp)
+                goto if_dispatch;
+
+            auto *entry = findLoopEntry(waveCtx, blockCtx->loopOp);
+            if (!entry || !entry->loopFrame)
+                return StepType::halt();
+            auto &loopFrame = *entry->loopFrame;
+            std::uint64_t laneBit = 1ull << lane;
+
+            llvm::SmallVector<ValueType, 4> results;
+            results.reserve(breakOp.getNumOperands());
+            for (mlir::Value v : breakOp.getOperands()) {
+                auto valOrErr =
+                    evaluateValue(waveCtx, key, v, lane, blockCtx->activeMask);
+                if (!valOrErr) {
+                    llvm::consumeError(valOrErr.takeError());
+                    results.push_back(ValueType{});
+                } else {
+                    results.push_back(*valOrErr);
+                }
+            }
+            loopFrame.carried[lane].assign(results.begin(), results.end());
+
+            auto parentIt = waveCtx.blocks.find(entry->parent);
+            if (parentIt != waveCtx.blocks.end()) {
+                auto &parentEnv = parentIt->second.valueEnvs[lane];
+                unsigned idx = 0;
+                auto *loopOp = const_cast<mlir::Operation *>(loopFrame.loopOp);
+                for (mlir::Value res : loopOp->getResults()) {
+                    if (idx < results.size())
+                        parentEnv[res] = results[idx];
+                    ++idx;
+                }
+            }
+
+            blockCtx->activeMask &= ~laneBit;
+            blockCtx->completedMask |= laneBit;
+            shrinkExpectedForLane(wave, waveCtx, lane);
+            handleReconvergence(wave, waveCtx, key, lane);
+            return StepType::halt();
+        }
+
+        if (auto contOp = llvm::dyn_cast<simt::dialect::ContinueOp>(&*it)) {
+            auto waveIt = state_.waves.find(wave);
+            if (waveIt == state_.waves.end())
+                return StepType::halt();
+            auto &waveCtx = waveIt->second;
+            auto *blockCtx = getBlock(waveCtx, key);
+            if (!blockCtx || !blockCtx->isLoopBody || !blockCtx->loopOp)
+                goto if_dispatch;
+
+            auto *entry = findLoopEntry(waveCtx, blockCtx->loopOp);
+            if (!entry || !entry->loopFrame)
+                return StepType::halt();
+            auto &loopFrame = *entry->loopFrame;
+            std::uint64_t laneBit = 1ull << lane;
+
+            llvm::SmallVector<ValueType, 4> nextCarried;
+            nextCarried.reserve(contOp.getNumOperands());
+            for (mlir::Value v : contOp.getOperands()) {
+                auto valOrErr =
+                    evaluateValue(waveCtx, key, v, lane, blockCtx->activeMask);
+                if (!valOrErr) {
+                    llvm::consumeError(valOrErr.takeError());
+                    nextCarried.push_back(ValueType{});
+                } else {
+                    nextCarried.push_back(*valOrErr);
+                }
+            }
+            loopFrame.carried[lane].assign(nextCarried.begin(), nextCarried.end());
+
+            blockCtx->activeMask &= ~laneBit;
+            blockCtx->completedMask |= laneBit;
+
+            DynamicBlockKey nextPrep{loopFrame.prepareKey.block,
+                                     loopFrame.nextSequenceId};
+            DynamicBlockKey nextBody{loopFrame.bodyKey.block,
+                                     static_cast<std::uint32_t>(loopFrame.nextSequenceId + 1)};
+            loopFrame.nextSequenceId += 2;
+
+            auto &prepCtx = waveCtx.blocks[nextPrep];
+            prepCtx.block = nextPrep.block;
+            prepCtx.sequenceId = nextPrep.sequenceId;
+            prepCtx.expectedMask =
+                blockCtx->expectedMask ? blockCtx->expectedMask : blockCtx->activeMask;
+            prepCtx.activeMask |= laneBit;
+            prepCtx.completedMask = 0;
+            prepCtx.loopOp = blockCtx->loopOp;
+            prepCtx.isLoopPrepare = true;
+            prepCtx.isLoopBody = false;
+
+            auto &bodyCtx = waveCtx.blocks[nextBody];
+            bodyCtx.block = nextBody.block;
+            bodyCtx.sequenceId = nextBody.sequenceId;
+            bodyCtx.expectedMask =
+                blockCtx->expectedMask ? blockCtx->expectedMask : blockCtx->activeMask;
+            bodyCtx.activeMask = 0;
+            bodyCtx.completedMask = 0;
+            bodyCtx.loopOp = blockCtx->loopOp;
+            bodyCtx.isLoopPrepare = false;
+            bodyCtx.isLoopBody = true;
+
+            if (!llvm::is_contained(entry->pendingChildren, nextPrep)) {
+                entry->pendingChildren.push_back(nextPrep);
+                entry->childMasks.push_back(prepCtx.activeMask);
+            }
+            if (!llvm::is_contained(entry->pendingChildren, nextBody)) {
+                entry->pendingChildren.push_back(nextBody);
+                entry->childMasks.push_back(bodyCtx.activeMask);
+            }
+
+            auto prepArgs =
+                const_cast<mlir::Block *>(nextPrep.block)->getArguments();
+            auto &env = prepCtx.valueEnvs[lane];
+            env.clear();
+            for (auto indexed : llvm::enumerate(prepArgs)) {
+                if (indexed.index() < nextCarried.size())
+                    env[indexed.value()] = nextCarried[indexed.index()];
+            }
+
+            SemanticsContext laneCtx = context;
+            laneCtx.activeMask = prepCtx.activeMask;
+            laneCtx.laneId = lane;
+            mlir::Block *prepBlock = const_cast<mlir::Block *>(nextPrep.block);
+            StepType childStep =
+                makeNextOp(wave, nextPrep, prepBlock, prepBlock->begin(), laneCtx, lane);
+            enqueue(wave, nextPrep, lane, std::move(childStep));
+            return StepType::halt();
+        }
+
+    if_dispatch:
+        // Handle structured if here.
         if (auto ifOp = llvm::dyn_cast<simt::dialect::IfOp>(&*it)) {
             auto waveIt = state_.waves.find(wave);
             if (waveIt == state_.waves.end())
