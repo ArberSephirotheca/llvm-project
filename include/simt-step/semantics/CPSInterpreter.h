@@ -167,6 +167,14 @@ public:
             return StepType::halt();
 
         context.laneId = lane;
+        if (auto waveIt = state_.waves.find(wave); waveIt != state_.waves.end()) {
+            if (auto *blk = getBlock(waveIt->second, key)) {
+                context.activeMask = blk->activeMask;
+                auto envIt = blk->valueEnvs.find(lane);
+                if (envIt != blk->valueEnvs.end())
+                    context.valueEnv = &envIt->second;
+            }
+        }
         // Handle structured loop splitting here.
         if (auto loopOp = llvm::dyn_cast<simt::dialect::LoopOp>(&*it)) {
             auto waveIt = state_.waves.find(wave);
@@ -379,6 +387,13 @@ public:
                         parentEnv[res] = forwarded[idx];
                     ++idx;
                 }
+                auto contIt = parentIt->second.continuations.find(lane);
+                if (contIt != parentIt->second.continuations.end()) {
+                    parentIt->second.activeMask |= laneBit;
+                    state_.readyQueue.push(ReadyContinuation<ValueType, StepType>{
+                        wave, entry->parent, lane, contIt->second});
+                    parentIt->second.continuations.erase(contIt);
+                }
             }
             handleReconvergence(wave, waveCtx, key, lane);
             return StepType::halt();
@@ -512,6 +527,13 @@ public:
                     if (idx < results.size())
                         parentEnv[res] = results[idx];
                     ++idx;
+                }
+                auto contIt = parentIt->second.continuations.find(lane);
+                if (contIt != parentIt->second.continuations.end()) {
+                    parentIt->second.activeMask |= laneBit;
+                    state_.readyQueue.push(ReadyContinuation<ValueType, StepType>{
+                        wave, entry->parent, lane, contIt->second});
+                    parentIt->second.continuations.erase(contIt);
                 }
             }
 
@@ -900,8 +922,20 @@ private:
             }
 
             if (std::holds_alternative<typename StepType::Halt>(stateVariant)) {
-                laneCtx.hasReturned = true;
                 if (auto *blockCtx = getBlock(waveCtx, item.block)) {
+                    if (blockCtx->loopOp) {
+                        // Loop-internal scheduling halts shouldn't mark lane completion
+                        // at the function level; the loop handlers drive reconvergence.
+                        std::uint64_t laneBit = 1ull << item.lane;
+                        blockCtx->activeMask &= ~laneBit;
+                        blockCtx->completedMask |= laneBit;
+                        return llvm::Error::success();
+                    }
+                    if (blockCtx->continuations.contains(item.lane)) {
+                        // Control-split placeholder; the continuation will resume later.
+                        return llvm::Error::success();
+                    }
+                    laneCtx.hasReturned = true;
                     std::uint64_t laneBit = 1ull << item.lane;
                     blockCtx->activeMask &= ~laneBit;
                     blockCtx->completedMask |= laneBit;

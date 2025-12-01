@@ -21,6 +21,8 @@ using namespace simt::semantics;
 
 namespace {
 
+static void dumpInterpreterState(const SimpleProgramRunner &runner);
+
 llvm::Expected<int> run(llvm::StringRef path, SimpleProgramRunner &runner,
                         SemanticsContext &semaCtx, LaneId resultLane) {
     mlir::DialectRegistry registry;
@@ -98,16 +100,16 @@ llvm::Expected<int> run(llvm::StringRef path, SimpleProgramRunner &runner,
             "missing wave context", llvm::inconvertibleErrorCode());
 
     const auto &laneCtx = waveIt->second.lanes.lookup(resultLane);
-    if (!laneCtx.returnValue)
+    if (!laneCtx.returnValue) {
+        dumpInterpreterState(runner);
         return llvm::make_error<llvm::StringError>(
             "lane produced no value", llvm::inconvertibleErrorCode());
+    }
 
     int result = static_cast<int>(laneCtx.returnValue->asInt64());
     llvm::outs() << result << "\n";
     return result;
 }
-
-} // namespace
 
 static void dumpInterpreterState(const SimpleProgramRunner &runner) {
     const auto &state = runner.state();
@@ -127,6 +129,14 @@ static void dumpInterpreterState(const SimpleProgramRunner &runner) {
         for (const auto &blockIt : waveCtx.blocks) {
             const auto &key = blockIt.first;
             const auto &block = blockIt.second;
+            std::string label;
+            if (key.block) {
+                mlir::Block *mutableBlock =
+                    const_cast<mlir::Block *>(key.block);
+                if (!mutableBlock->empty())
+                    label =
+                        mutableBlock->front().getName().getStringRef().str();
+            }
             llvm::outs() << "  Block " << key.block << " seq "
                          << key.sequenceId << " exp=0x"
                          << llvm::format_hex(block.expectedMask, 10)
@@ -135,7 +145,10 @@ static void dumpInterpreterState(const SimpleProgramRunner &runner) {
                          << " completed=0x"
                          << llvm::format_hex(block.completedMask, 10)
                          << " pending=" << block.pendingOps.size()
-                         << "\n";
+                         << " envs=" << block.valueEnvs.size();
+            if (!label.empty())
+                llvm::outs() << " firstOp=" << label;
+            llvm::outs() << "\n";
         }
         for (const auto &laneIt : waveCtx.lanes) {
             const auto &laneCtx = laneIt.second;
@@ -150,6 +163,8 @@ static void dumpInterpreterState(const SimpleProgramRunner &runner) {
         }
     }
 }
+
+} // namespace
 
 int main(int argc, char **argv) {
     bool listDialects = false;

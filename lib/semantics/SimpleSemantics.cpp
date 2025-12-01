@@ -90,6 +90,12 @@ auto SimpleSemantics::handleAddIOp(mlir::arith::AddIOp op,
 llvm::Expected<SemValue>
 SimpleSemantics::evaluateValue(mlir::Value value,
                                SemanticsContext &context) {
+    if (context.valueEnv) {
+        auto it = context.valueEnv->find(value);
+        if (it != context.valueEnv->end())
+            return it->second;
+    }
+
     if (auto constOp = value.getDefiningOp<mlir::arith::ConstantOp>())
         return makeValueFromAttribute(constOp.getValue());
 
@@ -108,6 +114,12 @@ SimpleSemantics::evaluateValue(mlir::Value value,
     }
 
     if (auto loopOp = value.getDefiningOp<simt::dialect::LoopOp>()) {
+        // If the interpreter already populated a valueEnv entry, prefer it.
+        if (context.valueEnv) {
+            auto it = context.valueEnv->find(value);
+            if (it != context.valueEnv->end())
+                return it->second;
+        }
         auto allResultsOrErr = evaluateLoopOp(loopOp, context);
         if (!allResultsOrErr)
             return allResultsOrErr.takeError();
