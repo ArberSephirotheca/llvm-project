@@ -22,6 +22,10 @@ using namespace simt::semantics;
 namespace {
 
 static void dumpInterpreterState(const SimpleProgramRunner &runner);
+static std::string formatMaskBits(std::uint64_t mask, unsigned width);
+static std::string describeBlockKind(
+    const simt::semantics::DynamicBlock<simt::semantics::SemValue,
+                                        simt::semantics::Step<simt::semantics::SemValue>> &blk);
 
 llvm::Expected<int> run(llvm::StringRef path, SimpleProgramRunner &runner,
                         SemanticsContext &semaCtx, LaneId resultLane) {
@@ -122,37 +126,43 @@ static void dumpInterpreterState(const SimpleProgramRunner &runner) {
     for (const auto &waveIt : state.waves) {
         llvm::outs() << "Wave " << waveIt.first << "\n";
         const auto &waveCtx = waveIt.second;
+        unsigned maxLane = 0;
+        if (!waveCtx.lanes.empty())
+            maxLane = 1 + std::max_element(
+                                 waveCtx.lanes.begin(), waveCtx.lanes.end(),
+                                 [](const auto &a, const auto &b) {
+                                     return a.first < b.first;
+                                 })
+                                 ->first;
+        unsigned maskWidth = std::min<unsigned>(64, std::max<unsigned>(maxLane, 1));
         if (!waveCtx.mergeStack.empty()) {
             llvm::outs() << "  MergeStack:\n";
             for (const auto &entry : llvm::enumerate(waveCtx.mergeStack)) {
                 llvm::outs() << "    [" << entry.index() << "] parent=" << entry.value().parent.block
-                             << " exp=0x" << llvm::format_hex(entry.value().expectedMask, 10)
-                             << " completed=0x" << llvm::format_hex(entry.value().completedMask, 10)
+                             << " expected=" << formatMaskBits(entry.value().expectedMask, maskWidth)
+                             << " completed=" << formatMaskBits(entry.value().completedMask, maskWidth)
                              << " children=" << entry.value().pendingChildren.size() << "\n";
             }
         }
         for (const auto &blockIt : waveCtx.blocks) {
             const auto &key = blockIt.first;
             const auto &block = blockIt.second;
-            std::string label;
+            std::string firstOp;
             if (key.block) {
                 mlir::Block *mutableBlock =
                     const_cast<mlir::Block *>(key.block);
                 if (!mutableBlock->empty())
-                    label =
-                        mutableBlock->front().getName().getStringRef().str();
+                    firstOp = mutableBlock->front().getName().getStringRef().str();
             }
             llvm::outs() << "  Block " << key.block << " seq "
-                         << key.sequenceId << " exp=0x"
-                         << llvm::format_hex(block.expectedMask, 10)
-                         << " act=0x"
-                         << llvm::format_hex(block.activeMask, 10)
-                         << " completed=0x"
-                         << llvm::format_hex(block.completedMask, 10)
-                         << " pending=" << block.pendingOps.size()
+                         << key.sequenceId << " kind=" << describeBlockKind(block)
+                         << " expected=" << formatMaskBits(block.expectedMask, maskWidth)
+                         << " active=" << formatMaskBits(block.activeMask, maskWidth)
+                         << " completed=" << formatMaskBits(block.completedMask, maskWidth)
+                         << " pendingOps=" << block.pendingOps.size()
                          << " envs=" << block.valueEnvs.size();
-            if (!label.empty())
-                llvm::outs() << " firstOp=" << label;
+            if (!firstOp.empty())
+                llvm::outs() << " firstOp=" << firstOp;
             llvm::outs() << "\n";
         }
         for (const auto &laneIt : waveCtx.lanes) {
@@ -167,6 +177,37 @@ static void dumpInterpreterState(const SimpleProgramRunner &runner) {
             llvm::outs() << "\n";
         }
     }
+}
+
+static std::string formatMaskBits(std::uint64_t mask, unsigned width) {
+    std::string s;
+    s.reserve(width + 2);
+    s.append("0b");
+    for (int i = static_cast<int>(width) - 1; i >= 0; --i) {
+        s.push_back((mask & (1ull << i)) ? '1' : '0');
+    }
+    return s;
+}
+
+static std::string describeBlockKind(
+    const simt::semantics::DynamicBlock<simt::semantics::SemValue,
+                                        simt::semantics::Step<simt::semantics::SemValue>> &blk) {
+    if (blk.loopOp) {
+        if (blk.isLoopPrepare)
+            return "loop.prepare";
+        if (blk.isLoopBody)
+            return "loop.body";
+        return "loop.unknown";
+    }
+    switch (blk.kind) {
+    case simt::semantics::DynamicBlockKind::IfThen:
+        return "if.then";
+    case simt::semantics::DynamicBlockKind::IfElse:
+        return "if.else";
+    default:
+        break;
+    }
+    return "plain";
 }
 
 } // namespace

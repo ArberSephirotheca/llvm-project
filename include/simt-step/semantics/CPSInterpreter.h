@@ -308,6 +308,7 @@ private:
         prepareCtx.loopOp = loopOp.getOperation();
         prepareCtx.isLoopPrepare = true;
         prepareCtx.isLoopBody = false;
+        prepareCtx.kind = DynamicBlockKind::Plain;
 
         auto &bodyCtx = waveCtx.blocks[bodyKey];
         bodyCtx.block = bodyBlock;
@@ -318,6 +319,7 @@ private:
         bodyCtx.loopOp = loopOp.getOperation();
         bodyCtx.isLoopPrepare = false;
         bodyCtx.isLoopBody = true;
+        bodyCtx.kind = DynamicBlockKind::Plain;
 
         auto nextIt = std::next(it);
         StepType parentCont = StepType::continueWith(
@@ -842,6 +844,7 @@ private:
                 childTrueExpected ? childTrueExpected : trueMask;
             childBlock.activeMask = trueMask;
             childBlock.completedMask = 0;
+            childBlock.kind = DynamicBlockKind::IfThen;
         }
 
         if (falseMask && !ifOp.getElseRegion().empty()) {
@@ -855,6 +858,7 @@ private:
                 childFalseExpected ? childFalseExpected : falseMask;
             childBlock.activeMask = falseMask;
             childBlock.completedMask = 0;
+            childBlock.kind = DynamicBlockKind::IfElse;
         }
 
         MergeStackEntry<ValueType, StepType> entry;

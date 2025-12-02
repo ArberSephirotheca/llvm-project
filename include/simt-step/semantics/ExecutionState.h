@@ -34,6 +34,12 @@ struct DynamicBlockKey {
     }
 };
 
+enum class DynamicBlockKind {
+    Plain,
+    IfThen,
+    IfElse,
+};
+
 template <typename ValueT, typename StepT>
 struct DynamicBlock {
     const mlir::Block *block = nullptr;
@@ -46,6 +52,8 @@ struct DynamicBlock {
     const mlir::Operation *loopOp = nullptr;
     bool isLoopPrepare = false;
     bool isLoopBody = false;
+
+    DynamicBlockKind kind = DynamicBlockKind::Plain;
 
     llvm::DenseMap<LaneId, StepT> continuations;
     llvm::DenseMap<LaneId, StepT> pendingOps;
