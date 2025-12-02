@@ -14,6 +14,7 @@
 #include <variant>
 #include <queue>
 
+#include <mlir/Dialect/Func/IR/FuncOps.h>
 #include <llvm/Support/Error.h>
 
 namespace mlir {
@@ -199,6 +200,17 @@ public:
         if (auto handled =
                 handleIfSplit(wave, key, block, it, context, lane))
             return *handled;
+
+        // Mark return as terminal for this lane so we don't resume parents.
+        if (auto retOp = llvm::dyn_cast<mlir::func::ReturnOp>(&*it)) {
+            auto waveIt = state_.waves.find(wave);
+            if (waveIt != state_.waves.end()) {
+                auto &laneCtx = waveIt->second.lanes[lane];
+                laneCtx.phase =
+                    LaneContext<ValueType, StepType>::Phase::Completed;
+                laneCtx.hasReturned = true;
+            }
+        }
 
         StepType current = adaptor_.eval(semantics_, &*it, context);
         mlir::Block::iterator nextIt = std::next(it);
@@ -993,15 +1005,19 @@ private:
             if (std::holds_alternative<typename StepType::Produce>(stateVariant)) {
                 auto prod =
                     std::get<typename StepType::Produce>(std::move(stateVariant));
-                laneCtx.hasReturned = true;
+                bool terminal = laneCtx.phase ==
+                                LaneContext<ValueType, StepType>::Phase::Completed;
+                laneCtx.hasReturned = laneCtx.hasReturned || terminal;
                 laneCtx.returnValue = std::move(prod.value);
                 if (auto *blockCtx = getBlock(waveCtx, item.block)) {
                     std::uint64_t laneBit = 1ull << item.lane;
                     blockCtx->activeMask &= ~laneBit;
                     blockCtx->completedMask |= laneBit;
                     shrinkExpectedForLane(item.wave, waveCtx, item.lane);
-                    // Resume parent execution for this lane.
-                    handleReconvergence(item.wave, waveCtx, item.block, item.lane);
+                    if (!terminal) {
+                        // Resume parent execution for this lane.
+                        handleReconvergence(item.wave, waveCtx, item.block, item.lane);
+                    }
                 }
                 return llvm::Error::success();
             }
@@ -1020,14 +1036,19 @@ private:
                         // Control-split placeholder; the continuation will resume later.
                         return llvm::Error::success();
                     }
-                    laneCtx.hasReturned = true;
+                    bool terminal = laneCtx.phase ==
+                                    LaneContext<ValueType, StepType>::Phase::Completed;
+                    laneCtx.hasReturned = laneCtx.hasReturned || terminal;
                     std::uint64_t laneBit = 1ull << item.lane;
                     blockCtx->activeMask &= ~laneBit;
                     blockCtx->completedMask |= laneBit;
                     shrinkExpectedForLane(item.wave, waveCtx, item.lane);
-                    // Do not re-add returned lanes to parent activeMask; just
-                    // account for completion in merge tracking.
+                    // Account for completion and allow reconvergence unless this was
+                    // a terminal return for the lane.
                     markMergeCompletion(item.wave, waveCtx, item.block, item.lane);
+                    if (!terminal) {
+                        handleReconvergence(item.wave, waveCtx, item.block, item.lane);
+                    }
                 }
                 return llvm::Error::success();
             }
