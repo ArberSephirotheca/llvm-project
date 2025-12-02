@@ -57,10 +57,8 @@ struct LoopFrameState {
     const mlir::Operation *loopOp = nullptr;
     DynamicBlockKey prepareKey;
     DynamicBlockKey bodyKey;
-    // Lazily allocated "next" iteration keys (shared by all lanes).
-    std::optional<DynamicBlockKey> pendingNextPrepare;
-    std::optional<DynamicBlockKey> pendingNextBody;
-    std::uint32_t nextSequenceId = 0;
+    // Per-lane next sequence id for the next iteration prep/body.
+    llvm::DenseMap<LaneId, std::uint32_t> laneNextSeq;
     llvm::DenseMap<LaneId, llvm::SmallVector<ValueT, 4>> carried;
 };
 

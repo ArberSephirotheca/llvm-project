@@ -241,7 +241,7 @@ public:
             loopFrame.loopOp = loopOp.getOperation();
             loopFrame.prepareKey = prepKey;
             loopFrame.bodyKey = bodyKey;
-            loopFrame.nextSequenceId = bodyKey.sequenceId + 1;
+            loopFrame.laneNextSeq.clear();
 
             auto inits = loopOp.getInits();
             llvm::ArrayRef<mlir::BlockArgument> prepArgs = prepareBlock->getArguments();
@@ -262,6 +262,7 @@ public:
                         tuple.push_back(*valueOrErr);
                     }
                 }
+                loopFrame.laneNextSeq[l] = bodyKey.sequenceId + 1;
 
                 auto &env = prepareCtx.valueEnvs[l];
                 env.clear();
@@ -433,16 +434,12 @@ public:
             blockCtx->activeMask &= ~laneBit;
             blockCtx->completedMask |= laneBit;
 
-            // Spawn next iteration prepare/body pair (shared across lanes).
-            if (!loopFrame.pendingNextPrepare || !loopFrame.pendingNextBody) {
-                loopFrame.pendingNextPrepare =
-                    DynamicBlockKey{loopFrame.prepareKey.block, loopFrame.nextSequenceId};
-                loopFrame.pendingNextBody = DynamicBlockKey{
-                    loopFrame.bodyKey.block,
-                    static_cast<std::uint32_t>(loopFrame.nextSequenceId + 1)};
-            }
-            DynamicBlockKey nextPrep = *loopFrame.pendingNextPrepare;
-            DynamicBlockKey nextBody = *loopFrame.pendingNextBody;
+            // Derive the next iteration keys from the per-lane counter.
+            std::uint32_t nextSeq =
+                loopFrame.laneNextSeq.try_emplace(lane, key.sequenceId + 2).first->second;
+            DynamicBlockKey nextPrep{loopFrame.prepareKey.block, nextSeq};
+            DynamicBlockKey nextBody{loopFrame.bodyKey.block,
+                                     static_cast<std::uint32_t>(nextSeq + 1)};
             bool nextExists = waveCtx.blocks.contains(nextPrep);
 
             auto &prepCtx = waveCtx.blocks[nextPrep];
@@ -492,6 +489,7 @@ public:
             StepType childStep =
                 makeNextOp(wave, nextPrep, prepBlock, prepBlock->begin(), laneCtx, lane);
             enqueue(wave, nextPrep, lane, std::move(childStep));
+            loopFrame.laneNextSeq[lane] = nextSeq + 2;
             return StepType::halt();
         }
 
@@ -582,16 +580,12 @@ public:
             blockCtx->activeMask &= ~laneBit;
             blockCtx->completedMask |= laneBit;
 
-            // Spawn next iteration prepare/body pair (shared across lanes).
-            if (!loopFrame.pendingNextPrepare || !loopFrame.pendingNextBody) {
-                loopFrame.pendingNextPrepare =
-                    DynamicBlockKey{loopFrame.prepareKey.block, loopFrame.nextSequenceId};
-                loopFrame.pendingNextBody = DynamicBlockKey{
-                    loopFrame.bodyKey.block,
-                    static_cast<std::uint32_t>(loopFrame.nextSequenceId + 1)};
-            }
-            DynamicBlockKey nextPrep = *loopFrame.pendingNextPrepare;
-            DynamicBlockKey nextBody = *loopFrame.pendingNextBody;
+            // Spawn next iteration prep/body using the per-lane next sequence.
+            std::uint32_t nextSeq =
+                loopFrame.laneNextSeq.try_emplace(lane, key.sequenceId + 2).first->second;
+            DynamicBlockKey nextPrep{loopFrame.prepareKey.block, nextSeq};
+            DynamicBlockKey nextBody{loopFrame.bodyKey.block,
+                                     static_cast<std::uint32_t>(nextSeq + 1)};
             bool nextExists = waveCtx.blocks.contains(nextPrep);
 
             auto &prepCtx = waveCtx.blocks[nextPrep];
@@ -641,6 +635,7 @@ public:
             StepType childStep =
                 makeNextOp(wave, nextPrep, prepBlock, prepBlock->begin(), laneCtx, lane);
             enqueue(wave, nextPrep, lane, std::move(childStep));
+            loopFrame.laneNextSeq[lane] = nextSeq + 2;
             return StepType::halt();
         }
 
