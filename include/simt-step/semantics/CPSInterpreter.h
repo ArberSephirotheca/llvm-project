@@ -163,11 +163,11 @@ public:
                         mlir::Block::iterator it,
                         SemanticsContext context,
                         LaneId lane) {
-        if (it == block->end())
-            return StepType::halt();
+            if (it == block->end())
+                return StepType::halt();
 
-        context.laneId = lane;
-        if (auto waveIt = state_.waves.find(wave); waveIt != state_.waves.end()) {
+            context.laneId = lane;
+            if (auto waveIt = state_.waves.find(wave); waveIt != state_.waves.end()) {
             if (auto *blk = getBlock(waveIt->second, key)) {
                 context.activeMask = blk->activeMask;
                 auto envIt = blk->valueEnvs.find(lane);
@@ -378,7 +378,8 @@ public:
                 return StepType::halt();
             }
 
-            // Exit the loop and reconverge to the parent.
+            // Exit the loop and reconverge to the parent: run the stored parent
+            // continuation for this lane so currentBlock reflects the parent block.
             auto parentIt = waveCtx.blocks.find(entry->parent);
             if (parentIt != waveCtx.blocks.end()) {
                 auto &parentEnv = parentIt->second.valueEnvs[lane];
@@ -395,6 +396,9 @@ public:
                     state_.readyQueue.push(ReadyContinuation<ValueType, StepType>{
                         wave, entry->parent, lane, contIt->second});
                     parentIt->second.continuations.erase(contIt);
+                    // Update current block to the parent for this lane.
+                    auto &laneCtx = waveCtx.lanes[lane];
+                    laneCtx.currentBlock = entry->parent;
                 }
             }
             handleReconvergence(wave, waveCtx, key, lane);
@@ -641,11 +645,11 @@ public:
 
     if_dispatch:
         // Handle structured if here.
-        if (auto ifOp = llvm::dyn_cast<simt::dialect::IfOp>(&*it)) {
-            auto waveIt = state_.waves.find(wave);
-            if (waveIt == state_.waves.end())
-                return StepType::halt();
-            auto &waveCtx = waveIt->second;
+            if (auto ifOp = llvm::dyn_cast<simt::dialect::IfOp>(&*it)) {
+                auto waveIt = state_.waves.find(wave);
+                if (waveIt == state_.waves.end())
+                    return StepType::halt();
+                auto &waveCtx = waveIt->second;
             auto parentBlockIt = waveCtx.blocks.find(key);
             if (parentBlockIt == waveCtx.blocks.end())
                 return StepType::halt();
@@ -931,8 +935,8 @@ private:
             if (std::holds_alternative<typename StepType::Halt>(stateVariant)) {
                 if (auto *blockCtx = getBlock(waveCtx, item.block)) {
                     if (blockCtx->loopOp) {
-                        // Loop-internal scheduling halts shouldn't mark lane completion
-                        // at the function level; the loop handlers drive reconvergence.
+                        // Let loop handlers drive reconvergence and parent resumption;
+                        // don't treat this as end-of-function for the lane.
                         std::uint64_t laneBit = 1ull << item.lane;
                         blockCtx->activeMask &= ~laneBit;
                         blockCtx->completedMask |= laneBit;
@@ -1215,7 +1219,7 @@ private:
             if (parentBlockIt != waveCtx.blocks.end()) {
                 auto &parentBlock = parentBlockIt->second;
                 parentBlock.activeMask |= (1ull << lane);
-                // Resume parent continuation for this lane only.
+                // Resume parent continuation for this lane immediately.
                 auto contIt = parentBlock.continuations.find(lane);
                 if (contIt != parentBlock.continuations.end()) {
                     state_.readyQueue.push(
@@ -1225,7 +1229,29 @@ private:
                 }
             }
             // Pop the merge entry only when all expected lanes are done.
-            if (it->completedMask == it->expectedMask) {
+            if (it->expectedMask != 0 ? (it->completedMask == it->expectedMask)
+                                      : it->pendingChildren.empty()) {
+                // Enqueue any remaining parent continuations for lanes that have
+                // not been resumed yet.
+                auto parentBlockIt2 = waveCtx.blocks.find(parentKey);
+                if (parentBlockIt2 != waveCtx.blocks.end()) {
+                    auto &parentBlock = parentBlockIt2->second;
+                    std::uint64_t mask = it->expectedMask ? it->expectedMask
+                                                          : parentBlock.expectedMask;
+                    while (mask) {
+                        unsigned l = std::countr_zero(mask);
+                        mask &= mask - 1;
+                        auto contIt = parentBlock.continuations.find(l);
+                        if (contIt != parentBlock.continuations.end()) {
+                            parentBlock.activeMask |= (1ull << l);
+                            waveCtx.lanes[l].currentBlock = parentKey;
+                            state_.readyQueue.push(
+                                ReadyContinuation<ValueType, StepType>{waveId, parentKey, l,
+                                                                       contIt->second});
+                            parentBlock.continuations.erase(contIt);
+                        }
+                    }
+                }
                 waveCtx.mergeStack.pop_back();
             }
             break;

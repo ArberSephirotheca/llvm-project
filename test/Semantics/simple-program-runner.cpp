@@ -89,6 +89,7 @@ llvm::Expected<int> run(llvm::StringRef path, SimpleProgramRunner &runner,
     }
 
     mlir::Block &block = func.getBody().front();
+    bool expectResult = func.getFunctionType().getNumResults() > 0;
 
     if (llvm::Error err = runner.runBlock(&block, semaCtx))
         return std::move(err);
@@ -100,6 +101,10 @@ llvm::Expected<int> run(llvm::StringRef path, SimpleProgramRunner &runner,
             "missing wave context", llvm::inconvertibleErrorCode());
 
     const auto &laneCtx = waveIt->second.lanes.lookup(resultLane);
+    if (!expectResult) {
+        // Function is void; ignore any produced values.
+        return 0;
+    }
     if (!laneCtx.returnValue) {
         dumpInterpreterState(runner);
         return llvm::make_error<llvm::StringError>(
