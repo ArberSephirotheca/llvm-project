@@ -15,6 +15,7 @@
 
 #include <llvm/Support/Error.h>
 #include <llvm/Support/Format.h>
+#include <llvm/Support/Debug.h>
 #include <llvm/Support/raw_ostream.h>
 
 using namespace simt::semantics;
@@ -201,6 +202,7 @@ static std::string describeBlockKind(
 int main(int argc, char **argv) {
     bool listDialects = false;
     bool dumpState = false;
+    bool enableDebug = false;
     uint64_t maskOverride = 0;
     llvm::StringRef path;
     for (int i = 1; i < argc; ++i) {
@@ -211,6 +213,10 @@ int main(int argc, char **argv) {
         }
         if (arg == "--dump-blocks") {
             dumpState = true;
+            continue;
+        }
+        if (arg == "--debug") {
+            enableDebug = true;
             continue;
         }
         if (arg.starts_with("--mask=")) {
@@ -231,6 +237,12 @@ int main(int argc, char **argv) {
     semaCtx.laneId = 0;
 
     SimpleProgramRunner runner;
+
+    if (enableDebug) {
+        llvm::DebugFlag = true;
+        setCurrentDebugType(""); // enable all debug types
+        simt::semantics::EnableCPSDebugLogs = true;
+    }
 
     if (listDialects) {
         mlir::DialectRegistry registry;

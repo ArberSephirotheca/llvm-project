@@ -17,12 +17,15 @@
 #include <mlir/Dialect/Func/IR/FuncOps.h>
 #include <llvm/Support/Error.h>
 #include <llvm/Support/ErrorHandling.h>
+#include <llvm/Support/raw_ostream.h>
 
 namespace mlir {
 class Operation;
 } // namespace mlir
 
 namespace simt::semantics {
+
+inline bool EnableCPSDebugLogs = false;
 
 /// Continuation-Passing Style control primitive returned by interpreter steps.
 template <typename ValueT>
@@ -305,6 +308,14 @@ private:
         std::uint64_t parentExpected =
             parentBlock.expectedMask ? parentBlock.expectedMask : activeMask;
 
+        if (EnableCPSDebugLogs) {
+            llvm::errs() << "[CPS] handleLoopSplit lane=" << lane
+                         << " parent=" << key.block << " seq=" << key.sequenceId
+                         << " active=0x" << llvm::format_hex(parentBlock.activeMask, 10)
+                         << " expected=0x" << llvm::format_hex(parentBlock.expectedMask, 10)
+                         << "\n";
+        }
+
         mlir::Block *prepareBlock = &loopOp.getPrepareRegion().front();
         mlir::Block *bodyBlock = &loopOp.getBodyRegion().front();
 
@@ -457,6 +468,22 @@ private:
         blockCtx->activeMask &= ~laneBit;
         blockCtx->completedMask |= laneBit;
 
+        if (EnableCPSDebugLogs) {
+            llvm::errs() << "[CPS] handleLoopPrepareTerminator lane=" << lane
+                         << " block=" << key.block << " seq=" << key.sequenceId
+                         << " takeBody=" << takeBody
+                         << " active=0x" << llvm::format_hex(blockCtx->activeMask, 10)
+                         << " expected=0x" << llvm::format_hex(blockCtx->expectedMask, 10)
+                         << "\n";
+        }
+
+        LLVM_DEBUG(llvm::dbgs() << "[CPS] handleLoopPrepareTerminator lane=" << lane
+                                << " block=" << key.block << " seq=" << key.sequenceId
+                                << " takeBody=" << takeBody
+                                << " active=0x" << llvm::format_hex(blockCtx->activeMask, 10)
+                                << " expected=0x" << llvm::format_hex(blockCtx->expectedMask, 10)
+                                << "\n");
+
         if (takeBody) {
             DynamicBlockKey bodyKey{loopFrame.bodyKey.block,
                                     static_cast<std::uint32_t>(key.sequenceId + 1)};
@@ -543,6 +570,12 @@ private:
         if ((blockCtx->activeMask & (1ull << lane)) == 0)
             return StepType::halt();
 
+        LLVM_DEBUG(llvm::dbgs() << "[CPS] handleLoopYield lane=" << lane
+                                << " block=" << key.block << " seq=" << key.sequenceId
+                                << " active=0x" << llvm::format_hex(blockCtx->activeMask, 10)
+                                << " expected=0x" << llvm::format_hex(blockCtx->expectedMask, 10)
+                                << "\n");
+
         auto *entry = findLoopEntry(waveCtx, blockCtx->loopOp);
         if (!entry || !entry->loopFrame)
             llvm::report_fatal_error("handleLoopYield: missing loop frame");
@@ -565,6 +598,14 @@ private:
 
         blockCtx->activeMask &= ~laneBit;
         blockCtx->completedMask |= laneBit;
+
+        if (EnableCPSDebugLogs) {
+            llvm::errs() << "[CPS] handleLoopContinue lane=" << lane
+                         << " block=" << key.block << " seq=" << key.sequenceId
+                         << " active=0x" << llvm::format_hex(blockCtx->activeMask, 10)
+                         << " expected=0x" << llvm::format_hex(blockCtx->expectedMask, 10)
+                         << "\n";
+        }
 
         std::uint32_t nextSeq =
             loopFrame.laneNextSeq.try_emplace(lane, key.sequenceId + 2).first->second;
@@ -644,6 +685,14 @@ private:
             llvm::report_fatal_error("handleLoopContinue: invalid block context");
         if ((blockCtx->activeMask & (1ull << lane)) == 0)
             return StepType::halt();
+
+        if (EnableCPSDebugLogs) {
+            llvm::errs() << "[CPS] handleLoopContinue lane=" << lane
+                         << " block=" << key.block << " seq=" << key.sequenceId
+                         << " active=0x" << llvm::format_hex(blockCtx->activeMask, 10)
+                         << " expected=0x" << llvm::format_hex(blockCtx->expectedMask, 10)
+                         << "\n";
+        }
 
         auto *entry = findLoopEntry(waveCtx, blockCtx->loopOp);
         if (!entry || !entry->loopFrame)
@@ -788,6 +837,13 @@ private:
 
         blockCtx->activeMask &= ~laneBit;
         blockCtx->completedMask |= laneBit;
+        if (EnableCPSDebugLogs) {
+            llvm::errs() << "[CPS] handleLoopBreak lane=" << lane
+                         << " block=" << key.block << " seq=" << key.sequenceId
+                         << " active=0x" << llvm::format_hex(blockCtx->activeMask, 10)
+                         << " expected=0x" << llvm::format_hex(blockCtx->expectedMask, 10)
+                         << "\n";
+        }
         shrinkExpectedForLane(wave, waveCtx, lane);
         handleReconvergence(wave, waveCtx, key, lane);
         return StepType::halt();
@@ -813,6 +869,14 @@ private:
         auto &parentBlock = parentBlockIt->second;
         if ((parentBlock.activeMask & (1ull << lane)) == 0)
             return StepType::halt();
+
+        if (EnableCPSDebugLogs) {
+            llvm::errs() << "[CPS] handleIfSplit lane=" << lane
+                         << " parent=" << key.block << " seq=" << key.sequenceId
+                         << " active=0x" << llvm::format_hex(parentBlock.activeMask, 10)
+                         << " expected=0x" << llvm::format_hex(parentBlock.expectedMask, 10)
+                         << "\n";
+        }
 
         std::uint64_t trueMask = 0;
         std::uint64_t falseMask = 0;
