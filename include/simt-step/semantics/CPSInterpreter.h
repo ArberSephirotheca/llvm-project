@@ -400,7 +400,6 @@ private:
             StepType childStep = makeNextOp(wave, prepKey, prepareBlock,
                                             prepareBlock->begin(), childContext, l);
             enqueue(wave, prepKey, l, std::move(childStep));
-            parentBlock.expectedMask &= ~(1ull << l);
         }
 
         parentBlock.activeMask &= ~activeMask;
@@ -870,35 +869,6 @@ private:
         if ((parentBlock.activeMask & (1ull << lane)) == 0)
             return StepType::halt();
 
-        if (EnableCPSDebugLogs) {
-            llvm::errs() << "[CPS] handleIfSplit lane=" << lane
-                         << " parent=" << key.block << " seq=" << key.sequenceId
-                         << " active=0x" << llvm::format_hex(parentBlock.activeMask, 10)
-                         << " expected=0x" << llvm::format_hex(parentBlock.expectedMask, 10)
-                         << "\n";
-        }
-
-        std::uint64_t trueMask = 0;
-        std::uint64_t falseMask = 0;
-        std::uint64_t activeMask = parentBlock.activeMask;
-        while (activeMask) {
-            unsigned laneId = std::countr_zero(activeMask);
-            activeMask &= activeMask - 1;
-            auto condOrErr = evaluateBool(waveCtx, key, ifOp.getCondition(),
-                                          laneId, parentBlock.activeMask);
-            if (!condOrErr) {
-                llvm::consumeError(condOrErr.takeError());
-                continue;
-            }
-            if (*condOrErr)
-                trueMask |= (1ull << laneId);
-            else
-                falseMask |= (1ull << laneId);
-        }
-
-        if (ifOp.getElseRegion().empty())
-            falseMask = 0;
-
         auto nextIt = std::next(it);
         StepType parentCont = StepType::continueWith(
             [this, wave, key, block, nextIt, context, lane]() mutable -> StepType {
@@ -906,103 +876,135 @@ private:
             });
         parentBlock.continuations[lane] = parentCont;
 
+        std::uint64_t parentExpected =
+            parentBlock.expectedMask ? parentBlock.expectedMask
+                                     : parentBlock.activeMask;
+
+        // Evaluate predicate only for this lane.
+        auto condOrErr = evaluateBool(waveCtx, key, ifOp.getCondition(),
+                                      lane, parentBlock.activeMask);
+        bool takeThen = false;
+        bool takeElse = false;
+        if (condOrErr) {
+            takeThen = *condOrErr;
+        } else {
+            llvm::consumeError(condOrErr.takeError());
+        }
+        if (!takeThen && !ifOp.getElseRegion().empty())
+            takeElse = true;
+
         auto makeChildKey = [&](mlir::Block *b, std::uint32_t seq) {
             return DynamicBlockKey{b, seq};
         };
         std::uint32_t baseSeq = key.sequenceId + 1;
 
-        std::optional<DynamicBlockKey> thenKey;
-        std::optional<DynamicBlockKey> elseKey;
+        DynamicBlockKey thenKey{&ifOp.getThenRegion().front(), baseSeq};
+        DynamicBlockKey elseKey{&ifOp.getElseRegion().front(), baseSeq + 1};
 
-        std::uint64_t parentExpected =
-            parentBlock.expectedMask ? parentBlock.expectedMask
-                                     : parentBlock.activeMask;
-        std::uint64_t childTrueExpected = parentExpected & trueMask;
-        std::uint64_t childFalseExpected = parentExpected & falseMask;
-
-        if (trueMask) {
-            DynamicBlockKey k =
-                makeChildKey(&ifOp.getThenRegion().front(), baseSeq);
-            thenKey = k;
-            auto &childBlock = waveCtx.blocks[k];
-            childBlock.block = k.block;
-            childBlock.sequenceId = k.sequenceId;
-            childBlock.expectedMask =
-                childTrueExpected ? childTrueExpected : trueMask;
-            childBlock.activeMask = trueMask;
-            childBlock.completedMask = 0;
-            childBlock.kind = DynamicBlockKind::IfThen;
-        }
-
-        if (falseMask && !ifOp.getElseRegion().empty()) {
-            DynamicBlockKey k =
-                makeChildKey(&ifOp.getElseRegion().front(), baseSeq + 1);
-            elseKey = k;
-            auto &childBlock = waveCtx.blocks[k];
-            childBlock.block = k.block;
-            childBlock.sequenceId = k.sequenceId;
-            childBlock.expectedMask =
-                childFalseExpected ? childFalseExpected : falseMask;
-            childBlock.activeMask = falseMask;
-            childBlock.completedMask = 0;
-            childBlock.kind = DynamicBlockKind::IfElse;
-        }
-
-        MergeStackEntry<ValueType, StepType> entry;
-        entry.parent = key;
-        if (thenKey) {
-            entry.pendingChildren.push_back(*thenKey);
-            entry.childMasks.push_back(trueMask);
-        }
-        if (elseKey) {
-            entry.pendingChildren.push_back(*elseKey);
-            entry.childMasks.push_back(falseMask);
-        }
-        entry.expectedMask = (childTrueExpected ? childTrueExpected : trueMask) |
-                             (childFalseExpected ? childFalseExpected : falseMask);
-        entry.completedMask = 0;
-        if (entry.expectedMask != 0)
-            waveCtx.mergeStack.push_back(entry);
-
-        parentBlock.activeMask &= ~(trueMask | falseMask);
-
-        if (thenKey) {
-            std::uint64_t mask = trueMask;
-            while (mask) {
-                unsigned l = std::countr_zero(mask);
-                mask &= mask - 1;
-                SemanticsContext laneCtx = context;
-                laneCtx.activeMask = trueMask;
-                laneCtx.laneId = l;
-                auto *childBlock = const_cast<mlir::Block *>(thenKey->block);
-                StepType childStep = makeNextOp(wave, *thenKey, childBlock,
-                                                childBlock->begin(), laneCtx, l);
-                enqueue(wave, *thenKey, l, std::move(childStep));
-                if (elseKey) {
-                    waveCtx.blocks[*elseKey].expectedMask &= ~(1ull << l);
-                }
-                parentBlock.expectedMask &= ~(1ull << l);
+        auto findMergeEntry = [&](WaveContext<ValueType, StepType> &ctx)
+            -> MergeStackEntry<ValueType, StepType> * {
+            for (auto it = ctx.mergeStack.rbegin(); it != ctx.mergeStack.rend(); ++it) {
+                if (!it->loopFrame && it->parent == key)
+                    return &*it;
             }
-        }
-        if (elseKey) {
-            std::uint64_t mask = falseMask;
-            while (mask) {
-                unsigned l = std::countr_zero(mask);
-                mask &= mask - 1;
-                SemanticsContext laneCtx = context;
-                laneCtx.activeMask = falseMask;
-                laneCtx.laneId = l;
-                auto *childBlock = const_cast<mlir::Block *>(elseKey->block);
-                StepType childStep = makeNextOp(wave, *elseKey, childBlock,
-                                                childBlock->begin(), laneCtx, l);
-                enqueue(wave, *elseKey, l, std::move(childStep));
-                if (thenKey) {
-                    waveCtx.blocks[*thenKey].expectedMask &= ~(1ull << l);
-                }
-                parentBlock.expectedMask &= ~(1ull << l);
-            }
+            return nullptr;
+        };
+
+        MergeStackEntry<ValueType, StepType> *entry = findMergeEntry(waveCtx);
+        if (!entry) {
+            MergeStackEntry<ValueType, StepType> newEntry;
+            newEntry.parent = key;
+            waveCtx.mergeStack.push_back(std::move(newEntry));
+            entry = &waveCtx.mergeStack.back();
         }
 
+        if (takeThen) {
+            auto &child = waveCtx.blocks[thenKey];
+            child.block = thenKey.block;
+            child.sequenceId = thenKey.sequenceId;
+            if (child.expectedMask == 0)
+                child.expectedMask = parentExpected ? parentExpected : (1ull << lane);
+            child.expectedMask |= (parentExpected ? (parentExpected & (1ull << lane))
+                                                  : (1ull << lane));
+            child.activeMask |= (1ull << lane);
+            child.completedMask &= ~(1ull << lane);
+            child.kind = DynamicBlockKind::IfThen;
+
+            if (!llvm::is_contained(entry->pendingChildren, thenKey)) {
+                entry->pendingChildren.push_back(thenKey);
+                entry->childMasks.push_back(child.activeMask);
+            }
+            entry->expectedMask |= (parentExpected ? (parentExpected & (1ull << lane))
+                                                   : (1ull << lane));
+
+            if (EnableCPSDebugLogs) {
+                llvm::errs() << "[CPS] handleIfSplit lane=" << lane
+                             << " -> then block=" << thenKey.block
+                             << " seq=" << thenKey.sequenceId
+                             << " parent=" << key.block
+                             << " parentSeq=" << key.sequenceId
+                             << "\n";
+            }
+
+            SemanticsContext laneCtx = context;
+            laneCtx.activeMask = child.activeMask;
+            laneCtx.laneId = lane;
+            mlir::Block *childBlock = const_cast<mlir::Block *>(thenKey.block);
+            StepType childStep = makeNextOp(wave, thenKey, childBlock,
+                                            childBlock->begin(), laneCtx, lane);
+            enqueue(wave, thenKey, lane, std::move(childStep));
+            parentBlock.activeMask &= ~(1ull << lane);
+            return StepType::halt();
+        }
+
+        if (takeElse) {
+            auto &child = waveCtx.blocks[elseKey];
+            child.block = elseKey.block;
+            child.sequenceId = elseKey.sequenceId;
+            if (child.expectedMask == 0)
+                child.expectedMask = parentExpected ? parentExpected : (1ull << lane);
+            child.expectedMask |= (parentExpected ? (parentExpected & (1ull << lane))
+                                                  : (1ull << lane));
+            child.activeMask |= (1ull << lane);
+            child.completedMask &= ~(1ull << lane);
+            child.kind = DynamicBlockKind::IfElse;
+
+            if (!llvm::is_contained(entry->pendingChildren, elseKey)) {
+                entry->pendingChildren.push_back(elseKey);
+                entry->childMasks.push_back(child.activeMask);
+            }
+            entry->expectedMask |= (parentExpected ? (parentExpected & (1ull << lane))
+                                                   : (1ull << lane));
+
+            if (EnableCPSDebugLogs) {
+                llvm::errs() << "[CPS] handleIfSplit lane=" << lane
+                             << " -> else block=" << elseKey.block
+                             << " seq=" << elseKey.sequenceId
+                             << " parent=" << key.block
+                             << " parentSeq=" << key.sequenceId
+                             << "\n";
+            }
+
+            SemanticsContext laneCtx = context;
+            laneCtx.activeMask = child.activeMask;
+            laneCtx.laneId = lane;
+            mlir::Block *childBlock = const_cast<mlir::Block *>(elseKey.block);
+            StepType childStep = makeNextOp(wave, elseKey, childBlock,
+                                            childBlock->begin(), laneCtx, lane);
+            enqueue(wave, elseKey, lane, std::move(childStep));
+            parentBlock.activeMask &= ~(1ull << lane);
+            return StepType::halt();
+        }
+
+        // No else region and condition false: just resume parent continuation.
+        auto contIt = parentBlock.continuations.find(lane);
+        if (contIt != parentBlock.continuations.end()) {
+            parentBlock.activeMask |= (1ull << lane);
+            waveCtx.lanes[lane].currentBlock = key;
+            state_.readyQueue.push(
+                ReadyContinuation<ValueType, StepType>{wave, key, lane, contIt->second});
+            parentBlock.continuations.erase(contIt);
+        }
         return StepType::halt();
     }
 
