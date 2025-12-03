@@ -13,6 +13,7 @@
 #include <utility>
 #include <variant>
 #include <queue>
+#include <string>
 
 #include <mlir/Dialect/Func/IR/FuncOps.h>
 #include <llvm/Support/Error.h>
@@ -26,6 +27,15 @@ class Operation;
 namespace simt::semantics {
 
 inline bool EnableCPSDebugLogs = false;
+inline std::string formatMaskBits(std::uint64_t mask, unsigned width) {
+    std::string s;
+    s.reserve(width + 2);
+    s.append("0b");
+    for (int i = static_cast<int>(width) - 1; i >= 0; --i) {
+        s.push_back((mask & (1ull << i)) ? '1' : '0');
+    }
+    return s;
+}
 
 /// Continuation-Passing Style control primitive returned by interpreter steps.
 template <typename ValueT>
@@ -309,10 +319,11 @@ private:
             parentBlock.expectedMask ? parentBlock.expectedMask : activeMask;
 
         if (EnableCPSDebugLogs) {
+            auto fmt = [&](std::uint64_t m) { return formatMaskBits(m, 32); };
             llvm::errs() << "[CPS] handleLoopSplit lane=" << lane
                          << " parent=" << key.block << " seq=" << key.sequenceId
-                         << " active=0x" << llvm::format_hex(parentBlock.activeMask, 10)
-                         << " expected=0x" << llvm::format_hex(parentBlock.expectedMask, 10)
+                         << " active=0b" << fmt(parentBlock.activeMask)
+                         << " expected=0b" << fmt(parentBlock.expectedMask)
                          << "\n";
         }
 
@@ -352,58 +363,71 @@ private:
             });
         parentBlock.continuations[lane] = parentCont;
 
-        MergeStackEntry<ValueType, StepType> entry;
-        entry.parent = key;
-        entry.pendingChildren.push_back(prepKey);
-        entry.pendingChildren.push_back(bodyKey);
-        entry.childMasks.push_back(activeMask);
-        entry.expectedMask = parentExpected;
-        entry.completedMask = 0;
-        entry.loopFrame.emplace();
-        auto &loopFrame = *entry.loopFrame;
-        loopFrame.loopOp = loopOp.getOperation();
-        loopFrame.prepareKey = prepKey;
-        loopFrame.bodyKey = bodyKey;
-        loopFrame.laneNextSeq.clear();
+        auto findEntry = [&](WaveContext<ValueType, StepType> &ctx,
+                             const DynamicBlockKey &parentKey,
+                             const mlir::Operation *loop) {
+            for (auto it = ctx.mergeStack.rbegin(); it != ctx.mergeStack.rend(); ++it) {
+                if (it->parent == parentKey && it->loopFrame &&
+                    it->loopFrame->loopOp == loop)
+                    return &*it;
+            }
+            return static_cast<MergeStackEntry<ValueType, StepType> *>(nullptr);
+        };
+        MergeStackEntry<ValueType, StepType> *entry =
+            findEntry(waveCtx, key, loopOp.getOperation());
+        if (!entry) {
+            MergeStackEntry<ValueType, StepType> newEntry;
+            newEntry.parent = key;
+            newEntry.loopFrame.emplace();
+            newEntry.loopFrame->loopOp = loopOp.getOperation();
+            newEntry.loopFrame->prepareKey = prepKey;
+            newEntry.loopFrame->bodyKey = bodyKey;
+            waveCtx.mergeStack.push_back(std::move(newEntry));
+            entry = &waveCtx.mergeStack.back();
+        }
+        auto &loopFrame = *entry->loopFrame;
+        if (!llvm::is_contained(entry->pendingChildren, prepKey)) {
+            entry->pendingChildren.push_back(prepKey);
+            entry->childMasks.push_back(0);
+        }
+        if (!llvm::is_contained(entry->pendingChildren, bodyKey)) {
+            entry->pendingChildren.push_back(bodyKey);
+            entry->childMasks.push_back(0);
+        }
+        entry->expectedMask |= (parentExpected ? (parentExpected & laneBit) : laneBit);
 
         auto inits = loopOp.getInits();
         llvm::ArrayRef<mlir::BlockArgument> prepArgs = prepareBlock->getArguments();
-        std::uint64_t mask = activeMask;
-        while (mask) {
-            unsigned l = std::countr_zero(mask);
-            mask &= mask - 1;
-            auto &tuple = loopFrame.carried[l];
-            tuple.clear();
-            tuple.reserve(inits.size());
-            for (mlir::Value init : inits) {
-                auto valueOrErr =
-                    evaluateValue(waveCtx, key, init, l, parentBlock.activeMask);
-                if (!valueOrErr) {
-                    llvm::consumeError(valueOrErr.takeError());
-                    tuple.push_back(ValueType{});
-                } else {
-                    tuple.push_back(*valueOrErr);
-                }
+        auto &tuple = loopFrame.carried[lane];
+        tuple.clear();
+        tuple.reserve(inits.size());
+        for (mlir::Value init : inits) {
+            auto valueOrErr =
+                evaluateValue(waveCtx, key, init, lane, parentBlock.activeMask);
+            if (!valueOrErr) {
+                llvm::consumeError(valueOrErr.takeError());
+                tuple.push_back(ValueType{});
+            } else {
+                tuple.push_back(*valueOrErr);
             }
-            loopFrame.laneNextSeq[l] = bodyKey.sequenceId + 1;
+        }
+        loopFrame.laneNextSeq[lane] = bodyKey.sequenceId + 1;
 
-            auto &env = prepareCtx.valueEnvs[l];
-            env.clear();
-            for (auto indexed : llvm::enumerate(prepArgs)) {
-                if (indexed.index() < tuple.size())
-                    env[indexed.value()] = tuple[indexed.index()];
-            }
-
-            SemanticsContext childContext = context;
-            childContext.activeMask = activeMask;
-            childContext.laneId = l;
-            StepType childStep = makeNextOp(wave, prepKey, prepareBlock,
-                                            prepareBlock->begin(), childContext, l);
-            enqueue(wave, prepKey, l, std::move(childStep));
+        auto &env = prepareCtx.valueEnvs[lane];
+        env.clear();
+        for (auto indexed : llvm::enumerate(prepArgs)) {
+            if (indexed.index() < tuple.size())
+                env[indexed.value()] = tuple[indexed.index()];
         }
 
-        parentBlock.activeMask &= ~activeMask;
-        waveCtx.mergeStack.push_back(std::move(entry));
+        SemanticsContext childContext = context;
+        childContext.activeMask = prepareCtx.activeMask;
+        childContext.laneId = lane;
+        StepType childStep = makeNextOp(wave, prepKey, prepareBlock,
+                                        prepareBlock->begin(), childContext, lane);
+        enqueue(wave, prepKey, lane, std::move(childStep));
+
+        parentBlock.activeMask &= ~laneBit;
         return StepType::halt();
     }
 
@@ -468,11 +492,12 @@ private:
         blockCtx->completedMask |= laneBit;
 
         if (EnableCPSDebugLogs) {
+            auto fmt = [&](std::uint64_t m) { return formatMaskBits(m, 32); };
             llvm::errs() << "[CPS] handleLoopPrepareTerminator lane=" << lane
                          << " block=" << key.block << " seq=" << key.sequenceId
                          << " takeBody=" << takeBody
-                         << " active=0x" << llvm::format_hex(blockCtx->activeMask, 10)
-                         << " expected=0x" << llvm::format_hex(blockCtx->expectedMask, 10)
+                         << " active=0b" << fmt(blockCtx->activeMask)
+                         << " expected=0b" << fmt(blockCtx->expectedMask)
                          << "\n";
         }
 
@@ -569,11 +594,14 @@ private:
         if ((blockCtx->activeMask & (1ull << lane)) == 0)
             return StepType::halt();
 
-        LLVM_DEBUG(llvm::dbgs() << "[CPS] handleLoopYield lane=" << lane
-                                << " block=" << key.block << " seq=" << key.sequenceId
-                                << " active=0x" << llvm::format_hex(blockCtx->activeMask, 10)
-                                << " expected=0x" << llvm::format_hex(blockCtx->expectedMask, 10)
-                                << "\n");
+        if (EnableCPSDebugLogs) {
+            auto fmt = [&](std::uint64_t m) { return formatMaskBits(m, 32); };
+            llvm::errs() << "[CPS] handleLoopYield lane=" << lane
+                         << " block=" << key.block << " seq=" << key.sequenceId
+                         << " active=0b" << fmt(blockCtx->activeMask)
+                         << " expected=0b" << fmt(blockCtx->expectedMask)
+                         << "\n";
+        }
 
         auto *entry = findLoopEntry(waveCtx, blockCtx->loopOp);
         if (!entry || !entry->loopFrame)
@@ -599,10 +627,11 @@ private:
         blockCtx->completedMask |= laneBit;
 
         if (EnableCPSDebugLogs) {
+            auto fmt = [&](std::uint64_t m) { return formatMaskBits(m, 32); };
             llvm::errs() << "[CPS] handleLoopContinue lane=" << lane
                          << " block=" << key.block << " seq=" << key.sequenceId
-                         << " active=0x" << llvm::format_hex(blockCtx->activeMask, 10)
-                         << " expected=0x" << llvm::format_hex(blockCtx->expectedMask, 10)
+                         << " active=0b" << fmt(blockCtx->activeMask)
+                         << " expected=0b" << fmt(blockCtx->expectedMask)
                          << "\n";
         }
 
@@ -837,10 +866,11 @@ private:
         blockCtx->activeMask &= ~laneBit;
         blockCtx->completedMask |= laneBit;
         if (EnableCPSDebugLogs) {
+            auto fmt = [&](std::uint64_t m) { return formatMaskBits(m, 32); };
             llvm::errs() << "[CPS] handleLoopBreak lane=" << lane
                          << " block=" << key.block << " seq=" << key.sequenceId
-                         << " active=0x" << llvm::format_hex(blockCtx->activeMask, 10)
-                         << " expected=0x" << llvm::format_hex(blockCtx->expectedMask, 10)
+                         << " active=0b" << fmt(blockCtx->activeMask)
+                         << " expected=0b" << fmt(blockCtx->expectedMask)
                          << "\n";
         }
         shrinkExpectedForLane(wave, waveCtx, lane);
@@ -892,6 +922,16 @@ private:
         }
         if (!takeThen && !ifOp.getElseRegion().empty())
             takeElse = true;
+
+        if (EnableCPSDebugLogs) {
+            auto fmt = [&](std::uint64_t m) { return formatMaskBits(m, 32); };
+            llvm::errs() << "[CPS] handleIfSplit lane=" << lane
+                         << " parent=" << key.block << " seq=" << key.sequenceId
+                         << " takeThen=" << takeThen << " takeElse=" << takeElse
+                         << " active=0b" << fmt(parentBlock.activeMask)
+                         << " expected=0b" << fmt(parentBlock.expectedMask)
+                         << "\n";
+        }
 
         auto makeChildKey = [&](mlir::Block *b, std::uint32_t seq) {
             return DynamicBlockKey{b, seq};
