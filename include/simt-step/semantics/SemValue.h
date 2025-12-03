@@ -164,6 +164,15 @@ public:
 
     SemValue logicalNot() const { return SemValue::fromBool(!asBool()); }
 
+    SemValue bitAnd(const SemValue &rhs) const {
+        assert(isInteger() && rhs.isInteger() && "bitAnd requires integers");
+        Kind result = arithmeticKind(*this, rhs);
+        if (result == Kind::Int64)
+            return SemValue::fromInt64(asInt64() & rhs.asInt64());
+        return SemValue::fromInt32(
+            static_cast<int32_t>(asInt64() & rhs.asInt64()));
+    }
+
     SemValue cmpEqual(const SemValue &rhs) const {
         Kind result = arithmeticKind(*this, rhs);
         if (result == Kind::Float32)

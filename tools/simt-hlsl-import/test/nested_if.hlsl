@@ -3,8 +3,8 @@
 [numthreads(1, 1, 1)]
 void main(uint tid : SV_DispatchThreadID) {
   int result = 0;
-  bool cond0 = (tid & 1u) != 0u;
-  bool cond1 = (tid & 2u) != 0u;
+  bool cond0 = tid != 0u;
+  bool cond1 = tid == 0u;
   if (cond0) {
     if (cond1)
       result = 1;

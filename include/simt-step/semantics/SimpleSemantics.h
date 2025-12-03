@@ -26,6 +26,8 @@ private:
     StepType handleLaneId(SemanticsContext &context);
     StepType handleAddIOp(mlir::arith::AddIOp op,
                           SemanticsContext &context);
+    StepType handleAndIOp(mlir::arith::AndIOp op,
+                          SemanticsContext &context);
     StepType handleCmpIOp(mlir::arith::CmpIOp op, SemanticsContext &context);
     StepType handleDispatchThreadId(SemanticsContext &context);
     StepType handleYieldOp(simt::dialect::YieldOp op,

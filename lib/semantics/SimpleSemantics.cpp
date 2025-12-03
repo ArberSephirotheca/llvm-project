@@ -40,6 +40,9 @@ auto SimpleSemantics::evalOperation(mlir::Operation *op,
     if (auto addOp = llvm::dyn_cast<mlir::arith::AddIOp>(op))
         return handleAddIOp(addOp, context);
 
+    if (auto andOp = llvm::dyn_cast<mlir::arith::AndIOp>(op))
+        return handleAndIOp(andOp, context);
+
     if (auto cmpOp = llvm::dyn_cast<mlir::arith::CmpIOp>(op))
         return handleCmpIOp(cmpOp, context);
 
@@ -84,6 +87,22 @@ auto SimpleSemantics::handleAddIOp(mlir::arith::AddIOp op,
         return StepType::halt();
     }
     auto result = lhsOrErr->add(*rhsOrErr);
+    return StepType::produce(std::move(result));
+}
+
+auto SimpleSemantics::handleAndIOp(mlir::arith::AndIOp op,
+                                   SemanticsContext &context) -> StepType {
+    auto lhsOrErr = evaluateValue(op.getLhs(), context);
+    if (!lhsOrErr) {
+        llvm::consumeError(lhsOrErr.takeError());
+        return StepType::halt();
+    }
+    auto rhsOrErr = evaluateValue(op.getRhs(), context);
+    if (!rhsOrErr) {
+        llvm::consumeError(rhsOrErr.takeError());
+        return StepType::halt();
+    }
+    auto result = lhsOrErr->bitAnd(*rhsOrErr);
     return StepType::produce(std::move(result));
 }
 
@@ -136,6 +155,15 @@ SimpleSemantics::evaluateValue(mlir::Value value,
         if (!step.isProduce())
             return llvm::make_error<llvm::StringError>(
                 "cmpi did not produce a value", llvm::inconvertibleErrorCode());
+        auto state = std::move(step).takeState();
+        return std::get<typename StepType::Produce>(std::move(state)).value;
+    }
+
+    if (auto andOp = value.getDefiningOp<mlir::arith::AndIOp>()) {
+        auto step = handleAndIOp(andOp, context);
+        if (!step.isProduce())
+            return llvm::make_error<llvm::StringError>(
+                "andi did not produce a value", llvm::inconvertibleErrorCode());
         auto state = std::move(step).takeState();
         return std::get<typename StepType::Produce>(std::move(state)).value;
     }
