@@ -51,6 +51,7 @@ struct DynamicBlock {
     std::uint64_t activeMask = 0;
     std::uint64_t completedMask = 0;
 
+    std::optional<DynamicBlockKey> parentKey;
     const mlir::Operation *loopOp = nullptr;
     const mlir::Operation *switchOp = nullptr;
     bool isLoopPrepare = false;

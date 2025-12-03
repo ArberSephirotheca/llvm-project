@@ -344,6 +344,7 @@ private:
         auto &prepareCtx = waveCtx.blocks[prepKey];
         prepareCtx.block = prepareBlock;
         prepareCtx.sequenceId = prepKey.sequenceId;
+        prepareCtx.parentKey = key;
         if (prepareCtx.expectedMask == 0)
             prepareCtx.expectedMask = parentExpected;
         prepareCtx.activeMask |= laneBit;
@@ -357,6 +358,7 @@ private:
         auto &bodyCtx = waveCtx.blocks[bodyKey];
         bodyCtx.block = bodyBlock;
         bodyCtx.sequenceId = bodyKey.sequenceId;
+        bodyCtx.parentKey = prepKey;
         if (bodyCtx.expectedMask == 0)
             bodyCtx.expectedMask = parentExpected;
         bodyCtx.activeMask &= ~laneBit;
@@ -509,6 +511,7 @@ private:
         auto &childCtx = waveCtx.blocks[childKey];
         childCtx.block = childKey.block;
         childCtx.sequenceId = childKey.sequenceId;
+        childCtx.parentKey = key;
         if (childCtx.expectedMask == 0)
             childCtx.expectedMask = parentExpected;
         childCtx.activeMask |= laneBit;
@@ -802,6 +805,7 @@ private:
         auto &prepCtx = waveCtx.blocks[nextPrep];
         prepCtx.block = nextPrep.block;
         prepCtx.sequenceId = nextPrep.sequenceId;
+        prepCtx.parentKey = key;
         prepCtx.expectedMask =
             blockCtx->expectedMask ? blockCtx->expectedMask : blockCtx->activeMask;
         prepCtx.activeMask |= laneBit;
@@ -813,6 +817,7 @@ private:
         auto &bodyCtx = waveCtx.blocks[nextBody];
         bodyCtx.block = nextBody.block;
         bodyCtx.sequenceId = nextBody.sequenceId;
+        bodyCtx.parentKey = nextPrep;
         bodyCtx.expectedMask =
             blockCtx->expectedMask ? blockCtx->expectedMask : blockCtx->activeMask;
         bodyCtx.activeMask = 0;
@@ -913,6 +918,7 @@ private:
         auto &prepCtx = waveCtx.blocks[nextPrep];
         prepCtx.block = nextPrep.block;
         prepCtx.sequenceId = nextPrep.sequenceId;
+        prepCtx.parentKey = key;
         prepCtx.expectedMask =
             blockCtx->expectedMask ? blockCtx->expectedMask : blockCtx->activeMask;
         prepCtx.activeMask |= laneBit;
@@ -924,6 +930,7 @@ private:
         auto &bodyCtx = waveCtx.blocks[nextBody];
         bodyCtx.block = nextBody.block;
         bodyCtx.sequenceId = nextBody.sequenceId;
+        bodyCtx.parentKey = nextPrep;
         bodyCtx.expectedMask =
             blockCtx->expectedMask ? blockCtx->expectedMask : blockCtx->activeMask;
         bodyCtx.activeMask = 0;
@@ -1153,6 +1160,19 @@ private:
         if (!takeThen && !ifOp.getElseRegion().empty())
             takeElse = true;
 
+        auto isDynamicDescendant = [&](const DynamicBlockKey &desc,
+                                       const DynamicBlockKey &ancestor) {
+            DynamicBlockKey cur = desc;
+            while (true) {
+                if (cur == ancestor)
+                    return true;
+                auto it = waveCtx.blocks.find(cur);
+                if (it == waveCtx.blocks.end() || !it->second.parentKey)
+                    return false;
+                cur = *it->second.parentKey;
+            }
+        };
+
         if (EnableCPSDebugLogs) {
             auto fmt = [&](std::uint64_t m) { return formatMaskBits(m, 32); };
             llvm::errs() << "[CPS] handleIfSplit lane=" << lane
@@ -1193,40 +1213,33 @@ private:
         entry->expectedMask &= ~laneBit;
 
         if (takeThen) {
-            auto &child = waveCtx.blocks[thenKey];
-            child.block = thenKey.block;
-            child.sequenceId = thenKey.sequenceId;
-            std::uint64_t laneMask =
-                parentExpected ? (parentExpected & (1ull << lane)) : (1ull << lane);
-            if (child.expectedMask == 0)
-                child.expectedMask = parentExpected ? parentExpected : (1ull << lane);
+        auto &child = waveCtx.blocks[thenKey];
+        child.block = thenKey.block;
+        child.sequenceId = thenKey.sequenceId;
+        child.parentKey = key;
+        std::uint64_t laneMask =
+            parentExpected ? (parentExpected & (1ull << lane)) : (1ull << lane);
+        if (child.expectedMask == 0)
+            child.expectedMask = parentExpected ? parentExpected : (1ull << lane);
             child.expectedMask |= laneMask;
             child.activeMask |= (1ull << lane);
             child.completedMask &= ~(1ull << lane);
             child.kind = DynamicBlockKind::IfThen;
             // Ensure sibling exists so we can clear this lane from its expected set.
-            auto &elseCtx = waveCtx.blocks[elseKey];
-            elseCtx.block = elseKey.block;
-            elseCtx.sequenceId = elseKey.sequenceId;
-            if (elseCtx.expectedMask == 0)
-                elseCtx.expectedMask = parentExpected ? parentExpected : laneMask;
-            elseCtx.expectedMask &= ~laneMask;
-            // Propagate the exclusion into any existing descendant blocks of the else branch.
+        auto &elseCtx = waveCtx.blocks[elseKey];
+        elseCtx.block = elseKey.block;
+        elseCtx.sequenceId = elseKey.sequenceId;
+        elseCtx.parentKey = key;
+        if (elseCtx.expectedMask == 0)
+            elseCtx.expectedMask = parentExpected ? parentExpected : laneMask;
+        elseCtx.expectedMask &= ~laneMask;
+            // Propagate the exclusion into any existing descendant dynamic blocks of the
+            // else branch, including other sequenceIds (e.g., loop iterations).
             for (auto &kv : waveCtx.blocks) {
                 const auto &descKey = kv.first;
                 auto &desc = kv.second;
-                mlir::Block *b = const_cast<mlir::Block *>(descKey.block);
-                while (b) {
-                    if (b == elseKey.block) {
-                        desc.expectedMask &= ~laneMask;
-                        break;
-                    }
-                    auto *parent = b->getParent();
-                    b = parent ? parent->getParentOp()
-                                      ? parent->getParentOp()->getBlock()
-                                      : nullptr
-                                : nullptr;
-                }
+                if (isDynamicDescendant(descKey, elseKey))
+                    desc.expectedMask &= ~laneMask;
             }
 
             if (!llvm::is_contained(entry->pendingChildren, thenKey)) {
@@ -1256,38 +1269,30 @@ private:
         }
 
         if (takeElse) {
-            auto &child = waveCtx.blocks[elseKey];
-            child.block = elseKey.block;
-            child.sequenceId = elseKey.sequenceId;
-            std::uint64_t laneMask =
-                parentExpected ? (parentExpected & (1ull << lane)) : (1ull << lane);
-            if (child.expectedMask == 0)
-                child.expectedMask = parentExpected ? parentExpected : (1ull << lane);
+        auto &child = waveCtx.blocks[elseKey];
+        child.block = elseKey.block;
+        child.sequenceId = elseKey.sequenceId;
+        child.parentKey = key;
+        std::uint64_t laneMask =
+            parentExpected ? (parentExpected & (1ull << lane)) : (1ull << lane);
+        if (child.expectedMask == 0)
+            child.expectedMask = parentExpected ? parentExpected : (1ull << lane);
             child.expectedMask |= laneMask;
             child.activeMask |= (1ull << lane);
             child.completedMask &= ~(1ull << lane);
             child.kind = DynamicBlockKind::IfElse;
-            auto &thenCtx = waveCtx.blocks[thenKey];
-            thenCtx.block = thenKey.block;
-            thenCtx.sequenceId = thenKey.sequenceId;
-            if (thenCtx.expectedMask == 0)
-                thenCtx.expectedMask = parentExpected ? parentExpected : laneMask;
-            thenCtx.expectedMask &= ~laneMask;
+        auto &thenCtx = waveCtx.blocks[thenKey];
+        thenCtx.block = thenKey.block;
+        thenCtx.sequenceId = thenKey.sequenceId;
+        thenCtx.parentKey = key;
+        if (thenCtx.expectedMask == 0)
+            thenCtx.expectedMask = parentExpected ? parentExpected : laneMask;
+        thenCtx.expectedMask &= ~laneMask;
             for (auto &kv : waveCtx.blocks) {
                 const auto &descKey = kv.first;
                 auto &desc = kv.second;
-                mlir::Block *b = const_cast<mlir::Block *>(descKey.block);
-                while (b) {
-                    if (b == thenKey.block) {
-                        desc.expectedMask &= ~laneMask;
-                        break;
-                    }
-                    auto *parent = b->getParent();
-                    b = parent ? parent->getParentOp()
-                                      ? parent->getParentOp()->getBlock()
-                                      : nullptr
-                                : nullptr;
-                }
+                if (isDynamicDescendant(descKey, thenKey))
+                    desc.expectedMask &= ~laneMask;
             }
 
             if (!llvm::is_contained(entry->pendingChildren, elseKey)) {
