@@ -16,6 +16,7 @@
 
 #include <mlir/Dialect/Func/IR/FuncOps.h>
 #include <llvm/Support/Error.h>
+#include <llvm/Support/ErrorHandling.h>
 
 namespace mlir {
 class Operation;
@@ -288,15 +289,15 @@ private:
 
         auto waveIt = state_.waves.find(wave);
         if (waveIt == state_.waves.end())
-            return StepType::halt();
+            llvm::report_fatal_error("handleLoopSplit: missing wave context");
         auto &waveCtx = waveIt->second;
         auto parentBlockIt = waveCtx.blocks.find(key);
         if (parentBlockIt == waveCtx.blocks.end())
-            return StepType::halt();
+            llvm::report_fatal_error("handleLoopSplit: missing parent block context");
         auto &parentBlock = parentBlockIt->second;
         std::uint64_t laneBit = 1ull << lane;
         if ((parentBlock.activeMask & laneBit) == 0)
-            return StepType::halt();
+            llvm::report_fatal_error("handleLoopSplit: lane not active in parent block");
 
         std::uint64_t activeMask = parentBlock.activeMask;
         if (activeMask == 0)
@@ -417,15 +418,17 @@ private:
         (void)block;
         auto waveIt = state_.waves.find(wave);
         if (waveIt == state_.waves.end())
-            return StepType::halt();
+            llvm::report_fatal_error("handleLoopPrepareTerminator: missing wave context");
         auto &waveCtx = waveIt->second;
         auto *blockCtx = getBlock(waveCtx, key);
         if (!blockCtx || !blockCtx->isLoopPrepare || !blockCtx->loopOp)
-            return std::nullopt;
+            llvm::report_fatal_error("handleLoopPrepareTerminator: invalid block context");
+        if ((blockCtx->activeMask & (1ull << lane)) == 0)
+            llvm::report_fatal_error("handleLoopPrepareTerminator: lane not active");
 
         auto *entry = findLoopEntry(waveCtx, blockCtx->loopOp);
         if (!entry || !entry->loopFrame)
-            return StepType::halt();
+            llvm::report_fatal_error("handleLoopPrepareTerminator: missing loop frame");
         auto &loopFrame = *entry->loopFrame;
 
         std::uint64_t laneBit = 1ull << lane;
@@ -532,15 +535,17 @@ private:
         (void)block;
         auto waveIt = state_.waves.find(wave);
         if (waveIt == state_.waves.end())
-            return StepType::halt();
+            llvm::report_fatal_error("handleLoopYield: missing wave context");
         auto &waveCtx = waveIt->second;
         auto *blockCtx = getBlock(waveCtx, key);
         if (!blockCtx || !blockCtx->isLoopBody || !blockCtx->loopOp)
-            return std::nullopt;
+            llvm::report_fatal_error("handleLoopYield: invalid block context");
+        if ((blockCtx->activeMask & (1ull << lane)) == 0)
+            llvm::report_fatal_error("handleLoopYield: lane not active");
 
         auto *entry = findLoopEntry(waveCtx, blockCtx->loopOp);
         if (!entry || !entry->loopFrame)
-            return StepType::halt();
+            llvm::report_fatal_error("handleLoopYield: missing loop frame");
         auto &loopFrame = *entry->loopFrame;
         std::uint64_t laneBit = 1ull << lane;
 
@@ -632,15 +637,17 @@ private:
         (void)block;
         auto waveIt = state_.waves.find(wave);
         if (waveIt == state_.waves.end())
-            return StepType::halt();
+            llvm::report_fatal_error("handleLoopContinue: missing wave context");
         auto &waveCtx = waveIt->second;
         auto *blockCtx = getBlock(waveCtx, key);
         if (!blockCtx || !blockCtx->isLoopBody || !blockCtx->loopOp)
-            return std::nullopt;
+            llvm::report_fatal_error("handleLoopContinue: invalid block context");
+        if ((blockCtx->activeMask & (1ull << lane)) == 0)
+            llvm::report_fatal_error("handleLoopContinue: lane not active");
 
         auto *entry = findLoopEntry(waveCtx, blockCtx->loopOp);
         if (!entry || !entry->loopFrame)
-            return StepType::halt();
+            llvm::report_fatal_error("handleLoopContinue: missing loop frame");
         auto &loopFrame = *entry->loopFrame;
         std::uint64_t laneBit = 1ull << lane;
 
@@ -732,15 +739,17 @@ private:
         (void)block;
         auto waveIt = state_.waves.find(wave);
         if (waveIt == state_.waves.end())
-            return StepType::halt();
+            llvm::report_fatal_error("handleLoopBreak: missing wave context");
         auto &waveCtx = waveIt->second;
         auto *blockCtx = getBlock(waveCtx, key);
         if (!blockCtx || !blockCtx->isLoopBody || !blockCtx->loopOp)
-            return std::nullopt;
+            llvm::report_fatal_error("handleLoopBreak: invalid block context");
+        if ((blockCtx->activeMask & (1ull << lane)) == 0)
+            llvm::report_fatal_error("handleLoopBreak: lane not active");
 
         auto *entry = findLoopEntry(waveCtx, blockCtx->loopOp);
         if (!entry || !entry->loopFrame)
-            return StepType::halt();
+            llvm::report_fatal_error("handleLoopBreak: missing loop frame");
         auto &loopFrame = *entry->loopFrame;
         std::uint64_t laneBit = 1ull << lane;
 
@@ -796,12 +805,14 @@ private:
 
         auto waveIt = state_.waves.find(wave);
         if (waveIt == state_.waves.end())
-            return StepType::halt();
+            llvm::report_fatal_error("handleIfSplit: missing wave context");
         auto &waveCtx = waveIt->second;
         auto parentBlockIt = waveCtx.blocks.find(key);
         if (parentBlockIt == waveCtx.blocks.end())
-            return StepType::halt();
+            llvm::report_fatal_error("handleIfSplit: missing parent block");
         auto &parentBlock = parentBlockIt->second;
+        if ((parentBlock.activeMask & (1ull << lane)) == 0)
+            llvm::report_fatal_error("handleIfSplit: lane not active");
 
         std::uint64_t trueMask = 0;
         std::uint64_t falseMask = 0;
