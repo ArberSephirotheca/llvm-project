@@ -309,21 +309,20 @@ private:
             llvm::report_fatal_error("handleLoopSplit: missing parent block context");
         auto &parentBlock = parentBlockIt->second;
         std::uint64_t laneBit = 1ull << lane;
-        if ((parentBlock.activeMask & laneBit) == 0)
-            return StepType::halt();
+        // if ((parentBlock.activeMask & laneBit) == 0)
+        //     return StepType::halt();
 
-        std::uint64_t activeMask = parentBlock.activeMask;
-        if (activeMask == 0)
-            return StepType::halt();
-        std::uint64_t parentExpected =
-            parentBlock.expectedMask ? parentBlock.expectedMask : activeMask;
+        // std::uint64_t activeMask = parentBlock.activeMask;
+        // if (activeMask == 0)
+        //     return StepType::halt();
+        std::uint64_t parentExpected = parentBlock.expectedMask;
 
         if (EnableCPSDebugLogs) {
             auto fmt = [&](std::uint64_t m) { return formatMaskBits(m, 32); };
             llvm::errs() << "[CPS] handleLoopSplit lane=" << lane
                          << " parent=" << key.block << " seq=" << key.sequenceId
-                         << " active=0b" << fmt(parentBlock.activeMask)
-                         << " expected=0b" << fmt(parentBlock.expectedMask)
+                         << " active=" << fmt(parentBlock.activeMask)
+                         << " expected=" << fmt(parentBlock.expectedMask)
                          << "\n";
         }
 
@@ -338,7 +337,7 @@ private:
         prepareCtx.block = prepareBlock;
         prepareCtx.sequenceId = prepKey.sequenceId;
         prepareCtx.expectedMask = parentExpected;
-        prepareCtx.activeMask = activeMask;
+        prepareCtx.activeMask |= laneBit;
         prepareCtx.completedMask = 0;
         prepareCtx.loopOp = loopOp.getOperation();
         prepareCtx.isLoopPrepare = true;
@@ -457,8 +456,9 @@ private:
         auto *blockCtx = getBlock(waveCtx, key);
         if (!blockCtx || !blockCtx->isLoopPrepare || !blockCtx->loopOp)
             llvm::report_fatal_error("handleLoopPrepareTerminator: invalid block context");
-        if ((blockCtx->activeMask & (1ull << lane)) == 0)
-            return StepType::halt();
+        if ((blockCtx->activeMask & (1ull << lane)) == 0){
+            llvm::report_fatal_error("handleLoopPrepareTerminator: invalid active mask");
+        }
 
         auto *entry = findLoopEntry(waveCtx, blockCtx->loopOp);
         if (!entry || !entry->loopFrame)
@@ -496,8 +496,8 @@ private:
             llvm::errs() << "[CPS] handleLoopPrepareTerminator lane=" << lane
                          << " block=" << key.block << " seq=" << key.sequenceId
                          << " takeBody=" << takeBody
-                         << " active=0b" << fmt(blockCtx->activeMask)
-                         << " expected=0b" << fmt(blockCtx->expectedMask)
+                         << " active=" << fmt(blockCtx->activeMask)
+                         << " expected=" << fmt(blockCtx->expectedMask)
                          << "\n";
         }
 
@@ -591,15 +591,16 @@ private:
         auto *blockCtx = getBlock(waveCtx, key);
         if (!blockCtx || !blockCtx->isLoopBody || !blockCtx->loopOp)
             return std::nullopt;
-        if ((blockCtx->activeMask & (1ull << lane)) == 0)
-            return StepType::halt();
+        if ((blockCtx->activeMask & (1ull << lane)) == 0){
+            llvm::report_fatal_error("handleLoopYield: invalid active mask");
+        }
 
         if (EnableCPSDebugLogs) {
             auto fmt = [&](std::uint64_t m) { return formatMaskBits(m, 32); };
             llvm::errs() << "[CPS] handleLoopYield lane=" << lane
                          << " block=" << key.block << " seq=" << key.sequenceId
-                         << " active=0b" << fmt(blockCtx->activeMask)
-                         << " expected=0b" << fmt(blockCtx->expectedMask)
+                         << " active=" << fmt(blockCtx->activeMask)
+                         << " expected=" << fmt(blockCtx->expectedMask)
                          << "\n";
         }
 
@@ -630,8 +631,8 @@ private:
             auto fmt = [&](std::uint64_t m) { return formatMaskBits(m, 32); };
             llvm::errs() << "[CPS] handleLoopContinue lane=" << lane
                          << " block=" << key.block << " seq=" << key.sequenceId
-                         << " active=0b" << fmt(blockCtx->activeMask)
-                         << " expected=0b" << fmt(blockCtx->expectedMask)
+                         << " active=" << fmt(blockCtx->activeMask)
+                         << " expected=" << fmt(blockCtx->expectedMask)
                          << "\n";
         }
 
@@ -712,13 +713,14 @@ private:
         if (!blockCtx || !blockCtx->isLoopBody || !blockCtx->loopOp)
             llvm::report_fatal_error("handleLoopContinue: invalid block context");
         if ((blockCtx->activeMask & (1ull << lane)) == 0)
-            return StepType::halt();
+            llvm::report_fatal_error("handleLoopContinue: invalid active mask");
 
         if (EnableCPSDebugLogs) {
+            auto fmt = [&](std::uint64_t m) { return formatMaskBits(m, 32); };
             llvm::errs() << "[CPS] handleLoopContinue lane=" << lane
                          << " block=" << key.block << " seq=" << key.sequenceId
-                         << " active=0x" << llvm::format_hex(blockCtx->activeMask, 10)
-                         << " expected=0x" << llvm::format_hex(blockCtx->expectedMask, 10)
+                         << " active=" << fmt(blockCtx->activeMask)
+                         << " expected=" << fmt(blockCtx->expectedMask)
                          << "\n";
         }
 
@@ -869,8 +871,8 @@ private:
             auto fmt = [&](std::uint64_t m) { return formatMaskBits(m, 32); };
             llvm::errs() << "[CPS] handleLoopBreak lane=" << lane
                          << " block=" << key.block << " seq=" << key.sequenceId
-                         << " active=0b" << fmt(blockCtx->activeMask)
-                         << " expected=0b" << fmt(blockCtx->expectedMask)
+                         << " active=" << fmt(blockCtx->activeMask)
+                         << " expected=" << fmt(blockCtx->expectedMask)
                          << "\n";
         }
         shrinkExpectedForLane(wave, waveCtx, lane);
