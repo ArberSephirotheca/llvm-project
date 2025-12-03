@@ -212,12 +212,12 @@ public:
             return *handled;
 
         if (auto handled =
-                handleLoopBreak(wave, key, block, it, context, lane))
+                handleBreak(wave, key, block, it, context, lane))
             return *handled;
 
-        if (auto handled =
-                handleSwitchBreak(wave, key, block, it, context, lane))
-            return *handled;
+        // if (auto handled =
+        //         handleSwitchBreak(wave, key, block, it, context, lane))
+        //     return *handled;
 
         if (auto handled =
                 handleIfSplit(wave, key, block, it, context, lane))
@@ -961,12 +961,12 @@ private:
         return StepType::halt();
     }
 
-    std::optional<StepType> handleLoopBreak(WaveId wave,
-                                            const DynamicBlockKey &key,
-                                            mlir::Block *block,
-                                            mlir::Block::iterator it,
-                                            SemanticsContext context,
-                                            LaneId lane) {
+    std::optional<StepType> handleBreak(WaveId wave,
+                                        const DynamicBlockKey &key,
+                                        mlir::Block *block,
+                                        mlir::Block::iterator it,
+                                        SemanticsContext context,
+                                        LaneId lane) {
         auto breakOp = llvm::dyn_cast<simt::dialect::BreakOp>(&*it);
         if (!breakOp)
             return std::nullopt;
@@ -974,25 +974,44 @@ private:
         (void)block;
         auto waveIt = state_.waves.find(wave);
         if (waveIt == state_.waves.end())
-            llvm::report_fatal_error("handleLoopBreak: missing wave context");
+            llvm::report_fatal_error("handleBreak: missing wave context");
         auto &waveCtx = waveIt->second;
         auto *blockCtx = getBlock(waveCtx, key);
-        if (!blockCtx || !blockCtx->isLoopBody || !blockCtx->loopOp)
-            llvm::report_fatal_error("handleLoopBreak: invalid block context");
+        if (!blockCtx)
+            llvm::report_fatal_error("handleBreak: missing block context");
         if ((blockCtx->activeMask & (1ull << lane)) == 0)
-            return StepType::halt();
+            llvm::report_fatal_error("handleBreak: invalid active mask");
 
-        auto *entry = findLoopEntry(waveCtx, blockCtx->loopOp);
-        if (!entry || !entry->loopFrame)
-            llvm::report_fatal_error("handleLoopBreak: missing loop frame");
-        auto &loopFrame = *entry->loopFrame;
+        // Find nearest enclosing loop or switch merge entry that contains this child.
+        MergeStackEntry<ValueType, StepType> *entry = nullptr;
+        for (auto it = waveCtx.mergeStack.rbegin(); it != waveCtx.mergeStack.rend(); ++it) {
+            bool matchesChild = llvm::any_of(it->pendingChildren, [&](const DynamicBlockKey &k) {
+                return k == key;
+            });
+            if (matchesChild) {
+                entry = &*it;
+                break;
+            }
+        }
+        if (!entry)
+            llvm::report_fatal_error("handleBreak: no enclosing merge entry");
+
+        if (entry->loopFrame)
+            return handleLoopBreakInternal(wave, key, breakOp, lane, waveCtx, *entry);
+        return handleSwitchBreakInternal(wave, key, breakOp, lane, waveCtx, *entry);
+    }
+
+    std::optional<StepType> handleLoopBreakInternal(
+        WaveId wave, const DynamicBlockKey &key, simt::dialect::BreakOp breakOp,
+        LaneId lane, WaveContext<ValueType, StepType> &waveCtx,
+        MergeStackEntry<ValueType, StepType> &entry) {
+        auto *blockCtx = getBlock(waveCtx, key);
         std::uint64_t laneBit = 1ull << lane;
 
         llvm::SmallVector<ValueType, 4> results;
         results.reserve(breakOp.getNumOperands());
         for (mlir::Value v : breakOp.getOperands()) {
-            auto valOrErr =
-                evaluateValue(waveCtx, key, v, lane, blockCtx->activeMask);
+            auto valOrErr = evaluateValue(waveCtx, key, v, lane, blockCtx->activeMask);
             if (!valOrErr) {
                 llvm::consumeError(valOrErr.takeError());
                 results.push_back(ValueType{});
@@ -1000,9 +1019,10 @@ private:
                 results.push_back(*valOrErr);
             }
         }
+        auto &loopFrame = *entry.loopFrame;
         loopFrame.carried[lane].assign(results.begin(), results.end());
 
-        auto parentIt = waveCtx.blocks.find(entry->parent);
+        auto parentIt = waveCtx.blocks.find(entry.parent);
         if (parentIt != waveCtx.blocks.end()) {
             auto &parentEnv = parentIt->second.valueEnvs[lane];
             unsigned idx = 0;
@@ -1016,7 +1036,7 @@ private:
             if (contIt != parentIt->second.continuations.end()) {
                 parentIt->second.activeMask |= laneBit;
                 state_.readyQueue.push(ReadyContinuation<ValueType, StepType>{
-                    wave, entry->parent, lane, contIt->second});
+                    wave, entry.parent, lane, contIt->second});
                 parentIt->second.continuations.erase(contIt);
             }
         }
@@ -1036,46 +1056,17 @@ private:
         return StepType::halt();
     }
 
-    std::optional<StepType> handleSwitchBreak(WaveId wave,
-                                              const DynamicBlockKey &key,
-                                              mlir::Block *block,
-                                              mlir::Block::iterator it,
-                                              SemanticsContext context,
-                                              LaneId lane) {
-        auto breakOp = llvm::dyn_cast<simt::dialect::BreakOp>(&*it);
-        if (!breakOp)
-            return std::nullopt;
-
-        (void)block;
-        auto waveIt = state_.waves.find(wave);
-        if (waveIt == state_.waves.end())
-            llvm::report_fatal_error("handleSwitchBreak: missing wave context");
-        auto &waveCtx = waveIt->second;
+    std::optional<StepType> handleSwitchBreakInternal(
+        WaveId wave, const DynamicBlockKey &key, simt::dialect::BreakOp breakOp,
+        LaneId lane, WaveContext<ValueType, StepType> &waveCtx,
+        MergeStackEntry<ValueType, StepType> &entry) {
         auto *blockCtx = getBlock(waveCtx, key);
-        if (!blockCtx || !blockCtx->switchOp)
-            return std::nullopt;
-
-        // Find the merge entry that tracks this switch.
-        MergeStackEntry<ValueType, StepType> *entry = nullptr;
-        for (auto it = waveCtx.mergeStack.rbegin(); it != waveCtx.mergeStack.rend(); ++it) {
-            bool matchesChild = llvm::any_of(it->pendingChildren,
-                                             [&](const DynamicBlockKey &k) {
-                                                 return k == key;
-                                             });
-            if (matchesChild && !it->loopFrame) {
-                entry = &*it;
-                break;
-            }
-        }
-        if (!entry)
-            llvm::report_fatal_error("handleSwitchBreak: missing switch merge entry");
-
         std::uint64_t laneBit = 1ull << lane;
+
         llvm::SmallVector<ValueType, 4> results;
         results.reserve(breakOp.getNumOperands());
         for (mlir::Value v : breakOp.getOperands()) {
-            auto valOrErr =
-                evaluateValue(waveCtx, key, v, lane, blockCtx->activeMask);
+            auto valOrErr = evaluateValue(waveCtx, key, v, lane, blockCtx->activeMask);
             if (!valOrErr) {
                 llvm::consumeError(valOrErr.takeError());
                 results.push_back(ValueType{});
@@ -1084,7 +1075,7 @@ private:
             }
         }
 
-        auto parentIt = waveCtx.blocks.find(entry->parent);
+        auto parentIt = waveCtx.blocks.find(entry.parent);
         if (parentIt != waveCtx.blocks.end()) {
             auto &parentEnv = parentIt->second.valueEnvs[lane];
             unsigned idx = 0;
@@ -1098,7 +1089,7 @@ private:
             if (contIt != parentIt->second.continuations.end()) {
                 parentIt->second.activeMask |= laneBit;
                 state_.readyQueue.push(ReadyContinuation<ValueType, StepType>{
-                    wave, entry->parent, lane, contIt->second});
+                    wave, entry.parent, lane, contIt->second});
                 parentIt->second.continuations.erase(contIt);
             }
         }
@@ -1147,8 +1138,7 @@ private:
         parentBlock.continuations[lane] = parentCont;
 
         std::uint64_t parentExpected =
-            parentBlock.expectedMask ? parentBlock.expectedMask
-                                     : parentBlock.activeMask;
+            parentBlock.expectedMask;
 
         // Evaluate predicate only for this lane.
         auto condOrErr = evaluateBool(waveCtx, key, ifOp.getCondition(),
@@ -1181,6 +1171,8 @@ private:
         DynamicBlockKey thenKey{&ifOp.getThenRegion().front(), baseSeq};
         DynamicBlockKey elseKey{&ifOp.getElseRegion().front(), baseSeq + 1};
 
+        std::uint64_t laneBit = 1ull << lane;
+        
         auto findMergeEntry = [&](WaveContext<ValueType, StepType> &ctx)
             -> MergeStackEntry<ValueType, StepType> * {
             for (auto it = ctx.mergeStack.rbegin(); it != ctx.mergeStack.rend(); ++it) {
@@ -1197,25 +1189,34 @@ private:
             waveCtx.mergeStack.push_back(std::move(newEntry));
             entry = &waveCtx.mergeStack.back();
         }
+        // Start from a clean slate for this lane; add it back only to the taken path.
+        entry->expectedMask &= ~laneBit;
 
         if (takeThen) {
             auto &child = waveCtx.blocks[thenKey];
             child.block = thenKey.block;
             child.sequenceId = thenKey.sequenceId;
+            std::uint64_t laneMask =
+                parentExpected ? (parentExpected & (1ull << lane)) : (1ull << lane);
             if (child.expectedMask == 0)
                 child.expectedMask = parentExpected ? parentExpected : (1ull << lane);
-            child.expectedMask |= (parentExpected ? (parentExpected & (1ull << lane))
-                                                  : (1ull << lane));
+            child.expectedMask |= laneMask;
             child.activeMask |= (1ull << lane);
             child.completedMask &= ~(1ull << lane);
             child.kind = DynamicBlockKind::IfThen;
+            // Ensure sibling exists so we can clear this lane from its expected set.
+            auto &elseCtx = waveCtx.blocks[elseKey];
+            elseCtx.block = elseKey.block;
+            elseCtx.sequenceId = elseKey.sequenceId;
+            if (elseCtx.expectedMask == 0)
+                elseCtx.expectedMask = parentExpected ? parentExpected : laneMask;
+            elseCtx.expectedMask &= ~laneMask;
 
             if (!llvm::is_contained(entry->pendingChildren, thenKey)) {
                 entry->pendingChildren.push_back(thenKey);
                 entry->childMasks.push_back(child.activeMask);
             }
-            entry->expectedMask |= (parentExpected ? (parentExpected & (1ull << lane))
-                                                   : (1ull << lane));
+            entry->expectedMask |= laneMask;
 
             if (EnableCPSDebugLogs) {
                 llvm::errs() << "[CPS] handleIfSplit lane=" << lane
@@ -1241,20 +1242,26 @@ private:
             auto &child = waveCtx.blocks[elseKey];
             child.block = elseKey.block;
             child.sequenceId = elseKey.sequenceId;
+            std::uint64_t laneMask =
+                parentExpected ? (parentExpected & (1ull << lane)) : (1ull << lane);
             if (child.expectedMask == 0)
                 child.expectedMask = parentExpected ? parentExpected : (1ull << lane);
-            child.expectedMask |= (parentExpected ? (parentExpected & (1ull << lane))
-                                                  : (1ull << lane));
+            child.expectedMask |= laneMask;
             child.activeMask |= (1ull << lane);
             child.completedMask &= ~(1ull << lane);
             child.kind = DynamicBlockKind::IfElse;
+            auto &thenCtx = waveCtx.blocks[thenKey];
+            thenCtx.block = thenKey.block;
+            thenCtx.sequenceId = thenKey.sequenceId;
+            if (thenCtx.expectedMask == 0)
+                thenCtx.expectedMask = parentExpected ? parentExpected : laneMask;
+            thenCtx.expectedMask &= ~laneMask;
 
             if (!llvm::is_contained(entry->pendingChildren, elseKey)) {
                 entry->pendingChildren.push_back(elseKey);
                 entry->childMasks.push_back(child.activeMask);
             }
-            entry->expectedMask |= (parentExpected ? (parentExpected & (1ull << lane))
-                                                   : (1ull << lane));
+            entry->expectedMask |= laneMask;
 
             if (EnableCPSDebugLogs) {
                 llvm::errs() << "[CPS] handleIfSplit lane=" << lane
