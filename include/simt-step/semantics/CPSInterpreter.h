@@ -1211,6 +1211,23 @@ private:
             if (elseCtx.expectedMask == 0)
                 elseCtx.expectedMask = parentExpected ? parentExpected : laneMask;
             elseCtx.expectedMask &= ~laneMask;
+            // Propagate the exclusion into any existing descendant blocks of the else branch.
+            for (auto &kv : waveCtx.blocks) {
+                const auto &descKey = kv.first;
+                auto &desc = kv.second;
+                mlir::Block *b = const_cast<mlir::Block *>(descKey.block);
+                while (b) {
+                    if (b == elseKey.block) {
+                        desc.expectedMask &= ~laneMask;
+                        break;
+                    }
+                    auto *parent = b->getParent();
+                    b = parent ? parent->getParentOp()
+                                      ? parent->getParentOp()->getBlock()
+                                      : nullptr
+                                : nullptr;
+                }
+            }
 
             if (!llvm::is_contained(entry->pendingChildren, thenKey)) {
                 entry->pendingChildren.push_back(thenKey);
@@ -1256,6 +1273,22 @@ private:
             if (thenCtx.expectedMask == 0)
                 thenCtx.expectedMask = parentExpected ? parentExpected : laneMask;
             thenCtx.expectedMask &= ~laneMask;
+            for (auto &kv : waveCtx.blocks) {
+                const auto &descKey = kv.first;
+                auto &desc = kv.second;
+                mlir::Block *b = const_cast<mlir::Block *>(descKey.block);
+                while (b) {
+                    if (b == thenKey.block) {
+                        desc.expectedMask &= ~laneMask;
+                        break;
+                    }
+                    auto *parent = b->getParent();
+                    b = parent ? parent->getParentOp()
+                                      ? parent->getParentOp()->getBlock()
+                                      : nullptr
+                                : nullptr;
+                }
+            }
 
             if (!llvm::is_contained(entry->pendingChildren, elseKey)) {
                 entry->pendingChildren.push_back(elseKey);
