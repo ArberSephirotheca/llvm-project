@@ -38,6 +38,8 @@ enum class DynamicBlockKind {
     Plain,
     IfThen,
     IfElse,
+    SwitchCase,
+    SwitchDefault,
 };
 
 template <typename ValueT, typename StepT>
@@ -50,6 +52,7 @@ struct DynamicBlock {
     std::uint64_t completedMask = 0;
 
     const mlir::Operation *loopOp = nullptr;
+    const mlir::Operation *switchOp = nullptr;
     bool isLoopPrepare = false;
     bool isLoopBody = false;
 
