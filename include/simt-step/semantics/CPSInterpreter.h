@@ -297,7 +297,7 @@ private:
         auto &parentBlock = parentBlockIt->second;
         std::uint64_t laneBit = 1ull << lane;
         if ((parentBlock.activeMask & laneBit) == 0)
-            llvm::report_fatal_error("handleLoopSplit: lane not active in parent block");
+            return StepType::halt();
 
         std::uint64_t activeMask = parentBlock.activeMask;
         if (activeMask == 0)
@@ -424,7 +424,7 @@ private:
         if (!blockCtx || !blockCtx->isLoopPrepare || !blockCtx->loopOp)
             llvm::report_fatal_error("handleLoopPrepareTerminator: invalid block context");
         if ((blockCtx->activeMask & (1ull << lane)) == 0)
-            llvm::report_fatal_error("handleLoopPrepareTerminator: lane not active");
+            return StepType::halt();
 
         auto *entry = findLoopEntry(waveCtx, blockCtx->loopOp);
         if (!entry || !entry->loopFrame)
@@ -539,9 +539,9 @@ private:
         auto &waveCtx = waveIt->second;
         auto *blockCtx = getBlock(waveCtx, key);
         if (!blockCtx || !blockCtx->isLoopBody || !blockCtx->loopOp)
-            llvm::report_fatal_error("handleLoopYield: invalid block context");
+            return std::nullopt;
         if ((blockCtx->activeMask & (1ull << lane)) == 0)
-            llvm::report_fatal_error("handleLoopYield: lane not active");
+            return StepType::halt();
 
         auto *entry = findLoopEntry(waveCtx, blockCtx->loopOp);
         if (!entry || !entry->loopFrame)
@@ -643,7 +643,7 @@ private:
         if (!blockCtx || !blockCtx->isLoopBody || !blockCtx->loopOp)
             llvm::report_fatal_error("handleLoopContinue: invalid block context");
         if ((blockCtx->activeMask & (1ull << lane)) == 0)
-            llvm::report_fatal_error("handleLoopContinue: lane not active");
+            return StepType::halt();
 
         auto *entry = findLoopEntry(waveCtx, blockCtx->loopOp);
         if (!entry || !entry->loopFrame)
@@ -745,7 +745,7 @@ private:
         if (!blockCtx || !blockCtx->isLoopBody || !blockCtx->loopOp)
             llvm::report_fatal_error("handleLoopBreak: invalid block context");
         if ((blockCtx->activeMask & (1ull << lane)) == 0)
-            llvm::report_fatal_error("handleLoopBreak: lane not active");
+            return StepType::halt();
 
         auto *entry = findLoopEntry(waveCtx, blockCtx->loopOp);
         if (!entry || !entry->loopFrame)
@@ -812,7 +812,7 @@ private:
             llvm::report_fatal_error("handleIfSplit: missing parent block");
         auto &parentBlock = parentBlockIt->second;
         if ((parentBlock.activeMask & (1ull << lane)) == 0)
-            llvm::report_fatal_error("handleIfSplit: lane not active");
+            return StepType::halt();
 
         std::uint64_t trueMask = 0;
         std::uint64_t falseMask = 0;
