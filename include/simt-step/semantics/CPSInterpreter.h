@@ -1221,15 +1221,16 @@ private:
             parentExpected ? (parentExpected & (1ull << lane)) : (1ull << lane);
         if (child.expectedMask == 0)
             child.expectedMask = parentExpected ? parentExpected : (1ull << lane);
-            child.expectedMask |= laneMask;
-            child.activeMask |= (1ull << lane);
-            child.completedMask &= ~(1ull << lane);
-            child.kind = DynamicBlockKind::IfThen;
+        child.expectedMask |= laneMask;
+        child.activeMask |= (1ull << lane);
+        // child.completedMask &= ~(1ull << lane);
+        child.kind = DynamicBlockKind::IfThen;
             // Ensure sibling exists so we can clear this lane from its expected set.
         auto &elseCtx = waveCtx.blocks[elseKey];
         elseCtx.block = elseKey.block;
         elseCtx.sequenceId = elseKey.sequenceId;
         elseCtx.parentKey = key;
+        elseCtx.kind = DynamicBlockKind::IfElse;
         if (elseCtx.expectedMask == 0)
             elseCtx.expectedMask = parentExpected ? parentExpected : laneMask;
         elseCtx.expectedMask &= ~laneMask;
@@ -1277,14 +1278,15 @@ private:
             parentExpected ? (parentExpected & (1ull << lane)) : (1ull << lane);
         if (child.expectedMask == 0)
             child.expectedMask = parentExpected ? parentExpected : (1ull << lane);
-            child.expectedMask |= laneMask;
-            child.activeMask |= (1ull << lane);
-            child.completedMask &= ~(1ull << lane);
-            child.kind = DynamicBlockKind::IfElse;
+        child.expectedMask |= laneMask;
+        child.activeMask |= (1ull << lane);
+        // child.completedMask &= ~(1ull << lane);
+        child.kind = DynamicBlockKind::IfElse;
         auto &thenCtx = waveCtx.blocks[thenKey];
         thenCtx.block = thenKey.block;
         thenCtx.sequenceId = thenKey.sequenceId;
         thenCtx.parentKey = key;
+        thenCtx.kind = DynamicBlockKind::IfThen;
         if (thenCtx.expectedMask == 0)
             thenCtx.expectedMask = parentExpected ? parentExpected : laneMask;
         thenCtx.expectedMask &= ~laneMask;
@@ -1708,6 +1710,18 @@ private:
                                              });
             if (!matchesChild)
                 continue;
+
+            if (EnableCPSDebugLogs) {
+                auto fmt = [&](std::uint64_t m) { return formatMaskBits(m, 32); };
+                llvm::errs() << "[CPS] handleReconvergence lane=" << lane
+                             << " child=" << childKey.block
+                             << " seq=" << childKey.sequenceId
+                             << " parent=" << it->parent.block
+                             << " parentSeq=" << it->parent.sequenceId
+                             << " expected=0b" << fmt(it->expectedMask)
+                             << " completed(before)=0b" << fmt(it->completedMask)
+                             << "\n";
+            }
 
             it->completedMask |= (1ull << lane);
 
