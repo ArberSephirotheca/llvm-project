@@ -27,6 +27,26 @@ class Operation;
 namespace simt::semantics {
 
 inline bool EnableCPSDebugLogs = false;
+
+template <typename ValueT, typename StepT>
+inline void logMergeStackState(const WaveContext<ValueT, StepT> &waveCtx) {
+    auto fmt = [&](std::uint64_t m) { return formatMaskBits(m, 32); };
+    llvm::errs() << "[CPS] MergeStack size=" << waveCtx.mergeStack.size() << "\n";
+    for (std::size_t idx = 0; idx < waveCtx.mergeStack.size(); ++idx) {
+        const auto &entry = waveCtx.mergeStack[idx];
+        llvm::errs() << "  [" << idx << "] parent=" << entry.parent.block
+                     << " seq=" << entry.parent.sequenceId
+                     << " expected=0b" << fmt(entry.expectedMask)
+                     << " completed=0b" << fmt(entry.completedMask)
+                     << " children=" << entry.pendingChildren.size()
+                     << (entry.loopFrame ? " (loop)" : "") << "\n";
+        for (std::size_t ci = 0; ci < entry.pendingChildren.size(); ++ci) {
+            llvm::errs() << "      child[" << ci << "]=" << entry.pendingChildren[ci].block
+                         << " seq=" << entry.pendingChildren[ci].sequenceId
+                         << " mask=0b" << fmt(entry.childMasks[ci]) << "\n";
+        }
+    }
+}
 inline std::string formatMaskBits(std::uint64_t mask, unsigned width) {
     std::string s;
     s.reserve(width + 2);
@@ -1721,6 +1741,7 @@ private:
                              << " expected=0b" << fmt(it->expectedMask)
                              << " completed(before)=0b" << fmt(it->completedMask)
                              << "\n";
+                logMergeStackState<ValueType, StepType>(waveCtx);
             }
 
             it->completedMask |= (1ull << lane);
