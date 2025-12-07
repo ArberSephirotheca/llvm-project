@@ -28,6 +28,16 @@ namespace simt::semantics {
 
 inline bool EnableCPSDebugLogs = false;
 
+inline std::string formatMaskBits(std::uint64_t mask, unsigned width) {
+    std::string s;
+    s.reserve(width + 2);
+    s.append("0b");
+    for (int i = static_cast<int>(width) - 1; i >= 0; --i) {
+        s.push_back((mask & (1ull << i)) ? '1' : '0');
+    }
+    return s;
+}
+
 template <typename ValueT, typename StepT>
 inline void logMergeStackState(const WaveContext<ValueT, StepT> &waveCtx) {
     auto fmt = [&](std::uint64_t m) { return formatMaskBits(m, 32); };
@@ -46,15 +56,6 @@ inline void logMergeStackState(const WaveContext<ValueT, StepT> &waveCtx) {
                          << " mask=0b" << fmt(entry.childMasks[ci]) << "\n";
         }
     }
-}
-inline std::string formatMaskBits(std::uint64_t mask, unsigned width) {
-    std::string s;
-    s.reserve(width + 2);
-    s.append("0b");
-    for (int i = static_cast<int>(width) - 1; i >= 0; --i) {
-        s.push_back((mask & (1ull << i)) ? '1' : '0');
-    }
-    return s;
 }
 
 /// Continuation-Passing Style control primitive returned by interpreter steps.
@@ -168,8 +169,53 @@ public:
     void enqueue(WaveId wave, const DynamicBlockKey &block, LaneId lane,
                  StepType step) {
         ensureWaveBlock(wave, block, lane);
+        if (EnableCPSDebugLogs) {
+            llvm::errs() << "[CPS] enqueue lane=" << lane
+                         << " block=" << block.block
+                         << " seq=" << block.sequenceId << "\n";
+            dumpReadyQueue();
+            dumpContinuations();
+        }
         state_.readyQueue.push(
             ReadyContinuation<ValueType, StepType>{wave, block, lane, std::move(step)});
+    }
+
+    void dumpReadyQueue() const {
+        if (!EnableCPSDebugLogs)
+            return;
+        llvm::errs() << "[CPS] ReadyQueue size=" << state_.readyQueue.size() << "\n";
+        std::queue<ReadyContinuation<ValueType, StepType>> tmp = state_.readyQueue;
+        std::size_t idx = 0;
+        while (!tmp.empty()) {
+            const auto &item = tmp.front();
+            llvm::errs() << "  [" << idx++ << "] wave=" << item.wave
+                         << " block=" << item.block.block
+                         << " seq=" << item.block.sequenceId
+                         << " lane=" << item.lane << "\n";
+            tmp.pop();
+        }
+    }
+
+    void dumpContinuations() const {
+        if (!EnableCPSDebugLogs)
+            return;
+        for (const auto &wavePair : state_.waves) {
+            WaveId w = wavePair.first;
+            const auto &waveCtx = wavePair.second;
+            llvm::errs() << "[CPS] Continuations for wave " << w << "\n";
+            for (const auto &blockPair : waveCtx.blocks) {
+                const auto &key = blockPair.first;
+                const auto &blk = blockPair.second;
+                if (blk.continuations.empty())
+                    continue;
+                llvm::errs() << "  block=" << key.block
+                             << " seq=" << key.sequenceId
+                             << " lanes:";
+                for (const auto &c : blk.continuations)
+                    llvm::errs() << " " << c.first;
+                llvm::errs() << "\n";
+            }
+        }
     }
 
     /// Execute a single ready continuation if available.
@@ -202,14 +248,16 @@ public:
                 return StepType::halt();
 
             context.laneId = lane;
+            WaveContext<ValueType, StepType> *waveCtx = nullptr;
             if (auto waveIt = state_.waves.find(wave); waveIt != state_.waves.end()) {
-            if (auto *blk = getBlock(waveIt->second, key)) {
-                context.activeMask = blk->activeMask;
-                auto envIt = blk->valueEnvs.find(lane);
-                if (envIt != blk->valueEnvs.end())
-                    context.valueEnv = &envIt->second;
+                waveCtx = &waveIt->second;
+                if (auto *blk = getBlock(*waveCtx, key)) {
+                    context.activeMask = blk->activeMask;
+                    auto envIt = blk->valueEnvs.find(lane);
+                    if (envIt != blk->valueEnvs.end())
+                        context.valueEnv = &envIt->second;
+                }
             }
-        }
         // Handle structured loop splitting here.
         if (auto handled =
                 handleLoopSplit(wave, key, block, it, context, lane))
@@ -254,6 +302,12 @@ public:
             }
         }
 
+        if (EnableCPSDebugLogs) {
+            llvm::errs() << "[CPS] eval lane=" << lane
+                         << " block=" << block
+                         << " seq=" << key.sequenceId
+                         << " op=" << it->getName().getStringRef() << "\n";
+        }
         StepType current = adaptor_.eval(semantics_, &*it, context);
         mlir::Block::iterator nextIt = std::next(it);
         bool isTerminator = it->hasTrait<mlir::OpTrait::IsTerminator>();
@@ -283,28 +337,32 @@ public:
                 return StepType::suspend(std::move(effect), std::move(chainedResume));
             }
 
-            if (auto *prod =
-                    std::get_if<typename StepType::Produce>(&stateVariant)) {
-                if (!isTerminator && hasNext) {
-                    return StepType::continueWith(
-                        [this, wave, key, block, nextIt, context, lane]() mutable
-                        -> StepType {
-                            return makeNextOp(wave, key, block, nextIt, context, lane);
-                        });
-                }
-                return StepType::produce(std::move(prod->value));
+        if (auto *prod =
+                std::get_if<typename StepType::Produce>(&stateVariant)) {
+            if (!isTerminator && hasNext) {
+                return StepType::continueWith(
+                    [this, wave, key, block, nextIt, context, lane]() mutable
+                    -> StepType {
+                        return makeNextOp(wave, key, block, nextIt, context, lane);
+                    });
             }
+            if (isTerminator && waveCtx)
+                handleReconvergence(wave, *waveCtx, key, lane);
+            return StepType::produce(std::move(prod->value));
+        }
 
-            if (std::holds_alternative<typename StepType::Halt>(stateVariant)) {
-                if (!isTerminator && hasNext) {
-                    return StepType::continueWith(
-                        [this, wave, key, block, nextIt, context, lane]() mutable
-                        -> StepType {
-                            return makeNextOp(wave, key, block, nextIt, context, lane);
-                        });
-                }
-                return StepType::halt();
+        if (std::holds_alternative<typename StepType::Halt>(stateVariant)) {
+            if (!isTerminator && hasNext) {
+                return StepType::continueWith(
+                    [this, wave, key, block, nextIt, context, lane]() mutable
+                    -> StepType {
+                        return makeNextOp(wave, key, block, nextIt, context, lane);
+                    });
             }
+            if (isTerminator && waveCtx)
+                handleReconvergence(wave, *waveCtx, key, lane);
+            return StepType::halt();
+        }
 
             if (!isTerminator && hasNext) {
                 return StepType::continueWith(
@@ -394,6 +452,7 @@ private:
             [this, wave, key, block, nextIt, context, lane]() mutable -> StepType {
                 return makeNextOp(wave, key, block, nextIt, context, lane);
             });
+        // Store for later reconvergence; do not enqueue until the lane returns.
         parentBlock.continuations[lane] = parentCont;
 
         auto findEntry = [&](WaveContext<ValueType, StepType> &ctx,
@@ -417,6 +476,11 @@ private:
             newEntry.loopFrame->bodyKey = bodyKey;
             waveCtx.mergeStack.push_back(std::move(newEntry));
             entry = &waveCtx.mergeStack.back();
+            if (EnableCPSDebugLogs) {
+                llvm::errs() << "[CPS] push merge (loop) parent=" << key.block
+                             << " seq=" << key.sequenceId << "\n";
+                logMergeStackState<ValueType, StepType>(waveCtx);
+            }
         }
         auto &loopFrame = *entry->loopFrame;
         if (!llvm::is_contained(entry->pendingChildren, prepKey)) {
@@ -547,6 +611,7 @@ private:
             [this, wave, key, block, nextIt, context, lane]() mutable -> StepType {
                 return makeNextOp(wave, key, block, nextIt, context, lane);
             });
+        // Store for later reconvergence; do not enqueue until the lane returns.
         parentBlock.continuations[lane] = parentCont;
 
         auto findEntry = [&](WaveContext<ValueType, StepType> &ctx,
@@ -563,6 +628,11 @@ private:
             newEntry.parent = key;
             waveCtx.mergeStack.push_back(std::move(newEntry));
             entry = &waveCtx.mergeStack.back();
+            if (EnableCPSDebugLogs) {
+                llvm::errs() << "[CPS] push merge (switch) parent=" << key.block
+                             << " seq=" << key.sequenceId << "\n";
+                logMergeStackState<ValueType, StepType>(waveCtx);
+            }
         }
         if (!llvm::is_contained(entry->pendingChildren, childKey)) {
             entry->pendingChildren.push_back(childKey);
@@ -1162,6 +1232,7 @@ private:
             [this, wave, key, block, nextIt, context, lane]() mutable -> StepType {
                 return makeNextOp(wave, key, block, nextIt, context, lane);
             });
+        // Store for later reconvergence; do not enqueue until the lane returns.
         parentBlock.continuations[lane] = parentCont;
 
         std::uint64_t parentExpected =
@@ -1203,15 +1274,13 @@ private:
                          << "\n";
         }
 
-        auto makeChildKey = [&](mlir::Block *b, std::uint32_t seq) {
-            return DynamicBlockKey{b, seq};
-        };
+        // auto makeChildKey = [&](mlir::Block *b, std::uint32_t seq) {
+        //     return DynamicBlockKey{b, seq};
+        // };
         std::uint32_t baseSeq = key.sequenceId + 1;
 
         DynamicBlockKey thenKey{&ifOp.getThenRegion().front(), baseSeq};
         DynamicBlockKey elseKey{&ifOp.getElseRegion().front(), baseSeq + 1};
-
-        std::uint64_t laneBit = 1ull << lane;
         
         auto findMergeEntry = [&](WaveContext<ValueType, StepType> &ctx)
             -> MergeStackEntry<ValueType, StepType> * {
@@ -1228,9 +1297,15 @@ private:
             newEntry.parent = key;
             waveCtx.mergeStack.push_back(std::move(newEntry));
             entry = &waveCtx.mergeStack.back();
+            entry->expectedMask = parentExpected;
+            if (EnableCPSDebugLogs) {
+                llvm::errs() << "[CPS] push merge (if) parent=" << key.block
+                             << " seq=" << key.sequenceId << "\n";
+                logMergeStackState<ValueType, StepType>(waveCtx);
+            }
         }
         // Start from a clean slate for this lane; add it back only to the taken path.
-        entry->expectedMask &= ~laneBit;
+        // entry->expectedMask &= ~laneBit;
 
         if (takeThen) {
         auto &child = waveCtx.blocks[thenKey];
@@ -1267,7 +1342,7 @@ private:
                 entry->pendingChildren.push_back(thenKey);
                 entry->childMasks.push_back(child.activeMask);
             }
-            entry->expectedMask |= laneMask;
+            // entry->expectedMask |= laneMask;
 
             if (EnableCPSDebugLogs) {
                 llvm::errs() << "[CPS] handleIfSplit lane=" << lane
@@ -1286,6 +1361,7 @@ private:
                                             childBlock->begin(), laneCtx, lane);
             enqueue(wave, thenKey, lane, std::move(childStep));
             parentBlock.activeMask &= ~(1ull << lane);
+            logMergeStackState<ValueType, StepType>(waveCtx);
             return StepType::halt();
         }
 
@@ -1321,7 +1397,7 @@ private:
                 entry->pendingChildren.push_back(elseKey);
                 entry->childMasks.push_back(child.activeMask);
             }
-            entry->expectedMask |= laneMask;
+            // entry->expectedMask |= laneMask;
 
             if (EnableCPSDebugLogs) {
                 llvm::errs() << "[CPS] handleIfSplit lane=" << lane
@@ -1340,6 +1416,7 @@ private:
                                             childBlock->begin(), laneCtx, lane);
             enqueue(wave, elseKey, lane, std::move(childStep));
             parentBlock.activeMask &= ~(1ull << lane);
+                logMergeStackState<ValueType, StepType>(waveCtx);
             return StepType::halt();
         }
 
@@ -1410,11 +1487,21 @@ private:
         if (auto *blockCtx = getBlock(waveCtx, item.block)) {
             waveCtx.currentMask = blockCtx->activeMask;
         }
+        if (EnableCPSDebugLogs) {
+            llvm::errs() << "[CPS] run lane=" << item.lane
+                         << " block=" << item.block.block
+                         << " seq=" << item.block.sequenceId << "\n";
+        }
         StepType current = std::move(item.resume);
         for (;;) {
             typename StepType::State stateVariant = std::move(current).takeState();
 
             if (std::holds_alternative<typename StepType::Continue>(stateVariant)) {
+                if (EnableCPSDebugLogs) {
+                    llvm::errs() << "[CPS] state=Continue lane=" << item.lane
+                                 << " block=" << item.block.block
+                                 << " seq=" << item.block.sequenceId << "\n";
+                }
                 auto cont =
                     std::get<typename StepType::Continue>(std::move(stateVariant));
                 if (!cont.next) {
@@ -1429,6 +1516,11 @@ private:
             if (std::holds_alternative<typename StepType::Produce>(stateVariant)) {
                 auto prod =
                     std::get<typename StepType::Produce>(std::move(stateVariant));
+                if (EnableCPSDebugLogs) {
+                    llvm::errs() << "[CPS] state=Produce lane=" << item.lane
+                                 << " block=" << item.block.block
+                                 << " seq=" << item.block.sequenceId << "\n";
+                }
                 bool terminal = laneCtx.phase ==
                                 LaneContext<ValueType, StepType>::Phase::Completed;
                 laneCtx.hasReturned = laneCtx.hasReturned || terminal;
@@ -1438,15 +1530,21 @@ private:
                     blockCtx->activeMask &= ~laneBit;
                     blockCtx->completedMask |= laneBit;
                     shrinkExpectedForLane(item.wave, waveCtx, item.lane);
-                    if (!terminal) {
-                        // Resume parent execution for this lane.
-                        handleReconvergence(item.wave, waveCtx, item.block, item.lane);
-                    }
+                    // if (!terminal) {
+                    //     // Resume parent execution for this lane.
+                    //     handleReconvergence(item.wave, waveCtx, item.block, item.lane);
+                    // }
                 }
                 return llvm::Error::success();
             }
 
             if (std::holds_alternative<typename StepType::Halt>(stateVariant)) {
+                if (EnableCPSDebugLogs) {
+                    llvm::errs() << "[CPS] state=Halt lane=" << item.lane
+                                 << " block=" << item.block.block
+                                 << " seq=" << item.block.sequenceId
+                                 << " (continuation exhausted)\n";
+                }
                 if (auto *blockCtx = getBlock(waveCtx, item.block)) {
                     if (blockCtx->loopOp) {
                         // Let loop handlers drive reconvergence and parent resumption;
@@ -1741,7 +1839,6 @@ private:
                              << " expected=0b" << fmt(it->expectedMask)
                              << " completed(before)=0b" << fmt(it->completedMask)
                              << "\n";
-                logMergeStackState<ValueType, StepType>(waveCtx);
             }
 
             it->completedMask |= (1ull << lane);
@@ -1754,40 +1851,77 @@ private:
                 // Resume parent continuation for this lane immediately.
                 auto contIt = parentBlock.continuations.find(lane);
                 if (contIt != parentBlock.continuations.end()) {
+                    if (EnableCPSDebugLogs) {
+                        llvm::errs() << "[CPS] enqueue from reconverge lane=" << lane
+                                     << " parent=" << parentKey.block
+                                     << " seq=" << parentKey.sequenceId << "\n";
+                    }
                     state_.readyQueue.push(
                         ReadyContinuation<ValueType, StepType>{waveId, parentKey, lane,
                                                                contIt->second});
+                    dumpReadyQueue();
                     parentBlock.continuations.erase(contIt);
+                } else if (EnableCPSDebugLogs) {
+                    llvm::errs() << "[CPS] no parent continuation for lane=" << lane
+                                 << " parent=" << parentKey.block
+                                 << " seq=" << parentKey.sequenceId << "\n";
                 }
             }
             // Pop the merge entry only when all expected lanes are done.
             if (it->expectedMask != 0 ? (it->completedMask == it->expectedMask)
                                       : it->pendingChildren.empty()) {
+                if (EnableCPSDebugLogs) {
+                    auto fmt = [&](std::uint64_t m) { return formatMaskBits(m, 32); };
+                    llvm::errs() << "[CPS] pop merge parent=" << parentKey.block
+                                 << " seq=" << parentKey.sequenceId
+                                 << " expected=0b" << fmt(it->expectedMask)
+                                 << " completed=0b" << fmt(it->completedMask)
+                                 << "\n";
+                    llvm::errs() << "[CPS] resume parent continuations parent="
+                                 << parentKey.block << " seq=" << parentKey.sequenceId
+                                 << " mask=0b" << fmt(it->expectedMask) << " lanes:";
+                    std::uint64_t dbgMask = it->expectedMask;
+                    while (dbgMask) {
+                        unsigned l = std::countr_zero(dbgMask);
+                        dbgMask &= dbgMask - 1;
+                        llvm::errs() << " " << l;
+                    }
+                    llvm::errs() << "\n";
+                    // logMergeStackState<ValueType, StepType>(waveCtx);
+                }
                 // Enqueue any remaining parent continuations for lanes that have
                 // not been resumed yet.
-                auto parentBlockIt2 = waveCtx.blocks.find(parentKey);
-                if (parentBlockIt2 != waveCtx.blocks.end()) {
-                    auto &parentBlock = parentBlockIt2->second;
-                    std::uint64_t mask = it->expectedMask ? it->expectedMask
-                                                          : parentBlock.expectedMask;
-                    while (mask) {
-                        unsigned l = std::countr_zero(mask);
-                        mask &= mask - 1;
-                        auto contIt = parentBlock.continuations.find(l);
-                        if (contIt != parentBlock.continuations.end()) {
-                            parentBlock.activeMask |= (1ull << l);
-                            waveCtx.lanes[l].currentBlock = parentKey;
-                            state_.readyQueue.push(
-                                ReadyContinuation<ValueType, StepType>{waveId, parentKey, l,
-                                                                       contIt->second});
-                            parentBlock.continuations.erase(contIt);
-                        }
-                    }
-                }
+                // auto parentBlockIt2 = waveCtx.blocks.find(parentKey);
+                // if (parentBlockIt2 != waveCtx.blocks.end()) {
+                //     auto &parentBlock = parentBlockIt2->second;
+                //     std::uint64_t mask = it->expectedMask;
+                //     while (mask) {
+                //         unsigned l = std::countr_zero(mask);
+                //         mask &= mask - 1;
+                //         auto contIt = parentBlock.continuations.find(l);
+                //         if (contIt != parentBlock.continuations.end()) {
+                //             parentBlock.activeMask |= (1ull << l);
+                //             waveCtx.lanes[l].currentBlock = parentKey;
+                //             state_.readyQueue.push(
+                //                 ReadyContinuation<ValueType, StepType>{waveId, parentKey, l,
+                //                                                        contIt->second});
+                //             if (EnableCPSDebugLogs) {
+                //                 llvm::errs() << "[CPS] enqueue parent cont lane=" << l
+                //                              << " parent=" << parentKey.block
+                //                              << " seq=" << parentKey.sequenceId << "\n";
+                //                 dumpReadyQueue();
+                //             }
+                //             parentBlock.continuations.erase(contIt);
+                //         }
+                //     }
+                // }
                 waveCtx.mergeStack.pop_back();
             }
+            dumpReadyQueue();
             break;
         }
+        // logMergeStackState<ValueType, StepType>(waveCtx);
+
     }
 
     SimtStepSemanticsAdaptor<SemanticsT> adaptor_;
