@@ -502,17 +502,13 @@ private:
         for (mlir::Value init : inits) {
             auto valueOrErr =
                 evaluateValue(waveCtx, key, init, lane, parentBlock.activeMask);
-            if (!valueOrErr) {
-                llvm::consumeError(valueOrErr.takeError());
-                tuple.push_back(ValueType{});
-            } else {
-                tuple.push_back(*valueOrErr);
-            }
+            if (!valueOrErr)
+                llvm::report_fatal_error("handleLoopSplit: failed to evaluate init");
+            tuple.push_back(*valueOrErr);
         }
         loopFrame.laneNextSeq[lane] = bodyKey.sequenceId + 1;
 
         auto &env = prepareCtx.valueEnvs[lane];
-        env.clear();
         for (auto indexed : llvm::enumerate(prepArgs)) {
             if (indexed.index() < tuple.size())
                 env[indexed.value()] = tuple[indexed.index()];
@@ -643,7 +639,6 @@ private:
 
         // Seed child env with initial values.
         auto &env = childCtx.valueEnvs[lane];
-        env.clear();
         auto childArgs = targetBlock->getArguments();
         auto inits = switchOp.getInitialValues();
         for (auto indexed : llvm::enumerate(childArgs)) {
@@ -651,10 +646,9 @@ private:
                 auto valOrErr =
                     evaluateValue(waveCtx, key, inits[indexed.index()], lane,
                                   parentBlock.activeMask);
-                if (valOrErr)
-                    env[indexed.value()] = *valOrErr;
-                else
-                    llvm::consumeError(valOrErr.takeError());
+                if (!valOrErr)
+                    llvm::report_fatal_error("handleSwitchSplit: failed to evaluate init");
+                env[indexed.value()] = *valOrErr;
             }
         }
 
@@ -774,7 +768,6 @@ private:
             bodyCtx.isLoopPrepare = false;
 
             auto &env = bodyCtx.valueEnvs[lane];
-            env.clear();
             auto bodyArgs =
                 const_cast<mlir::Block *>(bodyKey.block)->getArguments();
             for (auto indexed : llvm::enumerate(bodyArgs)) {
@@ -926,7 +919,6 @@ private:
         auto prepArgs =
             const_cast<mlir::Block *>(nextPrep.block)->getArguments();
         auto &env = prepCtx.valueEnvs[lane];
-        env.clear();
         for (auto indexed : llvm::enumerate(prepArgs)) {
             if (indexed.index() < nextCarried.size())
                 env[indexed.value()] = nextCarried[indexed.index()];
@@ -1037,7 +1029,6 @@ private:
         auto prepArgs =
             const_cast<mlir::Block *>(nextPrep.block)->getArguments();
         auto &env = prepCtx.valueEnvs[lane];
-        env.clear();
         for (auto indexed : llvm::enumerate(prepArgs)) {
             if (indexed.index() < nextCarried.size())
                 env[indexed.value()] = nextCarried[indexed.index()];
