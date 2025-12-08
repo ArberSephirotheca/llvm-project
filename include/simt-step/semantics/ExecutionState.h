@@ -54,6 +54,7 @@ struct DynamicBlock {
     std::optional<DynamicBlockKey> parentKey;
     const mlir::Operation *loopOp = nullptr;
     const mlir::Operation *switchOp = nullptr;
+    const mlir::Operation *ifOp = nullptr;
     bool isLoopPrepare = false;
     bool isLoopBody = false;
 

@@ -288,6 +288,10 @@ public:
                     return *handled;
 
                 if (auto handled =
+                        handleIfYield(wave, key, block, it, ctx, lane))
+                    return *handled;
+
+                if (auto handled =
                         handleIfSplit(wave, key, block, it, ctx, lane))
                     return *handled;
 
@@ -444,6 +448,7 @@ private:
         bodyCtx.completedMask &= ~laneBit;
         bodyCtx.loopOp = loopOp.getOperation();
         bodyCtx.switchOp = nullptr;
+        bodyCtx.ifOp = nullptr;
         bodyCtx.isLoopPrepare = false;
         bodyCtx.isLoopBody = true;
         bodyCtx.kind = DynamicBlockKind::Plain;
@@ -602,6 +607,7 @@ private:
                             : DynamicBlockKind::SwitchDefault;
         childCtx.switchOp = switchOp.getOperation();
         childCtx.loopOp = nullptr;
+        childCtx.ifOp = nullptr;
 
         auto nextIt = std::next(it);
         StepType parentCont = StepType::continueWith(
@@ -892,6 +898,7 @@ private:
         prepCtx.activeMask |= laneBit;
         prepCtx.completedMask = 0;
         prepCtx.loopOp = blockCtx->loopOp;
+        prepCtx.ifOp = nullptr;
         prepCtx.isLoopPrepare = true;
         prepCtx.isLoopBody = false;
 
@@ -904,6 +911,7 @@ private:
         bodyCtx.activeMask = 0;
         bodyCtx.completedMask = 0;
         bodyCtx.loopOp = blockCtx->loopOp;
+        bodyCtx.ifOp = nullptr;
         bodyCtx.isLoopPrepare = false;
         bodyCtx.isLoopBody = true;
 
@@ -1002,6 +1010,7 @@ private:
         prepCtx.activeMask |= laneBit;
         prepCtx.completedMask = 0;
         prepCtx.loopOp = blockCtx->loopOp;
+        prepCtx.ifOp = nullptr;
         prepCtx.isLoopPrepare = true;
         prepCtx.isLoopBody = false;
 
@@ -1014,6 +1023,7 @@ private:
         bodyCtx.activeMask = 0;
         bodyCtx.completedMask = 0;
         bodyCtx.loopOp = blockCtx->loopOp;
+        bodyCtx.ifOp = nullptr;
         bodyCtx.isLoopPrepare = false;
         bodyCtx.isLoopBody = true;
 
@@ -1083,6 +1093,89 @@ private:
         if (entry->loopFrame)
             return handleLoopBreakInternal(wave, key, breakOp, lane, waveCtx, *entry);
         return handleSwitchBreakInternal(wave, key, breakOp, lane, waveCtx, *entry);
+    }
+
+    std::optional<StepType> handleIfYield(WaveId wave,
+                                          const DynamicBlockKey &key,
+                                          mlir::Block *block,
+                                          mlir::Block::iterator it,
+                                          SemanticsContext context,
+                                          LaneId lane) {
+        auto yieldOp = llvm::dyn_cast<simt::dialect::YieldOp>(&*it);
+        if (!yieldOp)
+            return std::nullopt;
+
+        (void)block;
+        auto waveIt = state_.waves.find(wave);
+        if (waveIt == state_.waves.end())
+            llvm::report_fatal_error("handleIfYield: missing wave context");
+        auto &waveCtx = waveIt->second;
+        auto *blockCtx = getBlock(waveCtx, key);
+        if (!blockCtx)
+            llvm::report_fatal_error("handleIfYield: missing block context");
+        if (blockCtx->loopOp || blockCtx->isLoopBody || blockCtx->switchOp)
+            return std::nullopt;
+        if (!blockCtx->parentKey || !blockCtx->ifOp)
+            return std::nullopt;
+        std::uint64_t laneBit = 1ull << lane;
+        if ((blockCtx->activeMask & laneBit) == 0)
+            llvm::report_fatal_error("handleIfYield: invalid active mask");
+
+        auto parentIt = waveCtx.blocks.find(*blockCtx->parentKey);
+        if (parentIt == waveCtx.blocks.end())
+            llvm::report_fatal_error("handleIfYield: missing parent block");
+        auto &parentBlock = parentIt->second;
+        auto &parentEnv = parentBlock.valueEnvs[lane];
+
+        llvm::SmallVector<ValueType, 4> values;
+        values.reserve(yieldOp.getNumOperands());
+        auto *envPtr =
+            blockCtx && blockCtx->valueEnvs.count(lane)
+                ? &blockCtx->valueEnvs.find(lane)->second
+                : nullptr;
+        for (mlir::Value v : yieldOp.getOperands()) {
+            // Try current block env first, then parent env, then full eval.
+            if (envPtr) {
+                if (auto it = envPtr->find(v); it != envPtr->end()) {
+                    values.push_back(it->second);
+                    continue;
+                }
+            }
+            if (auto it = parentEnv.find(v); it != parentEnv.end()) {
+                values.push_back(it->second);
+                continue;
+            }
+            auto valOrErr =
+                evaluateValue(waveCtx, key, v, lane, blockCtx->activeMask);
+            if (!valOrErr)
+                llvm::report_fatal_error("handleIfYield: failed to evaluate yield operand");
+            values.push_back(*valOrErr);
+        }
+
+        unsigned idx = 0;
+        auto *ifOp = const_cast<mlir::Operation *>(blockCtx->ifOp);
+        for (mlir::Value res : ifOp->getResults()) {
+            if (idx < values.size())
+                parentEnv[res] = values[idx];
+            ++idx;
+        }
+
+        blockCtx->activeMask &= ~laneBit;
+        blockCtx->completedMask |= laneBit;
+
+        if (EnableCPSDebugLogs) {
+            auto fmt = [&](std::uint64_t m) { return formatMaskBits(m, 32); };
+            llvm::errs() << "[CPS] handleIfYield lane=" << lane
+                         << " block=" << key.block << " seq=" << key.sequenceId
+                         << " parent=" << blockCtx->parentKey->block
+                         << " ifOp=" << blockCtx->ifOp
+                         << " active=" << fmt(blockCtx->activeMask)
+                         << " expected=" << fmt(blockCtx->expectedMask)
+                         << "\n";
+        }
+
+        handleReconvergence(wave, waveCtx, key, lane);
+        return StepType::halt();
     }
 
     std::optional<StepType> handleLoopBreakInternal(
@@ -1299,6 +1392,7 @@ private:
         child.block = thenKey.block;
         child.sequenceId = thenKey.sequenceId;
         child.parentKey = key;
+        child.ifOp = ifOp.getOperation();
         std::uint64_t laneMask =
             parentExpected ? (parentExpected & (1ull << lane)) : (1ull << lane);
         if (child.expectedMask == 0)
@@ -1307,11 +1401,16 @@ private:
         child.activeMask |= (1ull << lane);
         // child.completedMask &= ~(1ull << lane);
         child.kind = DynamicBlockKind::IfThen;
+        if (auto envIt = parentBlock.valueEnvs.find(lane);
+            envIt != parentBlock.valueEnvs.end()) {
+            child.valueEnvs[lane] = envIt->second;
+        }
             // Ensure sibling exists so we can clear this lane from its expected set.
         auto &elseCtx = waveCtx.blocks[elseKey];
         elseCtx.block = elseKey.block;
         elseCtx.sequenceId = elseKey.sequenceId;
         elseCtx.parentKey = key;
+        elseCtx.ifOp = ifOp.getOperation();
         elseCtx.kind = DynamicBlockKind::IfElse;
         if (elseCtx.expectedMask == 0)
             elseCtx.expectedMask = parentExpected ? parentExpected : laneMask;
@@ -1357,6 +1456,7 @@ private:
         child.block = elseKey.block;
         child.sequenceId = elseKey.sequenceId;
         child.parentKey = key;
+        child.ifOp = ifOp.getOperation();
         std::uint64_t laneMask =
             parentExpected ? (parentExpected & (1ull << lane)) : (1ull << lane);
         if (child.expectedMask == 0)
@@ -1365,10 +1465,15 @@ private:
         child.activeMask |= (1ull << lane);
         // child.completedMask &= ~(1ull << lane);
         child.kind = DynamicBlockKind::IfElse;
+        if (auto envIt = parentBlock.valueEnvs.find(lane);
+            envIt != parentBlock.valueEnvs.end()) {
+            child.valueEnvs[lane] = envIt->second;
+        }
         auto &thenCtx = waveCtx.blocks[thenKey];
         thenCtx.block = thenKey.block;
         thenCtx.sequenceId = thenKey.sequenceId;
         thenCtx.parentKey = key;
+        thenCtx.ifOp = ifOp.getOperation();
         thenCtx.kind = DynamicBlockKind::IfThen;
         if (thenCtx.expectedMask == 0)
             thenCtx.expectedMask = parentExpected ? parentExpected : laneMask;
@@ -1516,7 +1621,8 @@ private:
                     std::uint64_t laneBit = 1ull << item.lane;
                     blockCtx->activeMask &= ~laneBit;
                     blockCtx->completedMask |= laneBit;
-                    shrinkExpectedForLane(item.wave, waveCtx, item.lane);
+                    if (terminal)
+                        shrinkExpectedForLane(item.wave, waveCtx, item.lane);
                     // if (!terminal) {
                     //     // Resume parent execution for this lane.
                     //     handleReconvergence(item.wave, waveCtx, item.block, item.lane);
@@ -1551,7 +1657,8 @@ private:
                     std::uint64_t laneBit = 1ull << item.lane;
                     blockCtx->activeMask &= ~laneBit;
                     blockCtx->completedMask |= laneBit;
-                    shrinkExpectedForLane(item.wave, waveCtx, item.lane);
+                    if (terminal)
+                        shrinkExpectedForLane(item.wave, waveCtx, item.lane);
                     // Account for completion and allow reconvergence unless this was
                     // a terminal return for the lane.
                     markMergeCompletion(item.wave, waveCtx, item.block, item.lane);
