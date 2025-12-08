@@ -730,11 +730,9 @@ private:
             auto valOrErr =
                 evaluateValue(waveCtx, key, v, lane, blockCtx->activeMask);
             if (!valOrErr) {
-                llvm::consumeError(valOrErr.takeError());
-                forwarded.push_back(ValueType{});
-            } else {
-                forwarded.push_back(*valOrErr);
+                llvm::report_fatal_error("handleLoopPrepareTerminator: failed to evaluate forwarded value");
             }
+            forwarded.push_back(*valOrErr);
         }
         loopFrame.carried[lane].assign(forwarded.begin(), forwarded.end());
 
@@ -745,6 +743,7 @@ private:
             auto fmt = [&](std::uint64_t m) { return formatMaskBits(m, 32); };
             llvm::errs() << "[CPS] handleLoopPrepareTerminator lane=" << lane
                          << " block=" << key.block << " seq=" << key.sequenceId
+                         << " cond=" << (takeBody ? "true" : "false")
                          << " takeBody=" << takeBody
                          << " active=" << fmt(blockCtx->activeMask)
                          << " expected=" << fmt(blockCtx->expectedMask)
@@ -866,11 +865,9 @@ private:
             auto valOrErr =
                 evaluateValue(waveCtx, key, v, lane, blockCtx->activeMask);
             if (!valOrErr) {
-                llvm::consumeError(valOrErr.takeError());
-                nextCarried.push_back(ValueType{});
-            } else {
-                nextCarried.push_back(*valOrErr);
+                llvm::report_fatal_error("handleLoopYield: failed to evaluate yield operand");
             }
+            nextCarried.push_back(*valOrErr);
         }
         loopFrame.carried[lane].assign(nextCarried.begin(), nextCarried.end());
 
@@ -988,11 +985,9 @@ private:
             auto valOrErr =
                 evaluateValue(waveCtx, key, v, lane, blockCtx->activeMask);
             if (!valOrErr) {
-                llvm::consumeError(valOrErr.takeError());
-                nextCarried.push_back(ValueType{});
-            } else {
-                nextCarried.push_back(*valOrErr);
+                llvm::report_fatal_error("handleLoopContinue: failed to evaluate continue operand");
             }
+            nextCarried.push_back(*valOrErr);
         }
         loopFrame.carried[lane].assign(nextCarried.begin(), nextCarried.end());
 

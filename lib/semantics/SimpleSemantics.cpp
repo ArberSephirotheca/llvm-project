@@ -109,23 +109,58 @@ auto SimpleSemantics::handleAndIOp(mlir::arith::AndIOp op,
 llvm::Expected<SemValue>
 SimpleSemantics::evaluateValue(mlir::Value value,
                                SemanticsContext &context) {
+    if (EnableCPSDebugLogs) {
+        llvm::errs() << "[Semantics] evaluateValue value=";
+        if (auto *op = value.getDefiningOp()) {
+            llvm::errs() << op->getName();
+        } else {
+            llvm::errs() << "<block-arg>";
+        }
+        llvm::errs() << " type=";
+        value.getType().print(llvm::errs());
+        llvm::errs() << " lane=" << context.laneId << "\n";
+    }
+    auto logVal = [&](const SemValue &v) {
+        if (!EnableCPSDebugLogs)
+            return;
+        llvm::errs() << "  -> ";
+        if (v.isBool())
+            llvm::errs() << (v.asBool() ? "true" : "false");
+        else if (v.isInteger())
+            llvm::errs() << v.asInt64();
+        else if (v.isFloat32())
+            llvm::errs() << v.asFloat32();
+        else
+            llvm::errs() << "<none>";
+        llvm::errs() << "\n";
+    };
     if (context.valueEnv) {
         auto it = context.valueEnv->find(value);
-        if (it != context.valueEnv->end())
+        if (it != context.valueEnv->end()) {
+            logVal(it->second);
             return it->second;
+        }
     }
 
-    if (auto constOp = value.getDefiningOp<mlir::arith::ConstantOp>())
-        return makeValueFromAttribute(constOp.getValue());
+    if (auto constOp = value.getDefiningOp<mlir::arith::ConstantOp>()) {
+        auto v = makeValueFromAttribute(constOp.getValue());
+        logVal(v);
+        return v;
+    }
 
-    if (auto laneOp = value.getDefiningOp<simt::dialect::LaneIdOp>())
-        return SemValue::fromInt32(static_cast<int32_t>(context.laneId));
+    if (auto laneOp = value.getDefiningOp<simt::dialect::LaneIdOp>()) {
+        auto v = SemValue::fromInt32(static_cast<int32_t>(context.laneId));
+        logVal(v);
+        return v;
+    }
 
     if (auto didOp = value.getDefiningOp<simt::dialect::DispatchThreadIdOp>()) {
         mlir::Type type = didOp.getType();
         if (mlir::isa<mlir::IndexType>(type) ||
             mlir::isa<mlir::IntegerType>(type)) {
-            return SemValue::fromInt32(static_cast<int32_t>(context.laneId));
+            auto v = SemValue::fromInt32(static_cast<int32_t>(context.laneId));
+            logVal(v);
+            return v;
         }
         return llvm::make_error<llvm::StringError>(
             "dispatch_thread_id: unsupported result type",
@@ -147,6 +182,7 @@ SimpleSemantics::evaluateValue(mlir::Value value,
             return llvm::make_error<llvm::StringError>(
                 "loop result index out of range",
                 llvm::inconvertibleErrorCode());
+        logVal((*allResultsOrErr)[idx]);
         return (*allResultsOrErr)[idx];
     }
 
@@ -156,7 +192,9 @@ SimpleSemantics::evaluateValue(mlir::Value value,
             return llvm::make_error<llvm::StringError>(
                 "cmpi did not produce a value", llvm::inconvertibleErrorCode());
         auto state = std::move(step).takeState();
-        return std::get<typename StepType::Produce>(std::move(state)).value;
+        auto v = std::get<typename StepType::Produce>(std::move(state)).value;
+        logVal(v);
+        return v;
     }
 
     if (auto andOp = value.getDefiningOp<mlir::arith::AndIOp>()) {
@@ -165,7 +203,9 @@ SimpleSemantics::evaluateValue(mlir::Value value,
             return llvm::make_error<llvm::StringError>(
                 "andi did not produce a value", llvm::inconvertibleErrorCode());
         auto state = std::move(step).takeState();
-        return std::get<typename StepType::Produce>(std::move(state)).value;
+        auto v = std::get<typename StepType::Produce>(std::move(state)).value;
+        logVal(v);
+        return v;
     }
 
     if (context.valueEnv) {
