@@ -244,135 +244,136 @@ public:
                         mlir::Block::iterator it,
                         SemanticsContext context,
                         LaneId lane) {
-            if (it == block->end())
-                return StepType::halt();
-
-            context.laneId = lane;
-            WaveContext<ValueType, StepType> *waveCtx = nullptr;
-            if (auto waveIt = state_.waves.find(wave); waveIt != state_.waves.end()) {
-                waveCtx = &waveIt->second;
-                if (auto *blk = getBlock(*waveCtx, key)) {
-                    context.activeMask = blk->activeMask;
-                    auto envIt = blk->valueEnvs.find(lane);
-                    if (envIt != blk->valueEnvs.end())
-                        context.valueEnv = &envIt->second;
-                }
-            }
-        // Handle structured loop splitting here.
-        if (auto handled =
-                handleLoopSplit(wave, key, block, it, context, lane))
-            return *handled;
-
-        if (auto handled =
-                handleSwitchSplit(wave, key, block, it, context, lane))
-            return *handled;
-
-        if (auto handled = handleLoopPrepareTerminator(
-                wave, key, block, it, context, lane))
-            return *handled;
-
-        if (auto handled =
-                handleLoopYield(wave, key, block, it, context, lane))
-            return *handled;
-
-        if (auto handled = handleLoopContinue(
-                wave, key, block, it, context, lane))
-            return *handled;
-
-        if (auto handled =
-                handleBreak(wave, key, block, it, context, lane))
-            return *handled;
-
-        // if (auto handled =
-        //         handleSwitchBreak(wave, key, block, it, context, lane))
-        //     return *handled;
-
-        if (auto handled =
-                handleIfSplit(wave, key, block, it, context, lane))
-            return *handled;
-
-        // Mark return as terminal for this lane so we don't resume parents.
-        if (auto retOp = llvm::dyn_cast<mlir::func::ReturnOp>(&*it)) {
-            auto waveIt = state_.waves.find(wave);
-            if (waveIt != state_.waves.end()) {
-                auto &laneCtx = waveIt->second.lanes[lane];
-                laneCtx.phase =
-                    LaneContext<ValueType, StepType>::Phase::Completed;
-                laneCtx.hasReturned = true;
-            }
-        }
-
-        if (EnableCPSDebugLogs) {
-            llvm::errs() << "[CPS] eval lane=" << lane
-                         << " block=" << block
-                         << " seq=" << key.sequenceId
-                         << " op=" << it->getName().getStringRef() << "\n";
-        }
-        StepType current = adaptor_.eval(semantics_, &*it, context);
-        mlir::Block::iterator nextIt = std::next(it);
-        bool isTerminator = it->hasTrait<mlir::OpTrait::IsTerminator>();
-        const bool hasNext = nextIt != block->end();
-
-        while (true) {
-            typename StepType::State stateVariant = std::move(current).takeState();
-
-            if (auto *cont =
-                    std::get_if<typename StepType::Continue>(&stateVariant)) {
-                if (!cont->next)
+        // Defer execution: return a continuation that will run this op when invoked.
+        return StepType::continueWith(
+            [this, wave, key, block, it, context, lane]() mutable -> StepType {
+                if (it == block->end())
                     return StepType::halt();
-                current = cont->next();
-                continue;
-            }
 
-            if (auto *suspend =
-                    std::get_if<typename StepType::Suspend>(&stateVariant)) {
-                Effect effect = std::move(suspend->effect);
-                auto resume = std::move(suspend->resume);
-                auto chainedResume =
-                    [this, wave, key, resume = std::move(resume), block, nextIt, context,
-                     lane]() mutable -> StepType {
-                    StepType resumed = resume();
-                    return makeNextOp(wave, key, block, nextIt, context, lane);
-                };
-                return StepType::suspend(std::move(effect), std::move(chainedResume));
-            }
+                SemanticsContext ctx = context;
+                ctx.laneId = lane;
+                WaveContext<ValueType, StepType> *waveCtx = nullptr;
+                if (auto waveIt = state_.waves.find(wave); waveIt != state_.waves.end()) {
+                    waveCtx = &waveIt->second;
+                    if (auto *blk = getBlock(*waveCtx, key)) {
+                        ctx.activeMask = blk->activeMask;
+                        auto envIt = blk->valueEnvs.find(lane);
+                        if (envIt != blk->valueEnvs.end())
+                            ctx.valueEnv = &envIt->second;
+                    }
+                }
 
-        if (auto *prod =
-                std::get_if<typename StepType::Produce>(&stateVariant)) {
-            if (!isTerminator && hasNext) {
-                return StepType::continueWith(
-                    [this, wave, key, block, nextIt, context, lane]() mutable
-                    -> StepType {
-                        return makeNextOp(wave, key, block, nextIt, context, lane);
-                    });
-            }
-            if (isTerminator && waveCtx)
-                handleReconvergence(wave, *waveCtx, key, lane);
-            return StepType::produce(std::move(prod->value));
-        }
+                if (auto handled =
+                        handleLoopSplit(wave, key, block, it, ctx, lane))
+                    return *handled;
 
-        if (std::holds_alternative<typename StepType::Halt>(stateVariant)) {
-            if (!isTerminator && hasNext) {
-                return StepType::continueWith(
-                    [this, wave, key, block, nextIt, context, lane]() mutable
-                    -> StepType {
-                        return makeNextOp(wave, key, block, nextIt, context, lane);
-                    });
-            }
-            if (isTerminator && waveCtx)
-                handleReconvergence(wave, *waveCtx, key, lane);
-            return StepType::halt();
-        }
+                if (auto handled =
+                        handleSwitchSplit(wave, key, block, it, ctx, lane))
+                    return *handled;
 
-            if (!isTerminator && hasNext) {
-                return StepType::continueWith(
-                    [this, wave, key, block, nextIt, context, lane]() mutable -> StepType {
-                        return makeNextOp(wave, key, block, nextIt, context, lane);
-                    });
-            }
+                if (auto handled = handleLoopPrepareTerminator(
+                        wave, key, block, it, ctx, lane))
+                    return *handled;
 
-            return StepType::halt();
-        }
+                if (auto handled =
+                        handleLoopYield(wave, key, block, it, ctx, lane))
+                    return *handled;
+
+                if (auto handled = handleLoopContinue(
+                        wave, key, block, it, ctx, lane))
+                    return *handled;
+
+                if (auto handled =
+                        handleBreak(wave, key, block, it, ctx, lane))
+                    return *handled;
+
+                if (auto handled =
+                        handleIfSplit(wave, key, block, it, ctx, lane))
+                    return *handled;
+
+                // Mark return as terminal for this lane so we don't resume parents.
+                if (auto retOp = llvm::dyn_cast<mlir::func::ReturnOp>(&*it)) {
+                    auto waveIt = state_.waves.find(wave);
+                    if (waveIt != state_.waves.end()) {
+                        auto &laneCtx = waveIt->second.lanes[lane];
+                        laneCtx.phase =
+                            LaneContext<ValueType, StepType>::Phase::Completed;
+                        laneCtx.hasReturned = true;
+                    }
+                }
+
+                if (EnableCPSDebugLogs) {
+                    llvm::errs() << "[CPS] eval lane=" << lane
+                                 << " block=" << block
+                                 << " seq=" << key.sequenceId
+                                 << " op=" << it->getName().getStringRef() << "\n";
+                }
+                StepType current = adaptor_.eval(semantics_, &*it, ctx);
+                mlir::Block::iterator nextIt = std::next(it);
+                bool isTerminator = it->hasTrait<mlir::OpTrait::IsTerminator>();
+                const bool hasNext = nextIt != block->end();
+
+                while (true) {
+                    typename StepType::State stateVariant = std::move(current).takeState();
+
+                    if (auto *cont =
+                            std::get_if<typename StepType::Continue>(&stateVariant)) {
+                        if (!cont->next)
+                            return StepType::halt();
+                        current = cont->next();
+                        continue;
+                    }
+
+                    if (auto *suspend =
+                            std::get_if<typename StepType::Suspend>(&stateVariant)) {
+                        Effect effect = std::move(suspend->effect);
+                        auto resume = std::move(suspend->resume);
+                        auto chainedResume =
+                            [this, wave, key, resume = std::move(resume), block, nextIt, ctx,
+                             lane]() mutable -> StepType {
+                                StepType resumed = resume();
+                                return makeNextOp(wave, key, block, nextIt, ctx, lane);
+                            };
+                        return StepType::suspend(std::move(effect), std::move(chainedResume));
+                    }
+
+                    if (auto *prod =
+                            std::get_if<typename StepType::Produce>(&stateVariant)) {
+                        if (!isTerminator && hasNext) {
+                            return StepType::continueWith(
+                                [this, wave, key, block, nextIt, ctx, lane]() mutable
+                                -> StepType {
+                                    return makeNextOp(wave, key, block, nextIt, ctx, lane);
+                                });
+                        }
+                        if (isTerminator && waveCtx)
+                            handleReconvergence(wave, *waveCtx, key, lane);
+                        return StepType::produce(std::move(prod->value));
+                    }
+
+                    if (std::holds_alternative<typename StepType::Halt>(stateVariant)) {
+                        if (!isTerminator && hasNext) {
+                            return StepType::continueWith(
+                                [this, wave, key, block, nextIt, ctx, lane]() mutable
+                                -> StepType {
+                                    return makeNextOp(wave, key, block, nextIt, ctx, lane);
+                                });
+                        }
+                        if (isTerminator && waveCtx)
+                            handleReconvergence(wave, *waveCtx, key, lane);
+                        return StepType::halt();
+                    }
+
+                    if (!isTerminator && hasNext) {
+                        return StepType::continueWith(
+                            [this, wave, key, block, nextIt, ctx, lane]() mutable -> StepType {
+                                return makeNextOp(wave, key, block, nextIt, ctx, lane);
+                            });
+                    }
+
+                    return StepType::halt();
+                }
+            });
     }
 
 private:
