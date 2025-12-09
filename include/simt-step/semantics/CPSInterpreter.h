@@ -893,8 +893,6 @@ private:
         DynamicBlockKey nextPrep{loopFrame.prepareKey.block, nextSeq};
         DynamicBlockKey nextBody{loopFrame.bodyKey.block,
                                  static_cast<std::uint32_t>(nextSeq + 1)};
-        bool nextExists = waveCtx.blocks.contains(nextPrep);
-
         auto &prepCtx = waveCtx.blocks[nextPrep];
         prepCtx.block = nextPrep.block;
         prepCtx.sequenceId = nextPrep.sequenceId;
@@ -908,6 +906,7 @@ private:
         prepCtx.ifOp = nullptr;
         prepCtx.isLoopPrepare = true;
         prepCtx.isLoopBody = false;
+        prepCtx.kind = DynamicBlockKind::Plain;
 
         auto &bodyCtx = waveCtx.blocks[nextBody];
         bodyCtx.block = nextBody.block;
@@ -922,11 +921,13 @@ private:
         bodyCtx.ifOp = nullptr;
         bodyCtx.isLoopPrepare = false;
         bodyCtx.isLoopBody = true;
+        bodyCtx.kind = DynamicBlockKind::Plain;
         assert(!(prepCtx.loopOp && prepCtx.switchOp) &&
                "dynamic block cannot have both loopOp and switchOp");
         assert(!(bodyCtx.loopOp && bodyCtx.switchOp) &&
                "dynamic block cannot have both loopOp and switchOp");
 
+        bool nextExists = waveCtx.blocks.contains(nextPrep);
         if (!nextExists && !llvm::is_contained(entry->pendingChildren, nextPrep)) {
             entry->pendingChildren.push_back(nextPrep);
             entry->childMasks.push_back(prepCtx.activeMask);
@@ -1025,6 +1026,7 @@ private:
         prepCtx.ifOp = nullptr;
         prepCtx.isLoopPrepare = true;
         prepCtx.isLoopBody = false;
+        prepCtx.kind = DynamicBlockKind::Plain;
 
         auto &bodyCtx = waveCtx.blocks[nextBody];
         bodyCtx.block = nextBody.block;
@@ -1038,6 +1040,7 @@ private:
         bodyCtx.ifOp = nullptr;
         bodyCtx.isLoopPrepare = false;
         bodyCtx.isLoopBody = true;
+        bodyCtx.kind = DynamicBlockKind::Plain;
 
         if (!nextExists && !llvm::is_contained(entry->pendingChildren, nextPrep)) {
             entry->pendingChildren.push_back(nextPrep);

@@ -134,6 +134,12 @@ static void dumpInterpreterState(const SimpleProgramRunner &runner) {
         for (const auto &blockIt : waveCtx.blocks) {
             const auto &key = blockIt.first;
             const auto &block = blockIt.second;
+            // Skip placeholder blocks that were preallocated but never used.
+            const bool emptyMasks = block.expectedMask == 0 && block.activeMask == 0 &&
+                                    block.completedMask == 0;
+            if (emptyMasks && block.pendingOps.empty() && block.valueEnvs.empty() &&
+                block.continuations.empty())
+                continue;
             std::string firstOp;
             if (key.block) {
                 mlir::Block *mutableBlock =
@@ -179,13 +185,11 @@ static std::string formatMaskBits(std::uint64_t mask, unsigned width) {
 static std::string describeBlockKind(
     const simt::semantics::DynamicBlock<simt::semantics::SemValue,
                                         simt::semantics::Step<simt::semantics::SemValue>> &blk) {
-    if (blk.loopOp) {
-        if (blk.isLoopPrepare)
-            return "loop.prepare";
-        if (blk.isLoopBody)
-            return "loop.body";
-        return "loop.unknown";
-    }
+    if (blk.isLoopPrepare)
+        return "loop.prepare";
+    if (blk.isLoopBody)
+        return "loop.body";
+
     switch (blk.kind) {
     case simt::semantics::DynamicBlockKind::IfThen:
         return "if.then";
@@ -194,6 +198,9 @@ static std::string describeBlockKind(
     default:
         break;
     }
+
+    if (blk.loopOp)
+        return "loop.unknown";
     return "plain";
 }
 
