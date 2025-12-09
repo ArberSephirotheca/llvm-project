@@ -437,6 +437,8 @@ private:
         prepareCtx.isLoopPrepare = true;
         prepareCtx.isLoopBody = false;
         prepareCtx.kind = DynamicBlockKind::Plain;
+        assert(!(prepareCtx.loopOp && prepareCtx.switchOp) &&
+               "dynamic block cannot have both loopOp and switchOp");
 
         auto &bodyCtx = waveCtx.blocks[bodyKey];
         bodyCtx.block = bodyBlock;
@@ -452,6 +454,8 @@ private:
         bodyCtx.isLoopPrepare = false;
         bodyCtx.isLoopBody = true;
         bodyCtx.kind = DynamicBlockKind::Plain;
+        assert(!(bodyCtx.loopOp && bodyCtx.switchOp) &&
+               "dynamic block cannot have both loopOp and switchOp");
 
         auto nextIt = std::next(it);
         StepType parentCont = StepType::continueWith(
@@ -839,9 +843,11 @@ private:
         auto *blockCtx = getBlock(waveCtx, key);
         if (!blockCtx || !blockCtx->isLoopBody || !blockCtx->loopOp)
             return std::nullopt;
-        if ((blockCtx->activeMask & (1ull << lane)) == 0){
+        if ((blockCtx->activeMask & (1ull << lane)) == 0) {
             llvm::report_fatal_error("handleLoopYield: invalid active mask");
         }
+        assert(!(blockCtx->loopOp && blockCtx->switchOp) &&
+               "dynamic block cannot have both loopOp and switchOp");
 
         if (EnableCPSDebugLogs) {
             auto fmt = [&](std::uint64_t m) { return formatMaskBits(m, 32); };
@@ -898,6 +904,7 @@ private:
         prepCtx.activeMask |= laneBit;
         prepCtx.completedMask = 0;
         prepCtx.loopOp = blockCtx->loopOp;
+        prepCtx.switchOp = nullptr;
         prepCtx.ifOp = nullptr;
         prepCtx.isLoopPrepare = true;
         prepCtx.isLoopBody = false;
@@ -911,9 +918,14 @@ private:
         bodyCtx.activeMask = 0;
         bodyCtx.completedMask = 0;
         bodyCtx.loopOp = blockCtx->loopOp;
+        bodyCtx.switchOp = nullptr;
         bodyCtx.ifOp = nullptr;
         bodyCtx.isLoopPrepare = false;
         bodyCtx.isLoopBody = true;
+        assert(!(prepCtx.loopOp && prepCtx.switchOp) &&
+               "dynamic block cannot have both loopOp and switchOp");
+        assert(!(bodyCtx.loopOp && bodyCtx.switchOp) &&
+               "dynamic block cannot have both loopOp and switchOp");
 
         if (!nextExists && !llvm::is_contained(entry->pendingChildren, nextPrep)) {
             entry->pendingChildren.push_back(nextPrep);
@@ -1073,6 +1085,8 @@ private:
         auto *blockCtx = getBlock(waveCtx, key);
         if (!blockCtx)
             llvm::report_fatal_error("handleBreak: missing block context");
+        assert(!(blockCtx->loopOp && blockCtx->switchOp) &&
+               "dynamic block cannot have both loopOp and switchOp");
         if ((blockCtx->activeMask & (1ull << lane)) == 0)
             llvm::report_fatal_error("handleBreak: invalid active mask");
         // Drop any parent continuation for the enclosing split so we don't resume
@@ -1126,6 +1140,8 @@ private:
         auto *blockCtx = getBlock(waveCtx, key);
         if (!blockCtx)
             llvm::report_fatal_error("handleIfYield: missing block context");
+        assert(!(blockCtx->loopOp && blockCtx->switchOp) &&
+               "dynamic block cannot have both loopOp and switchOp");
         if (!blockCtx->parentKey || !blockCtx->ifOp)
             return std::nullopt;
         std::uint64_t laneBit = 1ull << lane;
