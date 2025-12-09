@@ -1075,16 +1075,29 @@ private:
             llvm::report_fatal_error("handleBreak: missing block context");
         if ((blockCtx->activeMask & (1ull << lane)) == 0)
             llvm::report_fatal_error("handleBreak: invalid active mask");
+        // Drop any parent continuation for the enclosing split so we don't resume
+        // the rest of the block after breaking.
+        if (blockCtx->parentKey) {
+            auto parentIt = waveCtx.blocks.find(*blockCtx->parentKey);
+            if (parentIt != waveCtx.blocks.end())
+                parentIt->second.continuations.erase(lane);
+        }
 
-        // Find nearest enclosing loop or switch merge entry that contains this child.
+        // Find nearest enclosing loop (preferred) or switch merge entry that matches this block.
         MergeStackEntry<ValueType, StepType> *entry = nullptr;
         for (auto it = waveCtx.mergeStack.rbegin(); it != waveCtx.mergeStack.rend(); ++it) {
-            bool matchesChild = llvm::any_of(it->pendingChildren, [&](const DynamicBlockKey &k) {
-                return k == key;
-            });
-            if (matchesChild) {
+            if (blockCtx->loopOp && it->loopFrame &&
+                it->loopFrame->loopOp == blockCtx->loopOp) {
                 entry = &*it;
                 break;
+            }
+            if (blockCtx->switchOp && !it->loopFrame) {
+                auto parentIt = waveCtx.blocks.find(it->parent);
+                if (parentIt != waveCtx.blocks.end() &&
+                    parentIt->second.switchOp == blockCtx->switchOp) {
+                    entry = &*it;
+                    break;
+                }
             }
         }
         if (!entry)
@@ -1113,8 +1126,6 @@ private:
         auto *blockCtx = getBlock(waveCtx, key);
         if (!blockCtx)
             llvm::report_fatal_error("handleIfYield: missing block context");
-        if (blockCtx->loopOp || blockCtx->isLoopBody || blockCtx->switchOp)
-            return std::nullopt;
         if (!blockCtx->parentKey || !blockCtx->ifOp)
             return std::nullopt;
         std::uint64_t laneBit = 1ull << lane;
@@ -1183,6 +1194,8 @@ private:
         LaneId lane, WaveContext<ValueType, StepType> &waveCtx,
         MergeStackEntry<ValueType, StepType> &entry) {
         auto *blockCtx = getBlock(waveCtx, key);
+        if (!blockCtx || !blockCtx->loopOp)
+            llvm::report_fatal_error("handleLoopBreak: invalid loop block context");
         std::uint64_t laneBit = 1ull << lane;
 
         llvm::SmallVector<ValueType, 4> results;
@@ -1238,6 +1251,8 @@ private:
         LaneId lane, WaveContext<ValueType, StepType> &waveCtx,
         MergeStackEntry<ValueType, StepType> &entry) {
         auto *blockCtx = getBlock(waveCtx, key);
+        if (!blockCtx || !blockCtx->switchOp)
+            llvm::report_fatal_error("handleSwitchBreak: invalid switch block context");
         std::uint64_t laneBit = 1ull << lane;
 
         llvm::SmallVector<ValueType, 4> results;
@@ -1393,6 +1408,8 @@ private:
         child.sequenceId = thenKey.sequenceId;
         child.parentKey = key;
         child.ifOp = ifOp.getOperation();
+        child.loopOp = parentBlock.loopOp;
+        child.switchOp = parentBlock.switchOp;
         std::uint64_t laneMask =
             parentExpected ? (parentExpected & (1ull << lane)) : (1ull << lane);
         if (child.expectedMask == 0)
@@ -1411,6 +1428,8 @@ private:
         elseCtx.sequenceId = elseKey.sequenceId;
         elseCtx.parentKey = key;
         elseCtx.ifOp = ifOp.getOperation();
+        elseCtx.loopOp = parentBlock.loopOp;
+        elseCtx.switchOp = parentBlock.switchOp;
         elseCtx.kind = DynamicBlockKind::IfElse;
         if (elseCtx.expectedMask == 0)
             elseCtx.expectedMask = parentExpected ? parentExpected : laneMask;
@@ -1457,6 +1476,8 @@ private:
         child.sequenceId = elseKey.sequenceId;
         child.parentKey = key;
         child.ifOp = ifOp.getOperation();
+        child.loopOp = parentBlock.loopOp;
+        child.switchOp = parentBlock.switchOp;
         std::uint64_t laneMask =
             parentExpected ? (parentExpected & (1ull << lane)) : (1ull << lane);
         if (child.expectedMask == 0)
@@ -1474,6 +1495,8 @@ private:
         thenCtx.sequenceId = thenKey.sequenceId;
         thenCtx.parentKey = key;
         thenCtx.ifOp = ifOp.getOperation();
+        thenCtx.loopOp = parentBlock.loopOp;
+        thenCtx.switchOp = parentBlock.switchOp;
         thenCtx.kind = DynamicBlockKind::IfThen;
         if (thenCtx.expectedMask == 0)
             thenCtx.expectedMask = parentExpected ? parentExpected : laneMask;
