@@ -21,6 +21,9 @@ public:
     llvm::Expected<ValueType> evaluateValue(mlir::Value value,
                                             SemanticsContext &context);
 
+    static void clearMemory();
+    static const llvm::DenseMap<int64_t, ValueType> &memory();
+
 private:
     StepType handleConstant(mlir::arith::ConstantOp op);
     StepType handleLaneId(SemanticsContext &context);
@@ -30,6 +33,8 @@ private:
                           SemanticsContext &context);
     StepType handleCmpIOp(mlir::arith::CmpIOp op, SemanticsContext &context);
     StepType handleDispatchThreadId(SemanticsContext &context);
+    StepType handleBufferStore(mlir::Operation *op, SemanticsContext &context);
+    StepType handleBufferLoad(mlir::Operation *op, SemanticsContext &context);
     StepType handleYieldOp(simt::dialect::YieldOp op,
                            SemanticsContext &context);
     StepType handleReturnOp(mlir::func::ReturnOp op);

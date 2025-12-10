@@ -14,9 +14,9 @@ struct GeneratorConfig {
 };
 
 /// Build a simple, deterministic SIMT-Step module:
-/// - func @main()
+/// - func @main(%out: !simt_step.resource<Global, i32>)
 /// - if (tid == 0) run a small counted loop, else use tid
-/// - yields are local; meant as a runnable scaffold for interpreter tests
+/// - store per-lane value to %out[tid] for oracle checking
 mlir::OwningOpRef<mlir::ModuleOp>
 createDeterministicIfLoopModule(mlir::MLIRContext &context,
                                 const GeneratorConfig &cfg = {});

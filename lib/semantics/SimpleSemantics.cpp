@@ -37,6 +37,12 @@ auto SimpleSemantics::evalOperation(mlir::Operation *op,
     if (auto constOp = llvm::dyn_cast<mlir::arith::ConstantOp>(op))
         return handleConstant(constOp);
 
+    if (op->getName().getStringRef() == "simt_step.buffer.store")
+        return handleBufferStore(op, context);
+
+    if (op->getName().getStringRef() == "simt_step.buffer.load")
+        return handleBufferLoad(op, context);
+
     if (auto addOp = llvm::dyn_cast<mlir::arith::AddIOp>(op))
         return handleAddIOp(addOp, context);
 
@@ -293,6 +299,55 @@ auto SimpleSemantics::handleUnknown(mlir::Operation *op) -> StepType {
     llvm::errs() << "simple semantics: unsupported op '"
                  << op->getName().getStringRef() << "'\n";
     return StepType::halt();
+}
+
+namespace {
+static llvm::DenseMap<int64_t, SemValue> &globalMemory() {
+    static llvm::DenseMap<int64_t, SemValue> mem;
+    return mem;
+}
+} // namespace
+
+void SimpleSemantics::clearMemory() { globalMemory().clear(); }
+
+const llvm::DenseMap<int64_t, SemValue> &SimpleSemantics::memory() {
+    return globalMemory();
+}
+
+auto SimpleSemantics::handleBufferStore(mlir::Operation *op,
+                                        SemanticsContext &context) -> StepType {
+    // operands: resource, index, value
+    if (op->getNumOperands() != 3)
+        return StepType::halt();
+    auto idxOrErr = evaluateValue(op->getOperand(1), context);
+    if (!idxOrErr) {
+        llvm::consumeError(idxOrErr.takeError());
+        return StepType::halt();
+    }
+    auto valOrErr = evaluateValue(op->getOperand(2), context);
+    if (!valOrErr) {
+        llvm::consumeError(valOrErr.takeError());
+        return StepType::halt();
+    }
+    int64_t idx = idxOrErr->asInt64();
+    globalMemory()[idx] = *valOrErr;
+    return StepType::halt();
+}
+
+auto SimpleSemantics::handleBufferLoad(mlir::Operation *op,
+                                       SemanticsContext &context) -> StepType {
+    if (op->getNumOperands() != 2)
+        return StepType::halt();
+    auto idxOrErr = evaluateValue(op->getOperand(1), context);
+    if (!idxOrErr) {
+        llvm::consumeError(idxOrErr.takeError());
+        return StepType::halt();
+    }
+    int64_t idx = idxOrErr->asInt64();
+    auto it = globalMemory().find(idx);
+    if (it == globalMemory().end())
+        return StepType::halt();
+    return StepType::produce(it->second);
 }
 
 namespace {
