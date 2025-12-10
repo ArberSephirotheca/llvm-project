@@ -50,6 +50,9 @@ auto SimpleSemantics::evalOperation(mlir::Operation *op,
     if (auto addOp = llvm::dyn_cast<mlir::arith::AddIOp>(op))
         return handleAddIOp(addOp, context);
 
+    if (auto remOp = llvm::dyn_cast<mlir::arith::RemSIOp>(op))
+        return handleRemSIOp(remOp, context);
+
     if (auto andOp = llvm::dyn_cast<mlir::arith::AndIOp>(op))
         return handleAndIOp(andOp, context);
 
@@ -98,6 +101,27 @@ auto SimpleSemantics::handleAddIOp(mlir::arith::AddIOp op,
     }
     auto result = lhsOrErr->add(*rhsOrErr);
     return StepType::produce(std::move(result));
+}
+
+auto SimpleSemantics::handleRemSIOp(mlir::arith::RemSIOp op,
+                                    SemanticsContext &context) -> StepType {
+    auto lhsOrErr = evaluateValue(op.getLhs(), context);
+    if (!lhsOrErr) {
+        llvm::consumeError(lhsOrErr.takeError());
+        return StepType::halt();
+    }
+    auto rhsOrErr = evaluateValue(op.getRhs(), context);
+    if (!rhsOrErr) {
+        llvm::consumeError(rhsOrErr.takeError());
+        return StepType::halt();
+    }
+    int64_t divisor = rhsOrErr->asInt64();
+    if (divisor == 0)
+        return StepType::halt();
+    int64_t dividend = lhsOrErr->asInt64();
+    // Match C/LLVM srem semantics for negative dividends.
+    int64_t rem = dividend % divisor;
+    return StepType::produce(SemValue::fromInt64(rem));
 }
 
 auto SimpleSemantics::handleAndIOp(mlir::arith::AndIOp op,

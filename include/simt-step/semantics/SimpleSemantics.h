@@ -29,6 +29,8 @@ private:
     StepType handleLaneId(SemanticsContext &context);
     StepType handleAddIOp(mlir::arith::AddIOp op,
                           SemanticsContext &context);
+    StepType handleRemSIOp(mlir::arith::RemSIOp op,
+                           SemanticsContext &context);
     StepType handleAndIOp(mlir::arith::AndIOp op,
                           SemanticsContext &context);
     StepType handleCmpIOp(mlir::arith::CmpIOp op, SemanticsContext &context);

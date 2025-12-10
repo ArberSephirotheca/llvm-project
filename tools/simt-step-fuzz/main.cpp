@@ -70,6 +70,43 @@ int main(int argc, char **argv) {
         llvm::outs() << "\n";
     }
 
-    // Interpreter run temporarily disabled while investigating crash.
+    auto &entry = func.getBody().front();
+    simt::semantics::SimpleProgramRunner runner;
+    simt::semantics::SemanticsContext semaCtx;
+    unsigned width = std::min<unsigned>(64, std::max<unsigned>(1, numLanes));
+    semaCtx.activeMask =
+        width >= 64 ? ~0ull : ((1ull << static_cast<std::uint64_t>(width)) - 1ull);
+    simt::semantics::SimpleSemantics::clearMemory();
+
+    if (llvm::Error err = runner.runBlock(&entry, semaCtx)) {
+        llvm::errs() << "run failed: " << llvm::toString(std::move(err)) << "\n";
+        return 1;
+    }
+
+    const auto &state = runner.state();
+    for (const auto &waveIt : state.waves) {
+        llvm::outs() << "Wave " << waveIt.first << "\n";
+        const auto &waveCtx = waveIt.second;
+        for (const auto &laneIt : waveCtx.lanes) {
+            const auto &laneCtx = laneIt.second;
+            llvm::outs() << "  Lane " << laneIt.first
+                         << " returned=" << laneCtx.hasReturned;
+            if (laneCtx.returnValue)
+                llvm::outs() << " value=" << laneCtx.returnValue->asInt64();
+            if (laneCtx.currentBlock)
+                llvm::outs() << " block=" << laneCtx.currentBlock->block
+                             << " seq=" << laneCtx.currentBlock->sequenceId;
+            llvm::outs() << "\n";
+        }
+    }
+
+    const auto &mem = simt::semantics::SimpleSemantics::memory();
+    if (!mem.empty()) {
+        llvm::outs() << "Memory:\n";
+        for (const auto &kv : mem) {
+            llvm::outs() << "  [" << kv.first << "] = " << kv.second.asInt64() << "\n";
+        }
+    }
+
     return 0;
 }
