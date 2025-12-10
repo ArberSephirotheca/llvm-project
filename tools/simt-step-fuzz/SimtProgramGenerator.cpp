@@ -27,7 +27,7 @@ createDeterministicIfLoopModule(mlir::MLIRContext &context,
         &context, simt::dialect::MemorySpace::Global, builder.getI32Type());
     llvm::errs() << "[fuzz-gen] resource type ready\n";
 
-    auto funcType = builder.getFunctionType({resTy}, {});
+    auto funcType = builder.getFunctionType({resTy, resTy}, {});
     auto func = builder.create<func::FuncOp>(loc, "main", funcType);
     llvm::errs() << "[fuzz-gen] func created\n";
     func->setAttr("simt.num_threads",
@@ -37,6 +37,8 @@ createDeterministicIfLoopModule(mlir::MLIRContext &context,
     auto *entry = func.addEntryBlock();
     builder.setInsertionPointToStart(entry);
 
+    Value outMain = entry->getArgument(0);
+    Value outWave = entry->getArgument(1);
     Value tid =
         builder.create<simt::dialect::DispatchThreadIdOp>(loc, builder.getI32Type());
     llvm::errs() << "[fuzz-gen] tid op created\n";
@@ -108,9 +110,23 @@ createDeterministicIfLoopModule(mlir::MLIRContext &context,
     llvm::errs() << "[fuzz-gen] else built\n";
 
     Value val = ifOp.getResult(0);
-    Value out = entry->getArgument(0);
+    Value out = outMain;
     builder.setInsertionPointToEnd(entry);
     builder.create<simt::dialect::BufferStoreOp>(loc, out, tid, val);
+
+    // Wave-count branch: even lanes participate.
+    Value two = builder.create<arith::ConstantIntOp>(loc, 2, 32);
+    Value rem = builder.create<arith::RemSIOp>(loc, tid, two);
+    Value zero = builder.create<arith::ConstantIntOp>(loc, 0, 32);
+    Value even = builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, rem, zero);
+    // Store wave_count_bits result at idx = waveId * stride + tid.
+    constexpr int waveId = 0;
+    constexpr int stride = 64;
+    Value waveIdC = builder.create<arith::ConstantIntOp>(loc, waveId * stride, 32);
+    Value baseIdx = builder.create<arith::AddIOp>(loc, waveIdC, tid);
+    Value count = builder.create<simt::dialect::WaveCountBitsOp>(loc, builder.getI32Type(), even);
+    builder.create<simt::dialect::BufferStoreOp>(loc, outWave, baseIdx, count);
+
     builder.create<func::ReturnOp>(loc);
     llvm::errs() << "[fuzz-gen] return built\n";
 
