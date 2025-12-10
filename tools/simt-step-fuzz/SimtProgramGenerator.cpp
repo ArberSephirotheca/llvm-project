@@ -6,6 +6,7 @@
 #include <mlir/IR/DialectRegistry.h>
 #include <mlir/Parser/Parser.h>
 
+#include <cstdint>
 #include <llvm/ADT/SmallString.h>
 #include <llvm/Support/raw_ostream.h>
 
@@ -19,7 +20,7 @@ static std::string buildKernelText(const GeneratorConfig &cfg) {
     llvm::SmallString<256> storage;
     llvm::raw_svector_ostream os(storage);
     os << "module {\n";
-    os << "  func.func @main(%seed: i32, %out: !simt_step.resource<Global, i32>)";
+    os << "  func.func @main()";
     os << " attributes {simt.num_threads = array<i64: " << cfg.numThreads[0]
        << ", " << cfg.numThreads[1] << ", " << cfg.numThreads[2] << ">} {\n";
     os << "    %tid = \"simt_step.dispatch_thread_id\"() : () -> i32\n";
@@ -44,7 +45,6 @@ static std::string buildKernelText(const GeneratorConfig &cfg) {
     os << "    }, {\n";
     os << "      \"simt_step.yield\"(%tid) : (i32) -> ()\n";
     os << "    }) : (i1) -> i32\n";
-    os << "    \"simt_step.buffer.store\"(%out, %tid, %val) : (!simt_step.resource<Global, i32>, i32, i32) -> ()\n";
     os << "    func.return\n";
     os << "  }\n";
     os << "}\n";

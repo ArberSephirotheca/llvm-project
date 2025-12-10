@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <array>
 #include <mlir/IR/BuiltinOps.h>
 
@@ -13,9 +14,9 @@ struct GeneratorConfig {
 };
 
 /// Build a simple, deterministic SIMT-Step module:
-/// - func @main(%seed: i32, %out: !simt_step.resource<Global, i32>)
+/// - func @main()
 /// - if (tid == 0) run a small counted loop, else use tid
-/// - store the chosen value to %out[tid]
+/// - yields are local; meant as a runnable scaffold for interpreter tests
 mlir::OwningOpRef<mlir::ModuleOp>
 createDeterministicIfLoopModule(mlir::MLIRContext &context,
                                 const GeneratorConfig &cfg = {});
