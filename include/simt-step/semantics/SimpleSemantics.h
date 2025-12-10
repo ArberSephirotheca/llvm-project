@@ -33,6 +33,7 @@ private:
                           SemanticsContext &context);
     StepType handleCmpIOp(mlir::arith::CmpIOp op, SemanticsContext &context);
     StepType handleDispatchThreadId(SemanticsContext &context);
+    StepType handleWaveCountBits(mlir::Operation *op, SemanticsContext &context);
     StepType handleBufferStore(mlir::Operation *op, SemanticsContext &context);
     StepType handleBufferLoad(mlir::Operation *op, SemanticsContext &context);
     StepType handleYieldOp(simt::dialect::YieldOp op,

@@ -9,6 +9,7 @@
 #include <llvm/Support/ErrorHandling.h>
 #include <vector>
 #include <llvm/Support/raw_ostream.h>
+#include <bit>
 
 namespace simt::semantics {
 
@@ -42,6 +43,9 @@ auto SimpleSemantics::evalOperation(mlir::Operation *op,
 
     if (op->getName().getStringRef() == "simt_step.buffer.load")
         return handleBufferLoad(op, context);
+
+    if (op->getName().getStringRef() == "simt_step.wave_count_bits")
+        return handleWaveCountBits(op, context);
 
     if (auto addOp = llvm::dyn_cast<mlir::arith::AddIOp>(op))
         return handleAddIOp(addOp, context);
@@ -348,6 +352,22 @@ auto SimpleSemantics::handleBufferLoad(mlir::Operation *op,
     if (it == globalMemory().end())
         return StepType::halt();
     return StepType::produce(it->second);
+}
+
+auto SimpleSemantics::handleWaveCountBits(mlir::Operation *op,
+                                          SemanticsContext &context) -> StepType {
+    if (op->getNumOperands() != 1)
+        return StepType::halt();
+    auto predOrErr = evaluateValue(op->getOperand(0), context);
+    if (!predOrErr) {
+        llvm::consumeError(predOrErr.takeError());
+        return StepType::halt();
+    }
+    std::uint64_t mask = context.activeMask;
+    std::int32_t count = 0;
+    if (predOrErr->asBool())
+        count = static_cast<std::int32_t>(std::popcount(mask));
+    return StepType::produce(SemValue::fromInt32(count));
 }
 
 namespace {
