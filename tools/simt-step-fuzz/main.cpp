@@ -19,17 +19,6 @@
 
 using namespace mlir;
 
-namespace {
-std::string formatMask(std::uint64_t mask, unsigned width) {
-    std::string s;
-    s.reserve(width + 2);
-    s.append("0b");
-    for (int i = static_cast<int>(width) - 1; i >= 0; --i)
-        s.push_back((mask & (1ull << i)) ? '1' : '0');
-    return s;
-}
-} // namespace
-
 int main(int argc, char **argv) {
 
     llvm::cl::opt<unsigned> numLanes(
