@@ -29,6 +29,22 @@ struct HlslEmitter {
 
     std::string makeTmp() { return "t" + std::to_string(tmpId++); }
 
+    std::string emitType(Type ty) const {
+        if (auto it = mlir::dyn_cast<IntegerType>(ty)) {
+            unsigned w = it.getWidth();
+            if (w == 1)
+                return "bool";
+            if (w == 32)
+                return "uint";
+            return "int";
+        }
+        if (ty.isIndex())
+            return "uint";
+        return "int";
+    }
+
+    std::string typeFor(Value v) const { return emitType(v.getType()); }
+
     std::string get(Value v) const {
         if (auto it = names.find(v); it != names.end())
             return it->second;
@@ -101,7 +117,7 @@ struct HlslEmitter {
             resName = makeTmp();
             elseInit = trivialElseYield();
             emitIndent();
-            os << "int " << resName;
+            os << emitType(ifOp.getResultTypes().front()) << " " << resName;
             if (elseInit)
                 os << " = " << *elseInit;
             os << ";\n";
@@ -155,7 +171,8 @@ struct HlslEmitter {
         std::string accName = makeTmp();
         std::string iName = makeTmp();
         emitIndent();
-        os << "int " << accName << " = " << emitValue(loop.getInits()[0]) << ";\n";
+        os << emitType(loop.getInits()[0].getType()) << " " << accName
+           << " = " << emitValue(loop.getInits()[0]) << ";\n";
         std::string initI = emitValue(loop.getInits()[1]);
 
         auto &prep = loop.getPrepareRegion().front();
@@ -208,7 +225,8 @@ struct HlslEmitter {
         emitIndent();
         if (canUseFor) {
             // Emit for-loop header.
-            os << "for (int " << iName << " = " << initI
+            os << "for (" << emitType(loop.getInits()[1].getType()) << " " << iName
+               << " = " << initI
                << "; (" << condLHS;
             switch (cmpPred) {
             case arith::CmpIPredicate::slt: os << " < "; break;
@@ -222,7 +240,7 @@ struct HlslEmitter {
             os << condRHS << "); " << iName << " = " << iName << " + " << stepExpr
                << ") {\n";
         } else {
-            os << "int " << iName << " = " << initI << ";\n";
+            os << emitType(loop.getInits()[1].getType()) << " " << iName << " = " << initI << ";\n";
             emitIndent();
             os << "while (true) {\n";
         }
@@ -270,7 +288,7 @@ struct HlslEmitter {
             std::string tmp = makeTmp();
             names[did.getResult()] = tmp;
             emitIndent();
-            os << "int " << tmp << " = tid.x;\n";
+            os << emitType(did.getResult().getType()) << " " << tmp << " = tid.x;\n";
             return success();
         }
         if (isa<arith::AddIOp, arith::RemSIOp, arith::CmpIOp,
@@ -278,7 +296,7 @@ struct HlslEmitter {
             std::string tmp = makeTmp();
             names[op->getResult(0)] = tmp;
             emitIndent();
-            os << "int " << tmp << " = " << emitExpr(op) << ";\n";
+            os << emitType(op->getResult(0).getType()) << " " << tmp << " = " << emitExpr(op) << ";\n";
             return success();
         }
         if (auto ifOp = dyn_cast<simt::dialect::IfOp>(op))
@@ -287,7 +305,7 @@ struct HlslEmitter {
             return emitLoop(loop);
         if (auto store = dyn_cast<simt::dialect::BufferStoreOp>(op)) {
             emitIndent();
-            os << "buf" << store.getResource().cast<BlockArgument>().getArgNumber()
+            os << "buf" << mlir::cast<BlockArgument>(store.getResource()).getArgNumber()
                << "[" << get(store.getIndex()) << "] = " << get(store.getValue()) << ";\n";
             return success();
         }
@@ -361,7 +379,7 @@ int main(int argc, char **argv) {
     SmallVector<BlockArgument> resources;
     for (auto arg : func.getArguments()) {
         auto ty = arg.getType();
-        if (ty.isa<simt::dialect::ResourceType>())
+        if (mlir::isa<simt::dialect::ResourceType>(ty))
             resources.push_back(arg);
     }
     for (unsigned i = 0; i < resources.size(); ++i) {
