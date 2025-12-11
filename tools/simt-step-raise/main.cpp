@@ -127,8 +127,7 @@ struct HlslEmitter {
         std::string iName = makeTmp();
         emitIndent();
         os << "int " << accName << " = " << emitValue(loop.getInits()[0]) << ";\n";
-        emitIndent();
-        os << "int " << iName << " = " << emitValue(loop.getInits()[1]) << ";\n";
+        std::string initI = emitValue(loop.getInits()[1]);
 
         auto &prep = loop.getPrepareRegion().front();
         auto *condOp = prep.getTerminator();
@@ -138,13 +137,74 @@ struct HlslEmitter {
         names[prep.getArgument(0)] = accName;
         names[prep.getArgument(1)] = iName;
 
-        emitIndent();
-        os << "while (true) {\n";
-        indent += "  ";
-        std::string condExpr = emitValue(cond.getCondition());
-        emitIndent();
-        os << "if (!(" << condExpr << ")) break;\n";
+        // Try to recognize a simple for-loop shape: cmp on the induction variable
+        // and an add with a constant step.
+        bool canUseFor = false;
+        std::string condLHS, condRHS, stepExpr;
+        arith::CmpIPredicate cmpPred = arith::CmpIPredicate::eq;
+        if (auto cmp = dyn_cast_or_null<arith::CmpIOp>(
+                cond.getCondition().getDefiningOp())) {
+            cmpPred = cmp.getPredicate();
+            auto lhs = cmp.getLhs();
+            auto rhs = cmp.getRhs();
+            auto prepIdx = prep.getArgument(1);
+            auto prepIdxStr = iName;
+            auto otherStr = [&](Value v) { return emitValue(v); };
+            if (lhs == prepIdx || rhs == prepIdx) {
+                condLHS = (lhs == prepIdx) ? prepIdxStr : otherStr(lhs);
+                condRHS = (rhs == prepIdx) ? prepIdxStr : otherStr(rhs);
+                // Check the body step: yield idx' = idx +/- C
+                auto &body = loop.getBodyRegion().front();
+                names[body.getArgument(0)] = accName;
+                names[body.getArgument(1)] = iName;
+                for (auto &op : body) {
+                    if (auto y = dyn_cast<simt::dialect::YieldOp>(op)) {
+                        auto nextIdx = y.getOperand(1);
+                        if (auto add = dyn_cast_or_null<arith::AddIOp>(
+                                nextIdx.getDefiningOp())) {
+                            if (add.getLhs() == body.getArgument(1)) {
+                                stepExpr = emitValue(add.getRhs());
+                                canUseFor = true;
+                            } else if (add.getRhs() == body.getArgument(1)) {
+                                stepExpr = emitValue(add.getLhs());
+                                canUseFor = true;
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+        }
 
+        emitIndent();
+        if (canUseFor) {
+            // Emit for-loop header.
+            os << "for (int " << iName << " = " << initI
+               << "; (" << condLHS;
+            switch (cmpPred) {
+            case arith::CmpIPredicate::slt: os << " < "; break;
+            case arith::CmpIPredicate::sle: os << " <= "; break;
+            case arith::CmpIPredicate::sgt: os << " > "; break;
+            case arith::CmpIPredicate::sge: os << " >= "; break;
+            case arith::CmpIPredicate::ne: os << " != "; break;
+            case arith::CmpIPredicate::eq: os << " == "; break;
+            default: os << " /*cmp*/ "; break;
+            }
+            os << condRHS << "); " << iName << " = " << iName << " + " << stepExpr
+               << ") {\n";
+        } else {
+            os << "int " << iName << " = " << initI << ";\n";
+            emitIndent();
+            os << "while (true) {\n";
+        }
+        indent += "  ";
+        if (!canUseFor) {
+            std::string condExpr = emitValue(cond.getCondition());
+            emitIndent();
+            os << "if (!(" << condExpr << ")) break;\n";
+        }
+
+        // Body emission (re-run with established names to avoid stale mapping).
         auto &body = loop.getBodyRegion().front();
         names[body.getArgument(0)] = accName;
         names[body.getArgument(1)] = iName;
@@ -160,8 +220,10 @@ struct HlslEmitter {
         }
         emitIndent();
         os << accName << " = " << nextAcc << ";\n";
-        emitIndent();
-        os << iName << " = " << nextI << ";\n";
+        if (!canUseFor) {
+            emitIndent();
+            os << iName << " = " << nextI << ";\n";
+        }
         indent.pop_back(); indent.pop_back();
         emitIndent();
         os << "}\n";
