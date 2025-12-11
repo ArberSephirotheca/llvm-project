@@ -68,6 +68,18 @@ struct HlslEmitter {
         if (auto add = dyn_cast<arith::AddIOp>(op)) {
             return "(" + emitValue(add.getLhs()) + " + " + emitValue(add.getRhs()) + ")";
         }
+        if (auto sub = dyn_cast<arith::SubIOp>(op)) {
+            return "(" + emitValue(sub.getLhs()) + " - " + emitValue(sub.getRhs()) + ")";
+        }
+        if (auto mul = dyn_cast<arith::MulIOp>(op)) {
+            return "(" + emitValue(mul.getLhs()) + " * " + emitValue(mul.getRhs()) + ")";
+        }
+        if (auto shl = dyn_cast<arith::ShLIOp>(op)) {
+            return "(" + emitValue(shl.getLhs()) + " << " + emitValue(shl.getRhs()) + ")";
+        }
+        if (auto shr = dyn_cast<arith::ShRSIOp>(op)) {
+            return "(" + emitValue(shr.getLhs()) + " >> " + emitValue(shr.getRhs()) + ")";
+        }
         if (auto rem = dyn_cast<arith::RemSIOp>(op)) {
             return "(" + emitValue(rem.getLhs()) + " % " + emitValue(rem.getRhs()) + ")";
         }
@@ -292,6 +304,7 @@ struct HlslEmitter {
             return success();
         }
         if (isa<arith::AddIOp, arith::RemSIOp, arith::CmpIOp,
+                arith::SubIOp, arith::MulIOp, arith::ShLIOp, arith::ShRSIOp,
                 simt::dialect::WaveCountBitsOp>(op)) {
             std::string tmp = makeTmp();
             names[op->getResult(0)] = tmp;
@@ -303,6 +316,16 @@ struct HlslEmitter {
             return emitIf(ifOp);
         if (auto loop = dyn_cast<simt::dialect::LoopOp>(op))
             return emitLoop(loop);
+        if (auto load = dyn_cast<simt::dialect::BufferLoadOp>(op)) {
+            std::string tmp = makeTmp();
+            names[load.getResult()] = tmp;
+            emitIndent();
+            os << emitType(load.getResult().getType()) << " " << tmp << " = "
+               << "buf"
+               << mlir::cast<BlockArgument>(load.getResource()).getArgNumber()
+               << "[" << get(load.getIndex()) << "];\n";
+            return success();
+        }
         if (auto store = dyn_cast<simt::dialect::BufferStoreOp>(op)) {
             emitIndent();
             os << "buf" << mlir::cast<BlockArgument>(store.getResource()).getArgNumber()
@@ -393,6 +416,15 @@ int main(int argc, char **argv) {
 
     HlslEmitter emitter(llvm::outs());
     emitter.indent = "  ";
+    // Pre-seed resource argument names so loads/stores print the same identifiers.
+    for (unsigned i = 0; i < resources.size(); ++i)
+        emitter.names[resources[i]] = "buf" + std::to_string(i);
+    // Give non-resource arguments stable names too.
+    for (auto arg : func.getArguments()) {
+        if (mlir::isa<simt::dialect::ResourceType>(arg.getType()))
+            continue;
+        emitter.names[arg] = "arg" + std::to_string(arg.getArgNumber());
+    }
     auto &entry = func.getBody().front();
     for (auto &op : entry) {
         if (auto ret = dyn_cast<func::ReturnOp>(op))
