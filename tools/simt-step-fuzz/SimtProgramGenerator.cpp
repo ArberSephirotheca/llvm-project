@@ -330,7 +330,8 @@ createRicherRandomModule(mlir::MLIRContext &context,
     if (ifOp.getElseRegion().empty())
         ifOp.getElseRegion().push_back(new Block());
 
-    // Then branch: loop with random trip count and optional inner if.
+    // Then branch: loop with random trip count and optional inner if; emit wave
+    // op inside the loop using iteration in the index.
     {
         auto &thenBlock = ifOp.getThenRegion().front();
         OpBuilder thenB(&thenBlock, thenBlock.begin());
@@ -370,6 +371,22 @@ createRicherRandomModule(mlir::MLIRContext &context,
             Value sum = bodyB.create<arith::AddIOp>(loc, acc, i);
             Value one = bodyB.create<arith::ConstantIntOp>(loc, 1, 32);
             Value next = bodyB.create<arith::AddIOp>(loc, i, one);
+
+            // Wave op in loop body: predicate tid % 2 == 0, index includes iter.
+            int stride = 64;
+            int waveIdLoop = rng.pick(0, 3);
+            Value twoL = bodyB.create<arith::ConstantIntOp>(loc, 2, 32);
+            Value remL = bodyB.create<arith::RemSIOp>(loc, tid, twoL);
+            Value zeroL = bodyB.create<arith::ConstantIntOp>(loc, 0, 32);
+            Value evenL = bodyB.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, remL, zeroL);
+            Value baseL = bodyB.create<arith::ConstantIntOp>(loc, waveIdLoop * stride, 32);
+            Value iterStride = bodyB.create<arith::ConstantIntOp>(loc, stride, 32);
+            Value iterOffset = bodyB.create<arith::MulIOp>(loc, i, iterStride);
+            Value idxLoop = bodyB.create<arith::AddIOp>(loc, baseL,
+                                                        bodyB.create<arith::AddIOp>(loc, tid, iterOffset));
+            Value countL =
+                bodyB.create<simt::dialect::WaveCountBitsOp>(loc, builder.getI32Type(), evenL);
+            bodyB.create<simt::dialect::BufferStoreOp>(loc, outWave, idxLoop, countL);
 
             if (rng.coin()) {
                 int r = rng.pick(0, 2);
@@ -414,27 +431,16 @@ createRicherRandomModule(mlir::MLIRContext &context,
     builder.create<simt::dialect::BufferStoreOp>(loc, outMain, tid, val);
 
     int stride = 64;
-    auto emitWave = [&](int waveId, Value pred) {
-        Value base = builder.create<arith::ConstantIntOp>(loc, waveId * stride, 32);
-        Value idx = builder.create<arith::AddIOp>(loc, base, tid);
-        Value count = builder.create<simt::dialect::WaveCountBitsOp>(loc, builder.getI32Type(), pred);
-        builder.create<simt::dialect::BufferStoreOp>(loc, outWave, idx, count);
-    };
-
-    // Wave 0: even lanes.
-    {
-        Value two = builder.create<arith::ConstantIntOp>(loc, 2, 32);
-        Value rem = builder.create<arith::RemSIOp>(loc, tid, two);
-        Value zero = builder.create<arith::ConstantIntOp>(loc, 0, 32);
-        Value even = builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, rem, zero);
-        emitWave(rng.pick(0, 3), even);
-    }
-    // Wave 1: tid < k'.
+    // Wave in else branch: tid < k', stored at waveId1*stride + tid.
     {
         int k2 = rng.pick(1, std::max<int>(1, cfg.numThreads[0]));
+        int waveId1 = rng.pick(4, 7);
         Value ck2 = builder.create<arith::ConstantIntOp>(loc, k2, 32);
         Value lt = builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt, tid, ck2);
-        emitWave(rng.pick(4, 7), lt);
+        Value base = builder.create<arith::ConstantIntOp>(loc, waveId1 * stride, 32);
+        Value idx = builder.create<arith::AddIOp>(loc, base, tid);
+        Value count = builder.create<simt::dialect::WaveCountBitsOp>(loc, builder.getI32Type(), lt);
+        builder.create<simt::dialect::BufferStoreOp>(loc, outWave, idx, count);
     }
 
     builder.create<func::ReturnOp>(loc);
