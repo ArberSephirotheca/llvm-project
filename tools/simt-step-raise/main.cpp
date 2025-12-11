@@ -13,6 +13,8 @@
 #include <llvm/Support/InitLLVM.h>
 #include <llvm/Support/raw_ostream.h>
 
+#include <optional>
+
 using namespace mlir;
 
 namespace {
@@ -78,11 +80,31 @@ struct HlslEmitter {
     LogicalResult emitIf(simt::dialect::IfOp ifOp) {
         if (ifOp.getNumResults() > 1)
             return failure();
+        auto trivialElseYield = [&]() -> std::optional<std::string> {
+            auto &blk = ifOp.getElseRegion().front();
+            if (blk.empty())
+                return std::string{};
+            if (std::next(blk.begin()) != blk.end())
+                return std::nullopt;
+            if (auto y = dyn_cast<simt::dialect::YieldOp>(&blk.front())) {
+                if (y.getNumOperands() == 0)
+                    return std::string{};
+                if (y.getNumOperands() == 1)
+                    return emitValue(y.getOperand(0));
+            }
+            return std::nullopt;
+        };
         std::string resName;
-        if (!ifOp.getResults().empty()) {
+        std::optional<std::string> elseInit;
+        bool hasResult = !ifOp.getResults().empty();
+        if (hasResult) {
             resName = makeTmp();
+            elseInit = trivialElseYield();
             emitIndent();
-            os << "int " << resName << ";\n";
+            os << "int " << resName;
+            if (elseInit)
+                os << " = " << *elseInit;
+            os << ";\n";
         }
         emitIndent();
         os << "if (" << get(ifOp.getCondition()) << ") {\n";
@@ -90,14 +112,21 @@ struct HlslEmitter {
         if (failed(emitRegionAssign(ifOp.getThenRegion(), resName)))
             return failure();
         indent.pop_back(); indent.pop_back();
-        emitIndent();
-        os << "} else {\n";
-        indent += "  ";
-        if (failed(emitRegionAssign(ifOp.getElseRegion(), resName)))
-            return failure();
-        indent.pop_back(); indent.pop_back();
-        emitIndent();
-        os << "}\n";
+        bool omitElse = (!hasResult && trivialElseYield().has_value()) ||
+                        (hasResult && elseInit.has_value());
+        if (!omitElse) {
+            emitIndent();
+            os << "} else {\n";
+            indent += "  ";
+            if (failed(emitRegionAssign(ifOp.getElseRegion(), resName)))
+                return failure();
+            indent.pop_back(); indent.pop_back();
+            emitIndent();
+            os << "}\n";
+        } else {
+            emitIndent();
+            os << "}\n";
+        }
         if (!resName.empty())
             names[ifOp.getResult(0)] = resName;
         return success();
