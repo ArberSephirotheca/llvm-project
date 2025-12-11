@@ -37,6 +37,8 @@ int main(int argc, char **argv) {
         llvm::cl::init(4));
     llvm::cl::opt<bool> dumpIR("print-ir", llvm::cl::desc("Print generated MLIR"),
                                llvm::cl::init(false));
+    llvm::cl::opt<std::uint64_t> seedOpt("seed", llvm::cl::desc("Seed for RNG (0=deterministic)"),
+                                         llvm::cl::init(0));
     llvm::cl::ParseCommandLineOptions(argc, argv, "simt-step fuzz driver\n");
 
     mlir::DialectRegistry registry;
@@ -50,9 +52,10 @@ int main(int argc, char **argv) {
 
     simt::fuzz::GeneratorConfig cfg;
     cfg.numThreads = {static_cast<std::int64_t>(numLanes), 1, 1};
+    cfg.seed = seedOpt;
     llvm::errs() << "[fuzz] generating module...\n";
     llvm::errs().flush();
-    auto module = simt::fuzz::createDeterministicIfLoopModule(context, cfg);
+    auto module = simt::fuzz::createRandomizedModule(context, cfg);
     if (!module) {
         llvm::errs() << "failed to build module\n";
         return 1;

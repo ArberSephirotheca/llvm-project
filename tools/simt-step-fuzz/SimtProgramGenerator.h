@@ -11,6 +11,8 @@ namespace simt::fuzz {
 
 struct GeneratorConfig {
     std::array<std::int64_t, 3> numThreads{1, 1, 1};
+    std::uint64_t seed = 0; // 0 = deterministic default
+    std::uint32_t maxTripCount = 4;
 };
 
 /// Build a simple, deterministic SIMT-Step module:
@@ -23,5 +25,12 @@ struct GeneratorConfig {
 mlir::OwningOpRef<mlir::ModuleOp>
 createDeterministicIfLoopModule(mlir::MLIRContext &context,
                                 const GeneratorConfig &cfg = {});
+
+/// Generate a small, deterministic-but-seeded SIMT-Step module with simple
+/// structured control and wave ops. When seed=0, falls back to the default
+/// template. When seed != 0, randomizes predicates/bounds within safe limits.
+mlir::OwningOpRef<mlir::ModuleOp>
+createRandomizedModule(mlir::MLIRContext &context,
+                       const GeneratorConfig &cfg = {});
 
 } // namespace simt::fuzz
