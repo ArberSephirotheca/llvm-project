@@ -44,7 +44,7 @@ int main(int argc, char **argv) {
     cfg.seed = seedOpt;
     llvm::errs() << "[fuzz] generating module...\n";
     llvm::errs().flush();
-    auto module = simt::fuzz::createRandomizedModule(context, cfg);
+    auto module = simt::fuzz::createRicherRandomModule(context, cfg);
     if (!module) {
         llvm::errs() << "failed to build module\n";
         return 1;

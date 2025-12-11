@@ -33,4 +33,10 @@ mlir::OwningOpRef<mlir::ModuleOp>
 createRandomizedModule(mlir::MLIRContext &context,
                        const GeneratorConfig &cfg = {});
 
+/// Generate a composite program with nested control and multiple wave ops,
+/// using a seeded RNG for variability.
+mlir::OwningOpRef<mlir::ModuleOp>
+createRicherRandomModule(mlir::MLIRContext &context,
+                         const GeneratorConfig &cfg = {});
+
 } // namespace simt::fuzz
