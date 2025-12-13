@@ -5,6 +5,7 @@
 #include <mlir/IR/BuiltinTypes.h>
 #include <mlir/IR/ImplicitLocOpBuilder.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <random>
 
@@ -24,6 +25,145 @@ struct RNG {
     }
     bool coin() { return pick(0, 1) == 1; }
 };
+
+struct BuildState {
+    GeneratorConfig cfg;
+    RNG &rng;
+    int waveId = 0;
+    Value tid;
+    Value outMain;
+    Value outWave;
+};
+
+static Value makeI32(OpBuilder &b, Location loc, int v) {
+    return b.create<arith::ConstantIntOp>(loc, v, 32);
+}
+
+static Value makeBool(OpBuilder &b, Location loc, bool v) {
+    return b.create<arith::ConstantIntOp>(loc, v ? 1 : 0, 1);
+}
+
+static void emitWaveCount(OpBuilder &b, Location loc, BuildState &st,
+                          Value predicate, Value iteration = nullptr) {
+    int lanes = static_cast<int>(st.cfg.numThreads[0]);
+    int stride = std::max<int>(1, st.cfg.maxTripCount * lanes);
+    int waveBase = st.waveId * stride;
+    Value idx = makeI32(b, loc, waveBase);
+    if (iteration) {
+        Value iterScaled = iteration; // avoid mul to stay within supported ops
+        idx = b.create<arith::AddIOp>(loc, idx, iterScaled);
+    }
+    idx = b.create<arith::AddIOp>(loc, idx, st.tid);
+    Value count =
+        b.create<simt::dialect::WaveCountBitsOp>(loc, b.getI32Type(), predicate);
+    b.create<simt::dialect::BufferStoreOp>(loc, st.outWave, idx, count);
+    st.waveId++;
+}
+
+static Value buildValue(OpBuilder &b, Location loc, BuildState &st) {
+    int choice = st.rng.pick(0, 2); // 0 const, 1 tid, 2 tid + const
+    if (choice == 0)
+        return makeI32(b, loc, st.rng.pick(0, 4));
+    if (choice == 1)
+        return st.tid;
+    Value c = makeI32(b, loc, st.rng.pick(0, 4));
+    return b.create<arith::AddIOp>(loc, st.tid, c);
+}
+
+static Value buildPattern(OpBuilder &b, Location loc, BuildState &st,
+                          unsigned depth, unsigned maxDepth);
+
+static Value buildIf(OpBuilder &b, Location loc, BuildState &st, unsigned depth,
+                     unsigned maxDepth) {
+    Value cond;
+    if (st.rng.coin()) {
+        Value two = makeI32(b, loc, 2);
+        Value rem = b.create<arith::RemSIOp>(loc, st.tid, two);
+        Value zero = makeI32(b, loc, 0);
+        cond = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, rem, zero);
+    } else {
+        int k = std::max(1, st.rng.pick(1, static_cast<int>(st.cfg.numThreads[0])));
+        Value ck = makeI32(b, loc, k);
+        cond = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt, st.tid, ck);
+    }
+    auto ifOp = b.create<simt::dialect::IfOp>(loc, TypeRange{b.getI32Type()},
+                                              cond, /*withElseRegion=*/true);
+    if (ifOp.getThenRegion().empty())
+        ifOp.getThenRegion().push_back(new Block());
+    if (ifOp.getElseRegion().empty())
+        ifOp.getElseRegion().push_back(new Block());
+    {
+        auto &blk = ifOp.getThenRegion().front();
+        OpBuilder tb(&blk, blk.begin());
+        Value v = buildPattern(tb, loc, st, depth + 1, maxDepth);
+        tb.create<simt::dialect::YieldOp>(loc, ValueRange{v});
+    }
+    {
+        auto &blk = ifOp.getElseRegion().front();
+        OpBuilder eb(&blk, blk.begin());
+        Value v = buildPattern(eb, loc, st, depth + 1, maxDepth);
+        eb.create<simt::dialect::YieldOp>(loc, ValueRange{v});
+    }
+    emitWaveCount(b, loc, st, cond);
+    return ifOp.getResult(0);
+}
+
+static Value buildLoop(OpBuilder &b, Location loc, BuildState &st, unsigned depth,
+                       unsigned maxDepth) {
+    int trip = std::max(1, st.rng.pick(1, static_cast<int>(st.cfg.maxTripCount)));
+    Value acc0 = makeI32(b, loc, 0);
+    Value idx0 = makeI32(b, loc, 0);
+    auto loop = b.create<simt::dialect::LoopOp>(
+        loc, TypeRange{b.getI32Type(), b.getI32Type()}, ValueRange{acc0, idx0});
+    if (loop.getPrepareRegion().empty()) {
+        auto *prep = new Block();
+        prep->addArguments({b.getI32Type(), b.getI32Type()},
+                           SmallVector<Location>{loc, loc});
+        loop.getPrepareRegion().push_back(prep);
+    }
+    if (loop.getBodyRegion().empty()) {
+        auto *body = new Block();
+        body->addArguments({b.getI32Type(), b.getI32Type()},
+                           SmallVector<Location>{loc, loc});
+        loop.getBodyRegion().push_back(body);
+    }
+    {
+        auto &prep = loop.getPrepareRegion().front();
+        OpBuilder pb(&prep, prep.begin());
+        Value acc = prep.getArgument(0);
+        Value idx = prep.getArgument(1);
+        Value bound = makeI32(pb, loc, trip);
+        Value lt = pb.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt, idx, bound);
+        pb.create<simt::dialect::ConditionOp>(loc, lt, ValueRange{acc, idx});
+    }
+    {
+        auto &body = loop.getBodyRegion().front();
+        OpBuilder bb(&body, body.begin());
+        Value acc = body.getArgument(0);
+        Value idx = body.getArgument(1);
+        Value inner = (depth + 1 < maxDepth && st.rng.coin())
+                          ? buildPattern(bb, loc, st, depth + 1, maxDepth)
+                          : idx;
+        Value sum = bb.create<arith::AddIOp>(loc, acc, inner);
+        Value one = makeI32(bb, loc, 1);
+        Value nextIdx = bb.create<arith::AddIOp>(loc, idx, one);
+        emitWaveCount(bb, loc, st, makeBool(bb, loc, true), idx);
+        bb.create<simt::dialect::YieldOp>(loc, ValueRange{sum, nextIdx});
+    }
+    return loop.getResult(0);
+}
+
+static Value buildPattern(OpBuilder &b, Location loc, BuildState &st,
+                          unsigned depth, unsigned maxDepth) {
+    if (depth >= maxDepth)
+        return buildValue(b, loc, st);
+    int choice = st.rng.pick(0, 2); // 0 leaf, 1 if, 2 loop
+    if (choice == 0)
+        return buildValue(b, loc, st);
+    if (choice == 1)
+        return buildIf(b, loc, st, depth, maxDepth);
+    return buildLoop(b, loc, st, depth, maxDepth);
+}
 } // namespace
 
 mlir::OwningOpRef<mlir::ModuleOp>
@@ -282,10 +422,7 @@ createRandomizedModule(mlir::MLIRContext &context,
 mlir::OwningOpRef<mlir::ModuleOp>
 createRicherRandomModule(mlir::MLIRContext &context,
                          const GeneratorConfig &cfg) {
-    if (cfg.seed == 0)
-        return createDeterministicIfLoopModule(context, cfg);
-
-    RNG rng(cfg.seed);
+    RNG rng(cfg.seed == 0 ? 1 : cfg.seed);
 
     ModuleOp module = ModuleOp::create(UnknownLoc::get(&context));
     auto &modBlock = module.getBodyRegion().front();
@@ -308,139 +445,15 @@ createRicherRandomModule(mlir::MLIRContext &context,
     Value tid =
         builder.create<simt::dialect::DispatchThreadIdOp>(loc, builder.getI32Type());
 
-    // Outer predicate: choose parity or range.
-    Value outerCond;
-    if (rng.coin()) {
-        Value two = builder.create<arith::ConstantIntOp>(loc, 2, 32);
-        Value rem = builder.create<arith::RemSIOp>(loc, tid, two);
-        Value zero = builder.create<arith::ConstantIntOp>(loc, 0, 32);
-        outerCond =
-            builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, rem, zero);
-    } else {
-        int k = rng.pick(1, std::max<int>(1, static_cast<int>(cfg.numThreads[0])));
-        Value ck = builder.create<arith::ConstantIntOp>(loc, k, 32);
-        outerCond =
-            builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt, tid, ck);
-    }
+    BuildState st{cfg, rng, /*waveId=*/0, tid, outMain, outWave};
 
-    auto ifOp = builder.create<simt::dialect::IfOp>(
-        loc, TypeRange{builder.getI32Type()}, outerCond, /*withElseRegion=*/true);
-    if (ifOp.getThenRegion().empty())
-        ifOp.getThenRegion().push_back(new Block());
-    if (ifOp.getElseRegion().empty())
-        ifOp.getElseRegion().push_back(new Block());
-
-    // Then branch: loop with random trip count and optional inner if; emit wave
-    // op inside the loop using iteration in the index.
-    {
-        auto &thenBlock = ifOp.getThenRegion().front();
-        OpBuilder thenB(&thenBlock, thenBlock.begin());
-        Value zero = thenB.create<arith::ConstantIntOp>(loc, 0, 32);
-        Value initI = thenB.create<arith::ConstantIntOp>(loc, 0, 32);
-        int trip = std::max(1, rng.pick(1, static_cast<int>(cfg.maxTripCount)));
-        auto loop = thenB.create<simt::dialect::LoopOp>(
-            loc, TypeRange{builder.getI32Type(), builder.getI32Type()},
-            ValueRange{zero, initI});
-        if (loop.getPrepareRegion().empty()) {
-            auto *prepBlock = new Block();
-            prepBlock->addArguments({builder.getI32Type(), builder.getI32Type()},
-                                    SmallVector<Location>{loc, loc});
-            loop.getPrepareRegion().push_back(prepBlock);
-        }
-        if (loop.getBodyRegion().empty()) {
-            auto *bodyBlock = new Block();
-            bodyBlock->addArguments({builder.getI32Type(), builder.getI32Type()},
-                                    SmallVector<Location>{loc, loc});
-            loop.getBodyRegion().push_back(bodyBlock);
-        }
-        {
-            auto &prep = loop.getPrepareRegion().front();
-            OpBuilder prepB(&prep, prep.begin());
-            Value acc = prep.getArgument(0);
-            Value i = prep.getArgument(1);
-            Value cTrip = prepB.create<arith::ConstantIntOp>(loc, trip, 32);
-            Value lt =
-                prepB.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt, i, cTrip);
-            prepB.create<simt::dialect::ConditionOp>(loc, lt, ValueRange{acc, i});
-        }
-        {
-            auto &body = loop.getBodyRegion().front();
-            OpBuilder bodyB(&body, body.begin());
-            Value acc = body.getArgument(0);
-            Value i = body.getArgument(1);
-            Value sum = bodyB.create<arith::AddIOp>(loc, acc, i);
-            Value one = bodyB.create<arith::ConstantIntOp>(loc, 1, 32);
-            Value next = bodyB.create<arith::AddIOp>(loc, i, one);
-
-            // Wave op in loop body: predicate tid % 2 == 0, index includes iter.
-            int stride = 64;
-            int waveIdLoop = rng.pick(0, 3);
-            Value twoL = bodyB.create<arith::ConstantIntOp>(loc, 2, 32);
-            Value remL = bodyB.create<arith::RemSIOp>(loc, tid, twoL);
-            Value zeroL = bodyB.create<arith::ConstantIntOp>(loc, 0, 32);
-            Value evenL = bodyB.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, remL, zeroL);
-            Value baseL = bodyB.create<arith::ConstantIntOp>(loc, waveIdLoop * stride, 32);
-            Value iterStride = bodyB.create<arith::ConstantIntOp>(loc, stride, 32);
-            Value iterOffset = bodyB.create<arith::MulIOp>(loc, i, iterStride);
-            Value idxLoop = bodyB.create<arith::AddIOp>(loc, baseL,
-                                                        bodyB.create<arith::AddIOp>(loc, tid, iterOffset));
-            Value countL =
-                bodyB.create<simt::dialect::WaveCountBitsOp>(loc, builder.getI32Type(), evenL);
-            bodyB.create<simt::dialect::BufferStoreOp>(loc, outWave, idxLoop, countL);
-
-            if (rng.coin()) {
-                int r = rng.pick(0, 2);
-                Value three = bodyB.create<arith::ConstantIntOp>(loc, 3, 32);
-                Value rem3 = bodyB.create<arith::RemSIOp>(loc, tid, three);
-                Value cr = bodyB.create<arith::ConstantIntOp>(loc, r, 32);
-                Value innerCond = bodyB.create<arith::CmpIOp>(
-                    loc, arith::CmpIPredicate::eq, rem3, cr);
-                auto innerIf = bodyB.create<simt::dialect::IfOp>(
-                    loc, TypeRange{builder.getI32Type(), builder.getI32Type()},
-                    innerCond, /*withElse=*/true);
-                if (innerIf.getThenRegion().empty())
-                    innerIf.getThenRegion().push_back(new Block());
-                if (innerIf.getElseRegion().empty())
-                    innerIf.getElseRegion().push_back(new Block());
-                {
-                    auto &innerThen = innerIf.getThenRegion().front();
-                    OpBuilder ib(&innerThen, innerThen.begin());
-                    ib.create<simt::dialect::YieldOp>(loc, ValueRange{sum, next});
-                }
-                {
-                    auto &innerElse = innerIf.getElseRegion().front();
-                    OpBuilder ib(&innerElse, innerElse.begin());
-                    ib.create<simt::dialect::YieldOp>(loc, ValueRange{sum, next});
-                }
-                bodyB.create<simt::dialect::YieldOp>(loc, innerIf.getResults());
-            } else {
-                bodyB.create<simt::dialect::YieldOp>(loc, ValueRange{sum, next});
-            }
-        }
-        Value loopVal = loop.getResult(0);
-        thenB.create<simt::dialect::YieldOp>(loc, ValueRange{loopVal});
-    }
-    {
-        auto &elseBlock = ifOp.getElseRegion().front();
-        OpBuilder elseB(&elseBlock, elseBlock.begin());
-        elseB.create<simt::dialect::YieldOp>(loc, ValueRange{tid});
-    }
-
-    Value val = ifOp.getResult(0);
-    builder.setInsertionPointToEnd(entry);
-    builder.create<simt::dialect::BufferStoreOp>(loc, outMain, tid, val);
-
-    int stride = 64;
-    // Wave in else branch: tid < k', stored at waveId1*stride + tid.
-    {
-        int k2 = rng.pick(1, std::max<int>(1, cfg.numThreads[0]));
-        int waveId1 = rng.pick(4, 7);
-        Value ck2 = builder.create<arith::ConstantIntOp>(loc, k2, 32);
-        Value lt = builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt, tid, ck2);
-        Value base = builder.create<arith::ConstantIntOp>(loc, waveId1 * stride, 32);
-        Value idx = builder.create<arith::AddIOp>(loc, base, tid);
-        Value count = builder.create<simt::dialect::WaveCountBitsOp>(loc, builder.getI32Type(), lt);
-        builder.create<simt::dialect::BufferStoreOp>(loc, outWave, idx, count);
+    int roots = rng.pick(1, 3);
+    for (int r = 0; r < roots; ++r) {
+        Value val = buildPattern(builder, loc, st, /*depth=*/0, /*maxDepth=*/3);
+        int lanes = static_cast<int>(cfg.numThreads[0]);
+        Value offset = makeI32(builder, loc, r * lanes);
+        Value idx = builder.create<arith::AddIOp>(loc, tid, offset);
+        builder.create<simt::dialect::BufferStoreOp>(loc, outMain, idx, val);
     }
 
     builder.create<func::ReturnOp>(loc);

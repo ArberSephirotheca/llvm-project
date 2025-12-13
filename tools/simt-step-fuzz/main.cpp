@@ -26,6 +26,8 @@ int main(int argc, char **argv) {
         llvm::cl::init(4));
     llvm::cl::opt<bool> dumpIR("print-ir", llvm::cl::desc("Print generated MLIR"),
                                llvm::cl::init(false));
+    llvm::cl::opt<bool> runInterp("run", llvm::cl::desc("Run generated module in interpreter"),
+                                  llvm::cl::init(false));
     llvm::cl::opt<std::uint64_t> seedOpt("seed", llvm::cl::desc("Seed for RNG (0=deterministic)"),
                                          llvm::cl::init(0));
     llvm::cl::ParseCommandLineOptions(argc, argv, "simt-step fuzz driver\n");
@@ -61,6 +63,9 @@ int main(int argc, char **argv) {
         module->print(llvm::outs());
         llvm::outs() << "\n";
     }
+
+    if (!runInterp)
+        return 0;
 
     auto &entry = func.getBody().front();
     simt::semantics::SimpleProgramRunner runner;
