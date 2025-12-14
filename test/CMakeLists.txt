@@ -29,3 +29,7 @@ target_link_libraries(simple-program-runner PRIVATE
 add_test(NAME simple_interpreter_if
   COMMAND simple-program-runner ${CMAKE_CURRENT_SOURCE_DIR}/simple-interpreter/if_else.mlir)
 set_tests_properties(simple_interpreter_if PROPERTIES PASS_REGULAR_EXPRESSION "1")
+
+add_test(NAME fuzz_supported_ops
+  COMMAND /bin/sh -c
+          "${CMAKE_BINARY_DIR}/tools/simt-step-fuzz/simt-step-fuzz --lanes=4 --seed=5 --print-ir | grep -E 'arith\\.subi|arith\\.muli' && exit 1 || exit 0")
