@@ -715,8 +715,13 @@ private:
         }
 
         auto *entry = findLoopEntry(waveCtx, blockCtx->loopOp);
-        if (!entry || !entry->loopFrame)
+        if (!entry || !entry->loopFrame) {
+            llvm::errs() << "[CPS] handleLoopPrepareTerminator missing loop frame "
+                         << "lane=" << lane << " key=" << key.block
+                         << " seq=" << key.sequenceId << "\n";
+            logMergeStackState<ValueType, StepType>(waveCtx);
             llvm::report_fatal_error("handleLoopPrepareTerminator: missing loop frame");
+        }
         auto &loopFrame = *entry->loopFrame;
 
         std::uint64_t laneBit = 1ull << lane;
@@ -822,6 +827,14 @@ private:
             }
         }
         handleReconvergence(wave, waveCtx, key, lane);
+        if (entry && entry->loopFrame) {
+            bool loopDone =
+                entry->expectedMask != 0
+                    ? (entry->completedMask == entry->expectedMask)
+                    : entry->pendingChildren.empty();
+            if (loopDone)
+                waveCtx.mergeStack.pop_back();
+        }
         return StepType::halt();
     }
 
@@ -866,10 +879,29 @@ private:
 
         llvm::SmallVector<ValueType, 4> nextCarried;
         nextCarried.reserve(yieldOp.getNumOperands());
+        auto envIt = blockCtx->valueEnvs.find(lane);
+        if (envIt == blockCtx->valueEnvs.end()) {
+            llvm::errs() << "[CPS] handleLoopYield missing value env for lane=" << lane
+                         << " seq=" << key.sequenceId << " block=" << key.block << "\n";
+        }
         for (mlir::Value v : yieldOp.getOperands()) {
             auto valOrErr =
                 evaluateValue(waveCtx, key, v, lane, blockCtx->activeMask);
             if (!valOrErr) {
+                llvm::errs() << "[CPS] handleLoopYield eval failure lane=" << lane
+                             << " seq=" << key.sequenceId << " block=" << key.block
+                             << " operand=" << nextCarried.size() << "\n";
+                if (envIt != blockCtx->valueEnvs.end()) {
+                    llvm::errs() << "  env entries: " << envIt->second.size() << "\n";
+                    for (auto &kv : envIt->second) {
+                        llvm::errs() << "    - ";
+                        kv.first.print(llvm::errs());
+                        llvm::errs() << "\n";
+                    }
+                }
+                v.print(llvm::errs());
+                llvm::errs() << "\n";
+                llvm::consumeError(valOrErr.takeError());
                 llvm::report_fatal_error("handleLoopYield: failed to evaluate yield operand");
             }
             nextCarried.push_back(*valOrErr);
@@ -1944,7 +1976,8 @@ private:
                 continue;
             it->completedMask |= (1ull << lane);
             if (it->completedMask == it->expectedMask) {
-                waveCtx.mergeStack.pop_back();
+                auto base = it.base();
+                waveCtx.mergeStack.erase(--base);
             }
             break;
         }
@@ -2004,8 +2037,11 @@ private:
                 }
             }
             // Pop the merge entry only when all expected lanes are done.
-            if (it->expectedMask != 0 ? (it->completedMask == it->expectedMask)
-                                      : it->pendingChildren.empty()) {
+            bool shouldPop = !it->loopFrame &&
+                             (it->expectedMask != 0
+                                  ? (it->completedMask == it->expectedMask)
+                                  : it->pendingChildren.empty());
+            if (shouldPop) {
                 if (EnableCPSDebugLogs) {
                     auto fmt = [&](std::uint64_t m) { return formatMaskBits(m, 32); };
                     llvm::errs() << "[CPS] pop merge parent=" << parentKey.block
@@ -2051,7 +2087,8 @@ private:
                 //         }
                 //     }
                 // }
-                waveCtx.mergeStack.pop_back();
+                auto base = it.base();
+                waveCtx.mergeStack.erase(--base);
             }
             dumpReadyQueue();
             break;

@@ -182,6 +182,28 @@ SimpleSemantics::evaluateValue(mlir::Value value,
         return v;
     }
 
+    if (auto addOp = value.getDefiningOp<mlir::arith::AddIOp>()) {
+        auto step = handleAddIOp(addOp, context);
+        if (!step.isProduce())
+            return llvm::make_error<llvm::StringError>(
+                "addi did not produce a value", llvm::inconvertibleErrorCode());
+        auto state = std::move(step).takeState();
+        auto v = std::get<typename StepType::Produce>(std::move(state)).value;
+        logVal(v);
+        return v;
+    }
+
+    if (auto remOp = value.getDefiningOp<mlir::arith::RemSIOp>()) {
+        auto step = handleRemSIOp(remOp, context);
+        if (!step.isProduce())
+            return llvm::make_error<llvm::StringError>(
+                "remsi did not produce a value", llvm::inconvertibleErrorCode());
+        auto state = std::move(step).takeState();
+        auto v = std::get<typename StepType::Produce>(std::move(state)).value;
+        logVal(v);
+        return v;
+    }
+
     if (auto laneOp = value.getDefiningOp<simt::dialect::LaneIdOp>()) {
         auto v = SemValue::fromInt32(static_cast<int32_t>(context.laneId));
         logVal(v);
@@ -199,6 +221,33 @@ SimpleSemantics::evaluateValue(mlir::Value value,
         return llvm::make_error<llvm::StringError>(
             "dispatch_thread_id: unsupported result type",
             llvm::inconvertibleErrorCode());
+    }
+
+    if (auto waveOp =
+            value.getDefiningOp<simt::dialect::WaveCountBitsOp>()) {
+        auto step = handleWaveCountBits(waveOp, context);
+        if (!step.isProduce())
+            return llvm::make_error<llvm::StringError>(
+                "wave_count_bits did not produce a value",
+                llvm::inconvertibleErrorCode());
+        auto state = std::move(step).takeState();
+        auto v = std::get<typename StepType::Produce>(std::move(state)).value;
+        logVal(v);
+        return v;
+    }
+
+    if (value.getDefiningOp() &&
+        value.getDefiningOp()->getName().getStringRef() ==
+            "simt_step.buffer.load") {
+        auto step = handleBufferLoad(value.getDefiningOp(), context);
+        if (!step.isProduce())
+            return llvm::make_error<llvm::StringError>(
+                "buffer.load did not produce a value",
+                llvm::inconvertibleErrorCode());
+        auto state = std::move(step).takeState();
+        auto v = std::get<typename StepType::Produce>(std::move(state)).value;
+        logVal(v);
+        return v;
     }
 
     if (auto loopOp = value.getDefiningOp<simt::dialect::LoopOp>()) {
@@ -247,6 +296,10 @@ SimpleSemantics::evaluateValue(mlir::Value value,
         if (it != context.valueEnv->end())
             return it->second;
     }
+
+    llvm::errs() << "simple semantics: unsupported SSA value\n";
+    value.print(llvm::errs());
+    llvm::errs() << "\n";
 
     return llvm::make_error<llvm::StringError>(
         "simple semantics: unsupported SSA value", llvm::inconvertibleErrorCode());
@@ -374,7 +427,7 @@ auto SimpleSemantics::handleBufferLoad(mlir::Operation *op,
     int64_t idx = idxOrErr->asInt64();
     auto it = globalMemory().find(idx);
     if (it == globalMemory().end())
-        return StepType::halt();
+        llvm::report_fatal_error("buffer.load: missing value at index");
     return StepType::produce(it->second);
 }
 

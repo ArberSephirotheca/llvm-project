@@ -13,6 +13,7 @@
 #include <mlir/IR/DialectRegistry.h>
 #include <mlir/Support/LogicalResult.h>
 
+#include <cstdlib>
 #include <llvm/Support/CommandLine.h>
 #include <llvm/Support/InitLLVM.h>
 #include <llvm/Support/raw_ostream.h>
@@ -66,6 +67,9 @@ int main(int argc, char **argv) {
 
     if (!runInterp)
         return 0;
+
+    if (std::getenv("SIMT_CPS_DEBUG"))
+        simt::semantics::EnableCPSDebugLogs = true;
 
     auto &entry = func.getBody().front();
     simt::semantics::SimpleProgramRunner runner;
