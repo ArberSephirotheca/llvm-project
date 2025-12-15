@@ -383,15 +383,17 @@ auto SimpleSemantics::handleUnknown(mlir::Operation *op) -> StepType {
 }
 
 namespace {
-static llvm::DenseMap<int64_t, SemValue> &globalMemory() {
-    static llvm::DenseMap<int64_t, SemValue> mem;
+static llvm::DenseMap<mlir::Value, llvm::DenseMap<int64_t, SemValue>>
+&globalMemory() {
+    static llvm::DenseMap<mlir::Value, llvm::DenseMap<int64_t, SemValue>> mem;
     return mem;
 }
 } // namespace
 
 void SimpleSemantics::clearMemory() { globalMemory().clear(); }
 
-const llvm::DenseMap<int64_t, SemValue> &SimpleSemantics::memory() {
+const llvm::DenseMap<mlir::Value, llvm::DenseMap<int64_t, SemValue>> &
+SimpleSemantics::memory() {
     return globalMemory();
 }
 
@@ -411,7 +413,8 @@ auto SimpleSemantics::handleBufferStore(mlir::Operation *op,
         return StepType::halt();
     }
     int64_t idx = idxOrErr->asInt64();
-    globalMemory()[idx] = *valOrErr;
+    mlir::Value res = op->getOperand(0);
+    globalMemory()[res][idx] = *valOrErr;
     return StepType::halt();
 }
 
@@ -425,8 +428,12 @@ auto SimpleSemantics::handleBufferLoad(mlir::Operation *op,
         return StepType::halt();
     }
     int64_t idx = idxOrErr->asInt64();
-    auto it = globalMemory().find(idx);
-    if (it == globalMemory().end())
+    mlir::Value res = op->getOperand(0);
+    auto resIt = globalMemory().find(res);
+    if (resIt == globalMemory().end())
+        llvm::report_fatal_error("buffer.load: missing value at index");
+    auto it = resIt->second.find(idx);
+    if (it == resIt->second.end())
         llvm::report_fatal_error("buffer.load: missing value at index");
     return StepType::produce(it->second);
 }

@@ -113,8 +113,14 @@ int main(int argc, char **argv) {
     const auto &mem = simt::semantics::SimpleSemantics::memory();
     if (!mem.empty()) {
         llvm::outs() << "Memory:\n";
-        for (const auto &kv : mem) {
-            llvm::outs() << "  [" << kv.first << "] = " << kv.second.asInt64() << "\n";
+        for (const auto &resIt : mem) {
+            std::string bufName = "res";
+            if (auto barg = mlir::dyn_cast<BlockArgument>(resIt.first))
+                bufName = "buf" + std::to_string(barg.getArgNumber());
+            for (const auto &kv : resIt.second) {
+                llvm::outs() << "  " << bufName << "[" << kv.first << "] = "
+                             << kv.second.asInt64() << "\n";
+            }
         }
     }
 

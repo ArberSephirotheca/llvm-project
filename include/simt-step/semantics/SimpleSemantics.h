@@ -6,6 +6,8 @@
 
 #include <mlir/Dialect/Arith/IR/Arith.h>
 #include <mlir/Dialect/Func/IR/FuncOps.h>
+#include <mlir/IR/Value.h>
+#include <llvm/ADT/DenseMap.h>
 #include <llvm/Support/Error.h>
 #include <vector>
 
@@ -22,7 +24,8 @@ public:
                                             SemanticsContext &context);
 
     static void clearMemory();
-    static const llvm::DenseMap<int64_t, ValueType> &memory();
+    static const llvm::DenseMap<mlir::Value, llvm::DenseMap<int64_t, ValueType>> &
+    memory();
 
 private:
     StepType handleConstant(mlir::arith::ConstantOp op);
