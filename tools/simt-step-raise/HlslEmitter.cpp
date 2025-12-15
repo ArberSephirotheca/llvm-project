@@ -203,7 +203,10 @@ struct HlslEmitter {
         names[prep.getArgument(0)] = accName;
         names[prep.getArgument(1)] = iName;
 
-        // Best-effort lowering: use a while loop with explicit break.
+        // Declare induction var and use a while loop with explicit break.
+        emitIndent();
+        os << emitType(loop.getInits()[1].getType()) << " " << iName << " = " << initI
+           << ";\n";
         emitIndent();
         os << "while (true) {\n";
         indent += "  ";
