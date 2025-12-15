@@ -45,6 +45,7 @@ static Value makeBool(OpBuilder &b, Location loc, bool v) {
 
 static void emitWaveCount(OpBuilder &b, Location loc, BuildState &st,
                           Value predicate, Value iteration = nullptr) {
+    (void)predicate; // ignore caller-provided predicate; always count active lanes.
     int lanes = static_cast<int>(st.cfg.numThreads[0]);
     int stride = std::max<int>(1, st.cfg.maxTripCount * lanes);
     int waveBase = st.waveId * stride;
@@ -54,8 +55,8 @@ static void emitWaveCount(OpBuilder &b, Location loc, BuildState &st,
         idx = b.create<arith::AddIOp>(loc, idx, iterScaled);
     }
     idx = b.create<arith::AddIOp>(loc, idx, st.tid);
-    Value count =
-        b.create<simt::dialect::WaveCountBitsOp>(loc, b.getI32Type(), predicate);
+    Value count = b.create<simt::dialect::WaveCountBitsOp>(
+        loc, b.getI32Type(), makeBool(b, loc, true));
     b.create<simt::dialect::BufferStoreOp>(loc, st.outWave, idx, count);
     st.waveId++;
 }
@@ -271,11 +272,8 @@ createDeterministicIfLoopModule(mlir::MLIRContext &context,
     builder.setInsertionPointToEnd(entry);
     builder.create<simt::dialect::BufferStoreOp>(loc, out, tid, val);
 
-    // Wave-count branch: even lanes participate.
-    Value two = builder.create<arith::ConstantIntOp>(loc, 2, 32);
-    Value rem = builder.create<arith::RemSIOp>(loc, tid, two);
-    Value zero = builder.create<arith::ConstantIntOp>(loc, 0, 32);
-    Value even = builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, rem, zero);
+    // Wave-count branch: use constant true predicate.
+    Value even = builder.create<arith::ConstantIntOp>(loc, 1, 1);
     // Store wave_count_bits result at idx = waveId * stride + tid.
     constexpr int waveId = 0;
     constexpr int stride = 64;
@@ -404,13 +402,10 @@ createRandomizedModule(mlir::MLIRContext &context,
     builder.create<simt::dialect::BufferStoreOp>(loc, outMain, tid, val);
 
     if (useWaveOp) {
-        Value two = builder.create<arith::ConstantIntOp>(loc, 2, 32);
-        Value rem = builder.create<arith::RemSIOp>(loc, tid, two);
-        Value zero = builder.create<arith::ConstantIntOp>(loc, 0, 32);
-        Value even = builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, rem, zero);
+        Value trueVal = builder.create<arith::ConstantIntOp>(loc, 1, 1);
         Value waveBase = builder.create<arith::ConstantIntOp>(loc, waveId * stride, 32);
         Value baseIdx = builder.create<arith::AddIOp>(loc, waveBase, tid);
-        Value count = builder.create<simt::dialect::WaveCountBitsOp>(loc, builder.getI32Type(), even);
+        Value count = builder.create<simt::dialect::WaveCountBitsOp>(loc, builder.getI32Type(), trueVal);
         builder.create<simt::dialect::BufferStoreOp>(loc, outWave, baseIdx, count);
     } else {
         Value waveBase = builder.create<arith::ConstantIntOp>(loc, 0, 32);

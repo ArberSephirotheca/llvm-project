@@ -9,6 +9,7 @@ llvm_update_compile_flags(simt-step-fuzz)
 target_link_libraries(simt-step-fuzz
     PRIVATE
         simt-step
+        simt-step-raise-lib
         MLIRIR
         MLIRParser
         MLIRSupport

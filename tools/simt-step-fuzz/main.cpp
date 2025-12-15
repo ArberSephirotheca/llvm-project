@@ -1,8 +1,9 @@
-// Simple driver that generates a deterministic SIMT-Step kernel and runs it
-// through the CPS interpreter, printing per-lane completion.
+// Simple driver that generates a SIMT-Step kernel and optionally raises it to
+// HLSL or runs it through the CPS interpreter.
 
 #include "SimtProgramGenerator.h"
 
+#include "HlslEmitter.h"
 #include "simt-step/Dialect/SimtStep/SimtStepDialect.h"
 #include "simt-step/semantics/SimpleProgram.h"
 #include "simt-step/semantics/SimpleSemantics.h"
@@ -27,6 +28,9 @@ int main(int argc, char **argv) {
         llvm::cl::init(4));
     llvm::cl::opt<bool> dumpIR("print-ir", llvm::cl::desc("Print generated MLIR"),
                                llvm::cl::init(false));
+    llvm::cl::opt<bool> dumpHlsl("raise-hlsl",
+                                 llvm::cl::desc("Print raised HLSL for generated module"),
+                                 llvm::cl::init(false));
     llvm::cl::opt<bool> runInterp("run", llvm::cl::desc("Run generated module in interpreter"),
                                   llvm::cl::init(false));
     llvm::cl::opt<std::uint64_t> seedOpt("seed", llvm::cl::desc("Seed for RNG (0=deterministic)"),
@@ -63,6 +67,11 @@ int main(int argc, char **argv) {
     if (dumpIR) {
         module->print(llvm::outs());
         llvm::outs() << "\n";
+    }
+
+    if (dumpHlsl) {
+        if (failed(simt::raise::emitModuleAsHlsl(*module, llvm::outs())))
+            return 1;
     }
 
     if (!runInterp)
