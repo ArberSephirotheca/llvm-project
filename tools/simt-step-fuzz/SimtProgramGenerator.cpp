@@ -140,7 +140,19 @@ static Value buildLoop(OpBuilder &b, Location loc, BuildState &st, unsigned dept
         OpBuilder pb(&prep, prep.begin());
         Value acc = prep.getArgument(0);
         Value idx = prep.getArgument(1);
-        Value bound = makeI32(pb, loc, trip);
+        // Allow non-uniform loop bounds derived from tid while keeping within maxTripCount.
+        Value bound;
+        if (st.rng.coin()) {
+            int k = std::max(
+                1, std::min<int>(static_cast<int>(st.cfg.maxTripCount),
+                                 st.rng.pick(1, static_cast<int>(st.cfg.maxTripCount))));
+            Value ck = makeI32(pb, loc, k);
+            Value rem = pb.create<arith::RemSIOp>(loc, st.tid, ck);
+            Value one = makeI32(pb, loc, 1);
+            bound = pb.create<arith::AddIOp>(loc, rem, one); // bound in [1, k] <= maxTripCount
+        } else {
+            bound = makeI32(pb, loc, trip);
+        }
         Value lt = pb.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt, idx, bound);
         pb.create<simt::dialect::ConditionOp>(loc, lt, ValueRange{acc, idx});
     }
