@@ -253,10 +253,14 @@ public:
                 SemanticsContext ctx = context;
                 ctx.laneId = lane;
                 WaveContext<ValueType, StepType> *waveCtx = nullptr;
+                DynamicBlock<ValueType, StepType> *blockCtx = nullptr;
                 if (auto waveIt = state_.waves.find(wave); waveIt != state_.waves.end()) {
                     waveCtx = &waveIt->second;
                     if (auto *blk = getBlock(*waveCtx, key)) {
+                        blockCtx = blk;
                         ctx.activeMask = blk->activeMask;
+                        ctx.expectedMask =
+                            blk->expectedMask ? blk->expectedMask : blk->activeMask;
                         auto envIt = blk->valueEnvs.find(lane);
                         if (envIt != blk->valueEnvs.end())
                             ctx.valueEnv = &envIt->second;
@@ -332,17 +336,91 @@ public:
                             std::get_if<typename StepType::Suspend>(&stateVariant)) {
                         Effect effect = std::move(suspend->effect);
                         auto resume = std::move(suspend->resume);
-                        auto chainedResume =
-                            [this, wave, key, resume = std::move(resume), block, nextIt, ctx,
-                             lane]() mutable -> StepType {
-                                StepType resumed = resume();
-                                return makeNextOp(wave, key, block, nextIt, ctx, lane);
-                            };
-                        return StepType::suspend(std::move(effect), std::move(chainedResume));
+
+                        std::function<StepType(StepType)> handleResumed;
+                        handleResumed = [this, wave, key, block, nextIt, ctx, lane,
+                                         isTerminator, hasNext, waveCtx, blockCtx,
+                                         op = &*it, &handleResumed](StepType current)
+                                         mutable -> StepType {
+                            while (true) {
+                                auto resumedState = std::move(current).takeState();
+                                if (auto *cont =
+                                        std::get_if<typename StepType::Continue>(
+                                            &resumedState)) {
+                                    if (!cont->next)
+                                        return StepType::halt();
+                                    current = cont->next();
+                                    continue;
+                                }
+                                if (auto *susp =
+                                        std::get_if<typename StepType::Suspend>(
+                                            &resumedState)) {
+                                    Effect eff = std::move(susp->effect);
+                                    auto innerResume = std::move(susp->resume);
+                                    auto chained = [this, wave, key, block, nextIt, ctx, lane,
+                                                    isTerminator, hasNext, waveCtx, blockCtx,
+                                                    op, innerResume = std::move(innerResume),
+                                                    &handleResumed]() mutable -> StepType {
+                                        return handleResumed(innerResume());
+                                    };
+                                    return StepType::suspend(std::move(eff), std::move(chained));
+                                }
+                                if (auto *prod =
+                                        std::get_if<typename StepType::Produce>(
+                                            &resumedState)) {
+                                    if (blockCtx && op->getNumResults() == 1)
+                                        blockCtx->valueEnvs[lane][op->getResult(0)] =
+                                            prod->value;
+                                    if (!isTerminator && hasNext) {
+                                        return StepType::continueWith(
+                                            [this, wave, key, block, nextIt, ctx, lane]()
+                                            mutable -> StepType {
+                                                return makeNextOp(wave, key, block, nextIt,
+                                                                  ctx, lane);
+                                            });
+                                    }
+                                    if (isTerminator && waveCtx)
+                                        handleReconvergence(wave, *waveCtx, key, lane);
+                                    return StepType::produce(std::move(prod->value));
+                                }
+                                if (std::holds_alternative<typename StepType::Halt>(
+                                        resumedState)) {
+                                    if (!isTerminator && hasNext) {
+                                        return StepType::continueWith(
+                                            [this, wave, key, block, nextIt, ctx, lane]()
+                                            mutable -> StepType {
+                                                return makeNextOp(wave, key, block, nextIt,
+                                                                  ctx, lane);
+                                            });
+                                    }
+                                    if (isTerminator && waveCtx)
+                                        handleReconvergence(wave, *waveCtx, key, lane);
+                                    return StepType::halt();
+                                }
+                                if (!isTerminator && hasNext) {
+                                    return StepType::continueWith(
+                                        [this, wave, key, block, nextIt, ctx, lane]()
+                                        mutable -> StepType {
+                                            return makeNextOp(wave, key, block, nextIt,
+                                                              ctx, lane);
+                                        });
+                                }
+                                return StepType::halt();
+                            }
+                        };
+
+                        return StepType::suspend(
+                            std::move(effect),
+                            [handleResumed = std::move(handleResumed),
+                             resume = std::move(resume)]() mutable -> StepType {
+                                return handleResumed(resume());
+                            });
                     }
 
                     if (auto *prod =
                             std::get_if<typename StepType::Produce>(&stateVariant)) {
+                        if (blockCtx && it->getNumResults() == 1)
+                            blockCtx->valueEnvs[lane][it->getResult(0)] = prod->value;
                         if (!isTerminator && hasNext) {
                             return StepType::continueWith(
                                 [this, wave, key, block, nextIt, ctx, lane]() mutable
@@ -510,7 +588,9 @@ private:
         tuple.reserve(inits.size());
         for (mlir::Value init : inits) {
             auto valueOrErr =
-                evaluateValue(waveCtx, key, init, lane, parentBlock.activeMask);
+                evaluateValue(waveCtx, key, init, lane, parentBlock.activeMask,
+                              parentBlock.expectedMask ? parentBlock.expectedMask
+                                                       : parentBlock.activeMask);
             if (!valueOrErr)
                 llvm::report_fatal_error("handleLoopSplit: failed to evaluate init");
             tuple.push_back(*valueOrErr);
@@ -560,8 +640,9 @@ private:
             parentBlock.expectedMask ? parentBlock.expectedMask : parentBlock.activeMask;
 
         // Evaluate selector for this lane.
-        auto selectorOrErr =
-            evaluateValue(waveCtx, key, switchOp.getSelector(), lane, parentBlock.activeMask);
+        auto selectorOrErr = evaluateValue(
+            waveCtx, key, switchOp.getSelector(), lane, parentBlock.activeMask,
+            parentBlock.expectedMask ? parentBlock.expectedMask : parentBlock.activeMask);
         std::int64_t selectorValue = 0;
         if (selectorOrErr)
             selectorValue = selectorOrErr->asInt64();
@@ -655,7 +736,9 @@ private:
             if (indexed.index() < inits.size()) {
                 auto valOrErr =
                     evaluateValue(waveCtx, key, inits[indexed.index()], lane,
-                                  parentBlock.activeMask);
+                                  parentBlock.activeMask,
+                                  parentBlock.expectedMask ? parentBlock.expectedMask
+                                                           : parentBlock.activeMask);
                 if (!valOrErr)
                     llvm::report_fatal_error("handleSwitchSplit: failed to evaluate init");
                 env[indexed.value()] = *valOrErr;
@@ -675,6 +758,8 @@ private:
 
         SemanticsContext laneCtx = context;
         laneCtx.activeMask = childCtx.activeMask;
+        laneCtx.expectedMask =
+            childCtx.expectedMask ? childCtx.expectedMask : childCtx.activeMask;
         laneCtx.laneId = lane;
         mlir::Block *childBlock = const_cast<mlir::Block *>(childKey.block);
         StepType childStep =
@@ -725,8 +810,9 @@ private:
         auto &loopFrame = *entry->loopFrame;
 
         std::uint64_t laneBit = 1ull << lane;
-        auto condOrErr = evaluateBool(waveCtx, key, condOp.getCondition(), lane,
-                                      blockCtx->activeMask);
+        auto condOrErr = evaluateBool(
+            waveCtx, key, condOp.getCondition(), lane, blockCtx->activeMask,
+            blockCtx->expectedMask ? blockCtx->expectedMask : blockCtx->activeMask);
         bool takeBody = false;
         if (condOrErr)
             takeBody = *condOrErr;
@@ -736,8 +822,9 @@ private:
         llvm::SmallVector<ValueType, 4> forwarded;
         forwarded.reserve(condOp.getForwarded().size());
         for (mlir::Value v : condOp.getForwarded()) {
-            auto valOrErr =
-                evaluateValue(waveCtx, key, v, lane, blockCtx->activeMask);
+            auto valOrErr = evaluateValue(
+                waveCtx, key, v, lane, blockCtx->activeMask,
+                blockCtx->expectedMask ? blockCtx->expectedMask : blockCtx->activeMask);
             if (!valOrErr) {
                 llvm::report_fatal_error("handleLoopPrepareTerminator: failed to evaluate forwarded value");
             }
@@ -797,6 +884,8 @@ private:
 
             SemanticsContext laneCtx = context;
             laneCtx.activeMask = bodyCtx.activeMask;
+            laneCtx.expectedMask =
+                bodyCtx.expectedMask ? bodyCtx.expectedMask : bodyCtx.activeMask;
             laneCtx.laneId = lane;
             mlir::Block *childBlock = const_cast<mlir::Block *>(bodyKey.block);
             StepType childStep =
@@ -886,7 +975,9 @@ private:
         }
         for (mlir::Value v : yieldOp.getOperands()) {
             auto valOrErr =
-                evaluateValue(waveCtx, key, v, lane, blockCtx->activeMask);
+                evaluateValue(waveCtx, key, v, lane, blockCtx->activeMask,
+                              blockCtx->expectedMask ? blockCtx->expectedMask
+                                                     : blockCtx->activeMask);
             if (!valOrErr) {
                 llvm::errs() << "[CPS] handleLoopYield eval failure lane=" << lane
                              << " seq=" << key.sequenceId << " block=" << key.block
@@ -979,6 +1070,8 @@ private:
 
         SemanticsContext laneCtx = context;
         laneCtx.activeMask = prepCtx.activeMask;
+        laneCtx.expectedMask =
+            prepCtx.expectedMask ? prepCtx.expectedMask : prepCtx.activeMask;
         laneCtx.laneId = lane;
         mlir::Block *prepBlock = const_cast<mlir::Block *>(nextPrep.block);
         StepType childStep =
@@ -1028,7 +1121,9 @@ private:
         nextCarried.reserve(contOp.getNumOperands());
         for (mlir::Value v : contOp.getOperands()) {
             auto valOrErr =
-                evaluateValue(waveCtx, key, v, lane, blockCtx->activeMask);
+                evaluateValue(waveCtx, key, v, lane, blockCtx->activeMask,
+                              blockCtx->expectedMask ? blockCtx->expectedMask
+                                                     : blockCtx->activeMask);
             if (!valOrErr) {
                 llvm::report_fatal_error("handleLoopContinue: failed to evaluate continue operand");
             }
@@ -1093,6 +1188,8 @@ private:
 
         SemanticsContext laneCtx = context;
         laneCtx.activeMask = prepCtx.activeMask;
+        laneCtx.expectedMask =
+            prepCtx.expectedMask ? prepCtx.expectedMask : prepCtx.activeMask;
         laneCtx.laneId = lane;
         mlir::Block *prepBlock = const_cast<mlir::Block *>(nextPrep.block);
         StepType childStep =
@@ -1208,7 +1305,9 @@ private:
                 continue;
             }
             auto valOrErr =
-                evaluateValue(waveCtx, key, v, lane, blockCtx->activeMask);
+                evaluateValue(waveCtx, key, v, lane, blockCtx->activeMask,
+                              blockCtx->expectedMask ? blockCtx->expectedMask
+                                                     : blockCtx->activeMask);
             if (!valOrErr)
                 llvm::report_fatal_error("handleIfYield: failed to evaluate yield operand");
             values.push_back(*valOrErr);
@@ -1252,7 +1351,10 @@ private:
         llvm::SmallVector<ValueType, 4> results;
         results.reserve(breakOp.getNumOperands());
         for (mlir::Value v : breakOp.getOperands()) {
-            auto valOrErr = evaluateValue(waveCtx, key, v, lane, blockCtx->activeMask);
+            auto valOrErr = evaluateValue(
+                waveCtx, key, v, lane, blockCtx->activeMask,
+                blockCtx->expectedMask ? blockCtx->expectedMask
+                                       : blockCtx->activeMask);
             if (!valOrErr) {
                 llvm::consumeError(valOrErr.takeError());
                 results.push_back(ValueType{});
@@ -1309,7 +1411,10 @@ private:
         llvm::SmallVector<ValueType, 4> results;
         results.reserve(breakOp.getNumOperands());
         for (mlir::Value v : breakOp.getOperands()) {
-            auto valOrErr = evaluateValue(waveCtx, key, v, lane, blockCtx->activeMask);
+            auto valOrErr = evaluateValue(
+                waveCtx, key, v, lane, blockCtx->activeMask,
+                blockCtx->expectedMask ? blockCtx->expectedMask
+                                       : blockCtx->activeMask);
             if (!valOrErr) {
                 llvm::consumeError(valOrErr.takeError());
                 results.push_back(ValueType{});
@@ -1385,8 +1490,11 @@ private:
             parentBlock.expectedMask;
 
         // Evaluate predicate only for this lane.
-        auto condOrErr = evaluateBool(waveCtx, key, ifOp.getCondition(),
-                                      lane, parentBlock.activeMask);
+        auto condOrErr =
+            evaluateBool(waveCtx, key, ifOp.getCondition(), lane,
+                         parentBlock.activeMask,
+                         parentBlock.expectedMask ? parentBlock.expectedMask
+                                                  : parentBlock.activeMask);
         bool takeThen = false;
         bool takeElse = false;
         if (condOrErr) {
@@ -1511,6 +1619,8 @@ private:
 
             SemanticsContext laneCtx = context;
             laneCtx.activeMask = child.activeMask;
+            laneCtx.expectedMask =
+                child.expectedMask ? child.expectedMask : child.activeMask;
             laneCtx.laneId = lane;
             mlir::Block *childBlock = const_cast<mlir::Block *>(thenKey.block);
             StepType childStep = makeNextOp(wave, thenKey, childBlock,
@@ -1576,6 +1686,8 @@ private:
 
             SemanticsContext laneCtx = context;
             laneCtx.activeMask = child.activeMask;
+            laneCtx.expectedMask =
+                child.expectedMask ? child.expectedMask : child.activeMask;
             laneCtx.laneId = lane;
             mlir::Block *childBlock = const_cast<mlir::Block *>(elseKey.block);
             StepType childStep = makeNextOp(wave, elseKey, childBlock,
@@ -1603,10 +1715,12 @@ private:
                                             const DynamicBlockKey &blockKey,
                                             mlir::Value value,
                                             LaneId lane,
-                                            std::uint64_t activeMask) {
+                                            std::uint64_t activeMask,
+                                            std::uint64_t expectedMask) {
         SemanticsContext ctx;
         ctx.laneId = lane;
         ctx.activeMask = activeMask;
+        ctx.expectedMask = expectedMask;
         if (auto *blockCtx = getBlock(waveCtx, blockKey)) {
             auto envIt = blockCtx->valueEnvs.find(lane);
             if (envIt != blockCtx->valueEnvs.end())
@@ -1638,8 +1752,10 @@ private:
                                       const DynamicBlockKey &blockKey,
                                       mlir::Value value,
                                       LaneId lane,
-                                      std::uint64_t activeMask) {
-        auto valOrErr = evaluateValue(waveCtx, blockKey, value, lane, activeMask);
+                                      std::uint64_t activeMask,
+                                      std::uint64_t expectedMask) {
+        auto valOrErr =
+            evaluateValue(waveCtx, blockKey, value, lane, activeMask, expectedMask);
         if (!valOrErr)
             return valOrErr.takeError();
         return valOrErr->asBool();

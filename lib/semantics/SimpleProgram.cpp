@@ -62,6 +62,7 @@ llvm::Error SimpleProgramRunner::runBlock(mlir::Block *block,
 
         SemanticsContext laneContext = context;
         laneContext.activeMask = laneMask;
+        laneContext.expectedMask = laneMask;
         laneContext.laneId = lane;
 
         StepType initialStep =
@@ -90,6 +91,7 @@ SimpleProgramRunner::buildStepForIterator(const DynamicBlockKey &key,
         auto blockIt = waveIt->second.blocks.find(key);
         if (blockIt != waveIt->second.blocks.end()) {
             context.activeMask = blockIt->second.activeMask;
+            context.expectedMask = blockIt->second.expectedMask;
             context.valueEnv = &blockIt->second.valueEnvs[lane];
         }
     }

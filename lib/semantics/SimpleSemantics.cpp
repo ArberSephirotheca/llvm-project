@@ -447,11 +447,25 @@ auto SimpleSemantics::handleWaveCountBits(mlir::Operation *op,
         llvm::consumeError(predOrErr.takeError());
         return StepType::halt();
     }
-    std::uint64_t mask = context.activeMask;
-    std::int32_t count = 0;
-    if (predOrErr->asBool())
-        count = static_cast<std::int32_t>(std::popcount(mask));
-    return StepType::produce(SemValue::fromInt32(count));
+    std::uint64_t expectedMask =
+        context.expectedMask ? context.expectedMask : context.activeMask;
+    // Treat as a collective: wait for all lanes in expectedMask, then produce the
+    // same count for each lane. Predicate participates in the collective; if it is
+    // false, the lane still waits but returns 0 to match the HLSL contract.
+    constexpr std::uint32_t WaveCountBitsOp = 1;
+    CollectiveEffect effect;
+    effect.operation = WaveCountBitsOp;
+    effect.activeMask = expectedMask;
+    // Use the op address as a token to disambiguate multiple sites.
+    effect.token = static_cast<std::uint32_t>(
+        reinterpret_cast<std::uintptr_t>(op) ^
+        (reinterpret_cast<std::uintptr_t>(op) >> 32));
+    bool pred = predOrErr->asBool();
+    return StepType::suspend(effect, [expectedMask, pred]() -> StepType {
+        std::int32_t count =
+            pred ? static_cast<std::int32_t>(std::popcount(expectedMask)) : 0;
+        return StepType::produce(SemValue::fromInt32(count));
+    });
 }
 
 namespace {
