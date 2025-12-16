@@ -218,19 +218,48 @@ struct HlslEmitter {
         names[body.getArgument(0)] = accName;
         names[body.getArgument(1)] = iName;
         std::string nextAcc, nextI;
+        enum class TermKind { Yield, Continue, Break };
+        TermKind term = TermKind::Yield;
         for (auto &op : body) {
             if (auto y = dyn_cast<simt::dialect::YieldOp>(op)) {
                 nextAcc = emitValue(y.getOperand(0));
                 nextI = emitValue(y.getOperand(1));
+                term = TermKind::Yield;
+                break;
+            }
+            if (auto cont = dyn_cast<simt::dialect::ContinueOp>(op)) {
+                nextAcc = emitValue(cont.getOperand(0));
+                nextI = emitValue(cont.getOperand(1));
+                emitIndent();
+                os << accName << " = " << nextAcc << ";\n";
+                emitIndent();
+                os << iName << " = " << nextI << ";\n";
+                emitIndent();
+                os << "continue;\n";
+                term = TermKind::Continue;
+                break;
+            }
+            if (auto br = dyn_cast<simt::dialect::BreakOp>(op)) {
+                nextAcc = emitValue(br.getOperand(0));
+                nextI = emitValue(br.getOperand(1));
+                emitIndent();
+                os << accName << " = " << nextAcc << ";\n";
+                emitIndent();
+                os << iName << " = " << nextI << ";\n";
+                emitIndent();
+                os << "break;\n";
+                term = TermKind::Break;
                 break;
             }
             if (failed(emitOp(&op)))
                 return failure();
         }
-        emitIndent();
-        os << accName << " = " << nextAcc << ";\n";
-        emitIndent();
-        os << iName << " = " << nextI << ";\n";
+        if (term == TermKind::Yield) {
+            emitIndent();
+            os << accName << " = " << nextAcc << ";\n";
+            emitIndent();
+            os << iName << " = " << nextI << ";\n";
+        }
         indent.pop_back();
         indent.pop_back();
         emitIndent();

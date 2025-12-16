@@ -156,7 +156,18 @@ static Value buildLoop(OpBuilder &b, Location loc, BuildState &st, unsigned dept
         Value one = makeI32(bb, loc, 1);
         Value nextIdx = bb.create<arith::AddIOp>(loc, idx, one);
         emitWaveCount(bb, loc, st, makeBool(bb, loc, true), idx);
-        bb.create<simt::dialect::YieldOp>(loc, ValueRange{sum, nextIdx});
+        // Optionally emit a structured continue/break to exercise loop control.
+        bool emitCtrl = st.rng.coin();
+        bool doBreak = st.rng.coin();
+        if (emitCtrl && doBreak) {
+            // Break out with the current accum/next index.
+            bb.create<simt::dialect::BreakOp>(loc, ValueRange{sum, nextIdx});
+        } else if (emitCtrl) {
+            // Continue with updated carried values to avoid stalling the loop.
+            bb.create<simt::dialect::ContinueOp>(loc, ValueRange{sum, nextIdx});
+        } else {
+            bb.create<simt::dialect::YieldOp>(loc, ValueRange{sum, nextIdx});
+        }
     }
     return loop.getResult(0);
 }
