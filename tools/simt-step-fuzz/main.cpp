@@ -14,7 +14,9 @@
 #include <mlir/IR/DialectRegistry.h>
 #include <mlir/Support/LogicalResult.h>
 
+#include <algorithm>
 #include <cstdlib>
+#include <vector>
 #include <llvm/Support/CommandLine.h>
 #include <llvm/Support/InitLLVM.h>
 #include <llvm/Support/raw_ostream.h>
@@ -117,10 +119,15 @@ int main(int argc, char **argv) {
             std::string bufName = "res";
             if (auto barg = mlir::dyn_cast<BlockArgument>(resIt.first))
                 bufName = "buf" + std::to_string(barg.getArgNumber());
-            for (const auto &kv : resIt.second) {
+            std::vector<std::pair<int64_t, simt::semantics::SemValue>> entries;
+            entries.reserve(resIt.second.size());
+            for (const auto &kv : resIt.second)
+                entries.push_back(kv);
+            std::sort(entries.begin(), entries.end(),
+                      [](const auto &a, const auto &b) { return a.first < b.first; });
+            for (const auto &kv : entries)
                 llvm::outs() << "  " << bufName << "[" << kv.first << "] = "
                              << kv.second.asInt64() << "\n";
-            }
         }
     }
 

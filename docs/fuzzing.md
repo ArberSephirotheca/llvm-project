@@ -122,7 +122,8 @@ Mirrors the MiniHLSL generator but builds MLIR/SimtStep directly.
   3) Nested if inside loop: outer `tid < 2`, inner `tid == 0` vs else.
   All paths end in `simt_step.yield` and `func.return`.
 - **Observable side-effect for oracle**:
-  - Signature: `func @main(%seed: i32, %out: !simt_step.resource<Global, i32>)`.
-  - Each lane computes a value (pure function of `tid`/constants), guards `tid < buf_len`, and writes once to `%out[tid]`. No overlapping writes → deterministic across seeds/schedules and GPU vs interpreter.
+  - Signature: `func @main(%out_main: !simt_step.resource<Global, i32>, %out_wave: !simt_step.resource<Global, i32>)`.
+  - `out_main` holds the main results; each generated “root” writes to `out_main[root * lanes + tid]`, so per-root writes never overlap across lanes.
+  - `out_wave` logs each `wave_count_bits` site. For wave id `w`, `waveBase = w * (maxTripCount * lanes)`, and each dynamic loop iteration `i` uses `waveBase + i * lanes + tid`. This stride keeps iterations, lanes, and call sites disjoint, so looped wave-counts do not collide.
 - **Randomization knobs**: max depth, max ops, max trip count, pattern choice, whether to insert nested ifs or break/continue; keep counts small for speed.
 - **Trace use**: optional JSON trace from the CPS interpreter (block key+seq, masks, decisions) to target mutations and aid shrinking; per-lane buffer contents are the primary oracle.***

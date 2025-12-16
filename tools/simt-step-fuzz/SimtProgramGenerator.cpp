@@ -51,7 +51,10 @@ static void emitWaveCount(OpBuilder &b, Location loc, BuildState &st,
     int waveBase = st.waveId * stride;
     Value idx = makeI32(b, loc, waveBase);
     if (iteration) {
-        Value iterScaled = iteration; // avoid mul to stay within supported ops
+        // iterScaled = iteration * lanes using adds (avoid mul).
+        Value iterScaled = iteration;
+        for (int i = 1; i < lanes; ++i)
+            iterScaled = b.create<arith::AddIOp>(loc, iterScaled, iteration);
         idx = b.create<arith::AddIOp>(loc, idx, iterScaled);
     }
     idx = b.create<arith::AddIOp>(loc, idx, st.tid);

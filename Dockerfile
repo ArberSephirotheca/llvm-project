@@ -20,7 +20,8 @@ RUN cmake -G Ninja -S llvm -B build \
       -DLLVM_ENABLE_PROJECTS="clang;lld;mlir" \
       -DLLVM_TARGETS_TO_BUILD="X86" \
       -DLLVM_ENABLE_ASSERTIONS=OFF
-RUN cmake --build build
+ARG LLVM_JOBS=4
+RUN cmake --build build -- -j${LLVM_JOBS} -l${LLVM_JOBS}
 RUN cmake --install build --prefix /opt/llvm-install
 
 # Stage 2: build SIMT-Step against the installed LLVM
