@@ -333,7 +333,6 @@ LogicalResult emitModuleAsHlsl(ModuleOp module, llvm::raw_ostream &os) {
         return failure();
     }
 
-    os << "[numthreads(";
     int64_t ntx = 1, nty = 1, ntz = 1;
     if (auto attr = func->getAttr("simt.num_threads")) {
         if (auto denseAttr = mlir::dyn_cast<DenseI64ArrayAttr>(attr)) {
@@ -356,20 +355,44 @@ LogicalResult emitModuleAsHlsl(ModuleOp module, llvm::raw_ostream &os) {
             }
         }
     }
-    os << ntx << "," << nty << "," << ntz << ")]\n";
 
-    os << "void main(";
     SmallVector<BlockArgument> resources;
     for (auto arg : func.getArguments()) {
         if (mlir::isa<simt::dialect::ResourceType>(arg.getType()))
             resources.push_back(arg);
     }
     for (unsigned i = 0; i < resources.size(); ++i) {
-        os << "RWStructuredBuffer<int> buf" << i << " : register(u" << i << ")";
-        if (i + 1 != resources.size())
-            os << ", ";
+        os << "RWStructuredBuffer<" << "int" << "> buf" << i
+           << " : register(u" << i << ");\n";
     }
     if (!resources.empty())
+        os << "\n";
+
+    os << "[numthreads(" << ntx << "," << nty << "," << ntz << ")]\n";
+    os << "void main(";
+    bool first = true;
+    for (auto arg : func.getArguments()) {
+        if (mlir::isa<simt::dialect::ResourceType>(arg.getType()))
+            continue;
+        if (!first)
+            os << ", ";
+        first = false;
+        if (auto intTy = mlir::dyn_cast<IntegerType>(arg.getType())) {
+            unsigned w = intTy.getWidth();
+            if (w == 1)
+                os << "bool";
+            else if (w == 32)
+                os << "uint";
+            else
+                os << "int";
+        } else if (arg.getType().isIndex()) {
+            os << "uint";
+        } else {
+            os << "int";
+        }
+        os << " arg" << arg.getArgNumber();
+    }
+    if (!first)
         os << ", ";
     os << "uint3 tid : SV_DispatchThreadID) {\n";
 
