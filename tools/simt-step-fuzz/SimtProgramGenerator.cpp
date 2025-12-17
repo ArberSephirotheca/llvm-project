@@ -115,6 +115,27 @@ static Value buildSwitch(OpBuilder &b, Location loc, BuildState &st,
     int numCases = st.rng.pick(2, 4);
     bool includeDefault = st.rng.coin();
     bool allowFallthrough = st.rng.coin();
+    llvm::SmallVector<bool, 4> emitWaveInCase;
+    emitWaveInCase.reserve(numCases);
+    bool anyWave = false;
+    bool allWave = true;
+    for (int i = 0; i < numCases; ++i) {
+        bool pick = st.rng.coin();
+        emitWaveInCase.push_back(pick);
+        anyWave |= pick;
+        allWave &= pick;
+    }
+    if (!anyWave)
+        emitWaveInCase[st.rng.pick(0, numCases - 1)] = true;
+    if (allWave)
+        emitWaveInCase[st.rng.pick(0, numCases - 1)] = false;
+
+    llvm::SmallVector<bool, 4> fallthroughCase;
+    fallthroughCase.reserve(numCases);
+    for (int i = 0; i < numCases; ++i) {
+        bool fall = allowFallthrough && (i + 1) < numCases && st.rng.coin();
+        fallthroughCase.push_back(fall);
+    }
 
     int selectorMod = numCases;
     Value selector = st.tid;
@@ -156,17 +177,17 @@ static Value buildSwitch(OpBuilder &b, Location loc, BuildState &st,
         OpBuilder cb(&blk, blk.begin());
         Value incoming = blk.getArgument(0);
         Value val;
-        if (allowFallthrough && (caseIdx + 1) < numCases && st.rng.coin()) {
+        if (fallthroughCase[caseIdx]) {
             // Simulate fallthrough by yielding the incoming value unchanged.
             val = incoming;
         } else {
             val = buildPattern(cb, loc, st, depth + 1, maxDepth);
         }
+        if (emitWaveInCase[caseIdx])
+            emitWaveCount(cb, loc, st, makeBool(cb, loc, true));
         cb.create<simt::dialect::YieldOp>(loc, ValueRange{val});
         ++caseIdx;
     }
-
-    emitWaveCount(b, loc, st, makeBool(b, loc, true));
     return switchOp.getResult(0);
 }
 

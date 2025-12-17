@@ -663,17 +663,13 @@ private:
                                                                  caseRegion.end()));
         if (caseIdx >= numBlocks)
             caseIdx = numBlocks ? (numBlocks - 1) : 0;
-        mlir::Block *targetBlock = nullptr;
-        unsigned idx = 0;
-        for (mlir::Block &b : caseRegion) {
-            if (idx == caseIdx) {
-                targetBlock = &b;
-                break;
-            }
-            ++idx;
-        }
-        if (!targetBlock)
+        llvm::SmallVector<mlir::Block *, 4> caseBlocks;
+        caseBlocks.reserve(numBlocks);
+        for (mlir::Block &b : caseRegion)
+            caseBlocks.push_back(&b);
+        if (caseIdx >= caseBlocks.size())
             llvm::report_fatal_error("handleSwitchSplit: target block not found");
+        mlir::Block *targetBlock = caseBlocks[caseIdx];
 
         std::uint32_t baseSeq = key.sequenceId + 1;
         std::uint32_t seq = baseSeq + caseIdx;
@@ -683,16 +679,58 @@ private:
         childCtx.block = childKey.block;
         childCtx.sequenceId = childKey.sequenceId;
         childCtx.parentKey = key;
+        std::uint64_t laneMask =
+            parentExpected ? (parentExpected & laneBit) : laneBit;
         if (childCtx.expectedMask == 0)
-            childCtx.expectedMask = parentExpected;
+            childCtx.expectedMask = parentExpected ? parentExpected : laneMask;
+        childCtx.expectedMask |= laneMask;
         childCtx.activeMask |= laneBit;
         childCtx.completedMask &= ~laneBit;
-        childCtx.kind = caseIdx < caseValues.size()
-                            ? DynamicBlockKind::SwitchCase
-                            : DynamicBlockKind::SwitchDefault;
+        childCtx.kind = (caseIdx + 1 == numBlocks)
+                            ? DynamicBlockKind::SwitchDefault
+                            : DynamicBlockKind::SwitchCase;
         childCtx.switchOp = switchOp.getOperation();
         childCtx.loopOp = nullptr;
         childCtx.ifOp = nullptr;
+
+        auto isDynamicDescendant = [&](const DynamicBlockKey &desc,
+                                       const DynamicBlockKey &ancestor) {
+            DynamicBlockKey cur = desc;
+            while (true) {
+                if (cur == ancestor)
+                    return true;
+                auto it = waveCtx.blocks.find(cur);
+                if (it == waveCtx.blocks.end() || !it->second.parentKey)
+                    return false;
+                cur = *it->second.parentKey;
+            }
+        };
+
+        for (unsigned otherIdx = 0; otherIdx < numBlocks; ++otherIdx) {
+            if (otherIdx == caseIdx)
+                continue;
+            DynamicBlockKey otherKey{caseBlocks[otherIdx], baseSeq + otherIdx};
+            auto &otherCtx = waveCtx.blocks[otherKey];
+            otherCtx.block = otherKey.block;
+            otherCtx.sequenceId = otherKey.sequenceId;
+            otherCtx.parentKey = key;
+            otherCtx.switchOp = switchOp.getOperation();
+            otherCtx.loopOp = nullptr;
+            otherCtx.ifOp = nullptr;
+            otherCtx.kind = (otherIdx + 1 == numBlocks)
+                                ? DynamicBlockKind::SwitchDefault
+                                : DynamicBlockKind::SwitchCase;
+            if (otherCtx.expectedMask == 0)
+                otherCtx.expectedMask =
+                    parentExpected ? parentExpected : laneMask;
+            otherCtx.expectedMask &= ~laneMask;
+            for (auto &kv : waveCtx.blocks) {
+                const auto &descKey = kv.first;
+                auto &desc = kv.second;
+                if (isDynamicDescendant(descKey, otherKey))
+                    desc.expectedMask &= ~laneMask;
+            }
+        }
 
         auto nextIt = std::next(it);
         StepType parentCont = StepType::continueWith(

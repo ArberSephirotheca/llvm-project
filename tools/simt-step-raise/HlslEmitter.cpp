@@ -14,6 +14,7 @@
 #include <optional>
 #include <string>
 #include <utility>
+#include <vector>
 
 using namespace mlir;
 
@@ -270,6 +271,88 @@ struct HlslEmitter {
         return success();
     }
 
+    LogicalResult emitSwitch(simt::dialect::SwitchOp sw) {
+        unsigned numResults = sw.getNumResults();
+        auto initVals = sw.getInitialValues();
+        std::vector<std::string> resultNames;
+        resultNames.reserve(numResults);
+
+        for (unsigned i = 0; i < numResults; ++i) {
+            std::string name = makeTmp();
+            resultNames.push_back(name);
+            emitIndent();
+            os << emitType(sw.getResultTypes()[i]) << " " << name;
+            if (i < initVals.size())
+                os << " = " << get(initVals[i]);
+            os << ";\n";
+        }
+
+        emitIndent();
+        os << "switch (" << get(sw.getSelector()) << ") {\n";
+        indent += "  ";
+
+        auto caseValues = sw.getCaseValues();
+        auto &region = sw.getCaseBody();
+        unsigned numBlocks =
+            static_cast<unsigned>(std::distance(region.begin(), region.end()));
+        unsigned blockIndex = 0;
+
+        for (auto &blk : region) {
+            bool isDefault = (blockIndex + 1 == numBlocks);
+            emitIndent();
+            if (isDefault)
+                os << "default:\n";
+            else
+                os << "case " << caseValues[blockIndex] << ":\n";
+            indent += "  ";
+            emitIndent();
+            os << "{\n";
+            indent += "  ";
+
+            for (unsigned i = 0; i < blk.getNumArguments(); ++i) {
+                if (i < initVals.size())
+                    names[blk.getArgument(i)] = get(initVals[i]);
+            }
+
+            bool sawYield = false;
+            for (auto &op : blk) {
+                if (auto y = dyn_cast<simt::dialect::YieldOp>(op)) {
+                    if (y.getNumOperands() != numResults)
+                        return failure();
+                    for (unsigned i = 0; i < numResults; ++i) {
+                        emitIndent();
+                        os << resultNames[i] << " = " << get(y.getOperand(i)) << ";\n";
+                    }
+                    sawYield = true;
+                    break;
+                }
+                if (failed(emitOp(&op)))
+                    return failure();
+            }
+            if (!sawYield)
+                return failure();
+            emitIndent();
+            os << "break;\n";
+
+            indent.pop_back();
+            indent.pop_back();
+            emitIndent();
+            os << "}\n";
+            indent.pop_back();
+            indent.pop_back();
+            ++blockIndex;
+        }
+
+        indent.pop_back();
+        indent.pop_back();
+        emitIndent();
+        os << "}\n";
+
+        for (unsigned i = 0; i < numResults; ++i)
+            names[sw.getResult(i)] = resultNames[i];
+        return success();
+    }
+
     LogicalResult emitOp(Operation *op) {
         if (auto c = dyn_cast<arith::ConstantIntOp>(op)) {
             names[c.getResult()] = formatConst(c);
@@ -295,6 +378,8 @@ struct HlslEmitter {
             return emitIf(ifOp);
         if (auto loop = dyn_cast<simt::dialect::LoopOp>(op))
             return emitLoop(loop);
+        if (auto sw = dyn_cast<simt::dialect::SwitchOp>(op))
+            return emitSwitch(sw);
         if (auto load = dyn_cast<simt::dialect::BufferLoadOp>(op)) {
             std::string tmp = makeTmp();
             names[load.getResult()] = tmp;
