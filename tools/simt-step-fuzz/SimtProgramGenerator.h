@@ -16,10 +16,8 @@ struct GeneratorConfig {
 };
 
 /// Build a simple, deterministic SIMT-Step module:
-/// - func @main(%out_main: !simt_step.resource<Global, i32>,
-///              %out_wave: !simt_step.resource<Global, i32>)
+/// - func @main(%out_wave: !simt_step.resource<Global, i32>)
 /// - if (tid == 0) run a small counted loop, else use tid
-/// - store per-lane value to %out_main[tid]
 /// - in a branch, emit wave_count_bits with a deterministic predicate and
 ///   store its result to %out_wave at an index derived from waveId/iter/tid
 mlir::OwningOpRef<mlir::ModuleOp>

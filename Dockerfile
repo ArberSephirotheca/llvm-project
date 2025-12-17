@@ -19,6 +19,7 @@ RUN cmake -G Ninja -S llvm -B build \
       -DCMAKE_BUILD_TYPE=Release \
       -DLLVM_ENABLE_PROJECTS="clang;lld;mlir" \
       -DLLVM_TARGETS_TO_BUILD="X86" \
+      -DLLVM_INSTALL_UTILS=ON \
       -DLLVM_ENABLE_ASSERTIONS=OFF
 ARG LLVM_JOBS=4
 RUN cmake --build build -- -j${LLVM_JOBS} -l${LLVM_JOBS}

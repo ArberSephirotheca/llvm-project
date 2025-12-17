@@ -31,7 +31,6 @@ struct BuildState {
     RNG &rng;
     int waveId = 0;
     Value tid;
-    Value outMain;
     Value outWave;
 };
 
@@ -211,7 +210,7 @@ createDeterministicIfLoopModule(mlir::MLIRContext &context,
         &context, simt::dialect::MemorySpace::Global, builder.getI32Type());
     llvm::errs() << "[fuzz-gen] resource type ready\n";
 
-    auto funcType = builder.getFunctionType({resTy, resTy}, {});
+    auto funcType = builder.getFunctionType({resTy}, {});
     auto func = builder.create<func::FuncOp>(loc, "main", funcType);
     llvm::errs() << "[fuzz-gen] func created\n";
     func->setAttr("simt.num_threads",
@@ -221,8 +220,7 @@ createDeterministicIfLoopModule(mlir::MLIRContext &context,
     auto *entry = func.addEntryBlock();
     builder.setInsertionPointToStart(entry);
 
-    Value outMain = entry->getArgument(0);
-    Value outWave = entry->getArgument(1);
+    Value outWave = entry->getArgument(0);
     Value tid =
         builder.create<simt::dialect::DispatchThreadIdOp>(loc, builder.getI32Type());
     llvm::errs() << "[fuzz-gen] tid op created\n";
@@ -293,10 +291,7 @@ createDeterministicIfLoopModule(mlir::MLIRContext &context,
     }
     llvm::errs() << "[fuzz-gen] else built\n";
 
-    Value val = ifOp.getResult(0);
-    Value out = outMain;
     builder.setInsertionPointToEnd(entry);
-    builder.create<simt::dialect::BufferStoreOp>(loc, out, tid, val);
 
     // Wave-count branch: use constant true predicate.
     Value even = builder.create<arith::ConstantIntOp>(loc, 1, 1);
@@ -336,7 +331,7 @@ createRandomizedModule(mlir::MLIRContext &context,
 
     auto resTy = simt::dialect::ResourceType::get(
         &context, simt::dialect::MemorySpace::Global, builder.getI32Type());
-    auto funcType = builder.getFunctionType({resTy, resTy}, {});
+    auto funcType = builder.getFunctionType({resTy}, {});
     auto func = builder.create<func::FuncOp>(loc, "main", funcType);
     func->setAttr("simt.num_threads",
                   builder.getI64ArrayAttr(
@@ -345,8 +340,7 @@ createRandomizedModule(mlir::MLIRContext &context,
     auto *entry = func.addEntryBlock();
     builder.setInsertionPointToStart(entry);
 
-    Value outMain = entry->getArgument(0);
-    Value outWave = entry->getArgument(1);
+    Value outWave = entry->getArgument(0);
     Value tid =
         builder.create<simt::dialect::DispatchThreadIdOp>(loc, builder.getI32Type());
 
@@ -423,9 +417,7 @@ createRandomizedModule(mlir::MLIRContext &context,
         elseB.create<simt::dialect::YieldOp>(loc, ValueRange{tid});
     }
 
-    Value val = ifOp.getResult(0);
     builder.setInsertionPointToEnd(entry);
-    builder.create<simt::dialect::BufferStoreOp>(loc, outMain, tid, val);
 
     if (useWaveOp) {
         Value trueVal = builder.create<arith::ConstantIntOp>(loc, 1, 1);
@@ -456,7 +448,7 @@ createRicherRandomModule(mlir::MLIRContext &context,
 
     auto resTy = simt::dialect::ResourceType::get(
         &context, simt::dialect::MemorySpace::Global, builder.getI32Type());
-    auto funcType = builder.getFunctionType({resTy, resTy}, {});
+    auto funcType = builder.getFunctionType({resTy}, {});
     auto func = builder.create<func::FuncOp>(loc, "main", funcType);
     func->setAttr("simt.num_threads",
                   builder.getI64ArrayAttr(
@@ -465,20 +457,15 @@ createRicherRandomModule(mlir::MLIRContext &context,
     auto *entry = func.addEntryBlock();
     builder.setInsertionPointToStart(entry);
 
-    Value outMain = entry->getArgument(0);
-    Value outWave = entry->getArgument(1);
+    Value outWave = entry->getArgument(0);
     Value tid =
         builder.create<simt::dialect::DispatchThreadIdOp>(loc, builder.getI32Type());
 
-    BuildState st{cfg, rng, /*waveId=*/0, tid, outMain, outWave};
+    BuildState st{cfg, rng, /*waveId=*/0, tid, outWave};
 
     int roots = rng.pick(1, 3);
     for (int r = 0; r < roots; ++r) {
-        Value val = buildPattern(builder, loc, st, /*depth=*/0, /*maxDepth=*/3);
-        int lanes = static_cast<int>(cfg.numThreads[0]);
-        Value offset = makeI32(builder, loc, r * lanes);
-        Value idx = builder.create<arith::AddIOp>(loc, tid, offset);
-        builder.create<simt::dialect::BufferStoreOp>(loc, outMain, idx, val);
+        (void)buildPattern(builder, loc, st, /*depth=*/0, /*maxDepth=*/3);
     }
 
     builder.create<func::ReturnOp>(loc);
