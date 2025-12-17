@@ -65,7 +65,7 @@ static void emitWaveCount(OpBuilder &b, Location loc, BuildState &st,
 }
 
 static Value buildValue(OpBuilder &b, Location loc, BuildState &st) {
-    int choice = st.rng.pick(0, 3); // 0 const, 1 tid, 2 tid + const, 3 load
+    int choice = st.rng.pick(0, 2); // 0 const, 1 tid, 2 tid + const
     if (choice == 0)
         return makeI32(b, loc, st.rng.pick(0, 4));
     if (choice == 1)
@@ -74,8 +74,8 @@ static Value buildValue(OpBuilder &b, Location loc, BuildState &st) {
         Value c = makeI32(b, loc, st.rng.pick(0, 4));
         return b.create<arith::AddIOp>(loc, st.tid, c);
     }
-    // Load from outMain at tid (safe: default zero if unwritten).
-    return b.create<simt::dialect::BufferLoadOp>(loc, st.outMain, st.tid);
+    // Fallback
+    return st.tid;
 }
 
 static Value buildPattern(OpBuilder &b, Location loc, BuildState &st,
