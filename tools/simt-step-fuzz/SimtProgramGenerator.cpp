@@ -110,6 +110,66 @@ static Value buildValue(OpBuilder &b, Location loc, BuildState &st) {
 static Value buildPattern(OpBuilder &b, Location loc, BuildState &st,
                           unsigned depth, unsigned maxDepth);
 
+static Value buildSwitch(OpBuilder &b, Location loc, BuildState &st,
+                         unsigned depth, unsigned maxDepth) {
+    int numCases = st.rng.pick(2, 4);
+    bool includeDefault = st.rng.coin();
+    bool allowFallthrough = st.rng.coin();
+
+    int selectorMod = numCases;
+    Value selector = st.tid;
+    if (selectorMod > 1) {
+        Value mod = makeI32(b, loc, selectorMod);
+        selector = b.create<arith::RemSIOp>(loc, selector, mod);
+    }
+
+    Value initVal = buildValue(b, loc, st);
+
+    llvm::SmallVector<int64_t, 4> caseValues;
+    caseValues.reserve(numCases);
+    if (includeDefault) {
+        // Use a sentinel for the last case so it acts as the default block.
+        for (int i = 0; i < numCases - 1; ++i)
+            caseValues.push_back(i);
+        caseValues.push_back(-1);
+    } else {
+        for (int i = 0; i < numCases; ++i)
+            caseValues.push_back(i);
+    }
+
+    auto switchOp = b.create<simt::dialect::SwitchOp>(
+        loc, TypeRange{b.getI32Type()}, selector, ValueRange{initVal}, caseValues);
+
+    auto &region = switchOp.getCaseBody();
+    while (static_cast<int>(region.getBlocks().size()) < numCases) {
+        auto *blk = new Block();
+        blk->addArgument(b.getI32Type(), loc);
+        region.push_back(blk);
+    }
+
+    int caseIdx = 0;
+    for (auto &blk : region) {
+        if (caseIdx >= numCases)
+            break;
+        if (blk.getNumArguments() == 0)
+            blk.addArgument(b.getI32Type(), loc);
+        OpBuilder cb(&blk, blk.begin());
+        Value incoming = blk.getArgument(0);
+        Value val;
+        if (allowFallthrough && (caseIdx + 1) < numCases && st.rng.coin()) {
+            // Simulate fallthrough by yielding the incoming value unchanged.
+            val = incoming;
+        } else {
+            val = buildPattern(cb, loc, st, depth + 1, maxDepth);
+        }
+        cb.create<simt::dialect::YieldOp>(loc, ValueRange{val});
+        ++caseIdx;
+    }
+
+    emitWaveCount(b, loc, st, makeBool(b, loc, true));
+    return switchOp.getResult(0);
+}
+
 static Value buildIf(OpBuilder &b, Location loc, BuildState &st, unsigned depth,
                      unsigned maxDepth) {
     Value cond = makeNonUniformCond(b, loc, st.rng, st.cfg, st.tid);
@@ -197,12 +257,14 @@ static Value buildPattern(OpBuilder &b, Location loc, BuildState &st,
                           unsigned depth, unsigned maxDepth) {
     if (depth >= maxDepth)
         return buildValue(b, loc, st);
-    int choice = st.rng.pick(0, 2); // 0 leaf, 1 if, 2 loop
+    int choice = st.rng.pick(0, 3); // 0 leaf, 1 if, 2 loop, 3 switch
     if (choice == 0)
         return buildValue(b, loc, st);
     if (choice == 1)
         return buildIf(b, loc, st, depth, maxDepth);
-    return buildLoop(b, loc, st, depth, maxDepth);
+    if (choice == 2)
+        return buildLoop(b, loc, st, depth, maxDepth);
+    return buildSwitch(b, loc, st, depth, maxDepth);
 }
 } // namespace
 
