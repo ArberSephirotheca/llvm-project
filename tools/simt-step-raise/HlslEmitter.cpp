@@ -7,6 +7,7 @@
 
 #include <mlir/Dialect/Arith/IR/Arith.h>
 #include <mlir/Dialect/Func/IR/FuncOps.h>
+#include <mlir/IR/BuiltinAttributes.h>
 #include <mlir/IR/BuiltinOps.h>
 #include <mlir/IR/Block.h>
 
@@ -334,12 +335,25 @@ LogicalResult emitModuleAsHlsl(ModuleOp module, llvm::raw_ostream &os) {
 
     os << "[numthreads(";
     int64_t ntx = 1, nty = 1, ntz = 1;
-    if (auto denseAttr = func->getAttrOfType<DenseI64ArrayAttr>("simt.num_threads")) {
-        auto vals = denseAttr.asArrayRef();
-        if (vals.size() == 3) {
-            ntx = vals[0];
-            nty = vals[1];
-            ntz = vals[2];
+    if (auto attr = func->getAttr("simt.num_threads")) {
+        if (auto denseAttr = mlir::dyn_cast<DenseI64ArrayAttr>(attr)) {
+            auto vals = denseAttr.asArrayRef();
+            if (vals.size() == 3) {
+                ntx = vals[0];
+                nty = vals[1];
+                ntz = vals[2];
+            }
+        } else if (auto arrayAttr = mlir::dyn_cast<ArrayAttr>(attr)) {
+            if (arrayAttr.size() == 3) {
+                auto x = mlir::dyn_cast<IntegerAttr>(arrayAttr[0]);
+                auto y = mlir::dyn_cast<IntegerAttr>(arrayAttr[1]);
+                auto z = mlir::dyn_cast<IntegerAttr>(arrayAttr[2]);
+                if (x && y && z) {
+                    ntx = x.getInt();
+                    nty = y.getInt();
+                    ntz = z.getInt();
+                }
+            }
         }
     }
     os << ntx << "," << nty << "," << ntz << ")]\n";

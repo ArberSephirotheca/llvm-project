@@ -42,6 +42,36 @@ static Value makeBool(OpBuilder &b, Location loc, bool v) {
     return b.create<arith::ConstantIntOp>(loc, v ? 1 : 0, 1);
 }
 
+static Value makeNonUniformCond(OpBuilder &b, Location loc, RNG &rng,
+                                const GeneratorConfig &cfg, Value tid) {
+    int lanes = static_cast<int>(cfg.numThreads[0]);
+    if (lanes < 2)
+        return makeBool(b, loc, true);
+    if (rng.coin()) {
+        Value two = makeI32(b, loc, 2);
+        Value rem = b.create<arith::RemSIOp>(loc, tid, two);
+        Value zero = makeI32(b, loc, 0);
+        return b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, rem, zero);
+    }
+    int k = rng.pick(1, lanes - 1);
+    Value ck = makeI32(b, loc, k);
+    return b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt, tid, ck);
+}
+
+static Value makeNonUniformBound(OpBuilder &b, Location loc, RNG &rng,
+                                 const GeneratorConfig &cfg, Value tid,
+                                 int fallback) {
+    int lanes = static_cast<int>(cfg.numThreads[0]);
+    int maxTrip = static_cast<int>(cfg.maxTripCount);
+    if (lanes < 2 || maxTrip < 2)
+        return makeI32(b, loc, fallback);
+    int k = rng.pick(2, maxTrip);
+    Value ck = makeI32(b, loc, k);
+    Value rem = b.create<arith::RemSIOp>(loc, tid, ck);
+    Value one = makeI32(b, loc, 1);
+    return b.create<arith::AddIOp>(loc, rem, one);
+}
+
 static void emitWaveCount(OpBuilder &b, Location loc, BuildState &st,
                           Value predicate, Value iteration = nullptr) {
     (void)predicate; // ignore caller-provided predicate; always count active lanes.
@@ -82,17 +112,7 @@ static Value buildPattern(OpBuilder &b, Location loc, BuildState &st,
 
 static Value buildIf(OpBuilder &b, Location loc, BuildState &st, unsigned depth,
                      unsigned maxDepth) {
-    Value cond;
-    if (st.rng.coin()) {
-        Value two = makeI32(b, loc, 2);
-        Value rem = b.create<arith::RemSIOp>(loc, st.tid, two);
-        Value zero = makeI32(b, loc, 0);
-        cond = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, rem, zero);
-    } else {
-        int k = std::max(1, st.rng.pick(1, static_cast<int>(st.cfg.numThreads[0])));
-        Value ck = makeI32(b, loc, k);
-        cond = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt, st.tid, ck);
-    }
+    Value cond = makeNonUniformCond(b, loc, st.rng, st.cfg, st.tid);
     auto ifOp = b.create<simt::dialect::IfOp>(loc, TypeRange{b.getI32Type()},
                                               cond, /*withElseRegion=*/true);
     if (ifOp.getThenRegion().empty())
@@ -139,19 +159,9 @@ static Value buildLoop(OpBuilder &b, Location loc, BuildState &st, unsigned dept
         OpBuilder pb(&prep, prep.begin());
         Value acc = prep.getArgument(0);
         Value idx = prep.getArgument(1);
-        // Allow non-uniform loop bounds derived from tid while keeping within maxTripCount.
-        Value bound;
-        if (st.rng.coin()) {
-            int k = std::max(
-                1, std::min<int>(static_cast<int>(st.cfg.maxTripCount),
-                                 st.rng.pick(1, static_cast<int>(st.cfg.maxTripCount))));
-            Value ck = makeI32(pb, loc, k);
-            Value rem = pb.create<arith::RemSIOp>(loc, st.tid, ck);
-            Value one = makeI32(pb, loc, 1);
-            bound = pb.create<arith::AddIOp>(loc, rem, one); // bound in [1, k] <= maxTripCount
-        } else {
-            bound = makeI32(pb, loc, trip);
-        }
+        // Non-uniform loop bounds derived from tid while keeping within maxTripCount.
+        Value bound =
+            makeNonUniformBound(pb, loc, st.rng, st.cfg, st.tid, trip);
         Value lt = pb.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt, idx, bound);
         pb.create<simt::dialect::ConditionOp>(loc, lt, ValueRange{acc, idx});
     }
@@ -263,9 +273,21 @@ createDeterministicIfLoopModule(mlir::MLIRContext &context,
             OpBuilder prepB(&prep, prep.begin());
             Value acc = prep.getArgument(0);
             Value i = prep.getArgument(1);
-            Value c4 = prepB.create<arith::ConstantIntOp>(loc, 4, 32);
+            int k = static_cast<int>(cfg.maxTripCount);
+            if (k < 2) {
+                k = 1;
+            }
+            Value ck = prepB.create<arith::ConstantIntOp>(loc, k, 32);
+            Value bound;
+            if (k == 1) {
+                bound = prepB.create<arith::ConstantIntOp>(loc, 1, 32);
+            } else {
+                Value rem = prepB.create<arith::RemSIOp>(loc, tid, ck);
+                Value one = prepB.create<arith::ConstantIntOp>(loc, 1, 32);
+                bound = prepB.create<arith::AddIOp>(loc, rem, one);
+            }
             Value lt =
-                prepB.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt, i, c4);
+                prepB.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt, i, bound);
             prepB.create<simt::dialect::ConditionOp>(loc, lt, ValueRange{acc, i});
         }
         // body region
@@ -318,7 +340,6 @@ createRandomizedModule(mlir::MLIRContext &context,
     RNG rng(cfg.seed);
 
     // Randomize a few knobs.
-    int branchMode = rng.pick(0, 2); // 0: tid==0, 1: tid%2==0, 2: tid<k
     int tripCount = std::max(1, rng.pick(1, static_cast<int>(cfg.maxTripCount)));
     bool useWaveOp = rng.coin();
     int waveId = rng.pick(0, 3);
@@ -344,21 +365,8 @@ createRandomizedModule(mlir::MLIRContext &context,
     Value tid =
         builder.create<simt::dialect::DispatchThreadIdOp>(loc, builder.getI32Type());
 
-    // Build branch predicate.
-    Value cond;
-    if (branchMode == 0) {
-        Value c0 = builder.create<arith::ConstantIntOp>(loc, 0, 32);
-        cond = builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, tid, c0);
-    } else if (branchMode == 1) {
-        Value two = builder.create<arith::ConstantIntOp>(loc, 2, 32);
-        Value rem = builder.create<arith::RemSIOp>(loc, tid, two);
-        Value zero = builder.create<arith::ConstantIntOp>(loc, 0, 32);
-        cond = builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, rem, zero);
-    } else {
-        int k = rng.pick(1, std::max<int>(1, cfg.numThreads[0]));
-        Value ck = builder.create<arith::ConstantIntOp>(loc, k, 32);
-        cond = builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt, tid, ck);
-    }
+    // Build a non-uniform branch predicate.
+    Value cond = makeNonUniformCond(builder, loc, rng, cfg, tid);
 
     auto ifOp = builder.create<simt::dialect::IfOp>(
         loc, TypeRange{builder.getI32Type()}, cond, /*withElseRegion=*/true);
@@ -393,9 +401,10 @@ createRandomizedModule(mlir::MLIRContext &context,
             OpBuilder prepB(&prep, prep.begin());
             Value acc = prep.getArgument(0);
             Value i = prep.getArgument(1);
-            Value cTrip = prepB.create<arith::ConstantIntOp>(loc, tripCount, 32);
+            Value bound =
+                makeNonUniformBound(prepB, loc, rng, cfg, tid, tripCount);
             Value lt =
-                prepB.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt, i, cTrip);
+                prepB.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt, i, bound);
             prepB.create<simt::dialect::ConditionOp>(loc, lt, ValueRange{acc, i});
         }
         {
