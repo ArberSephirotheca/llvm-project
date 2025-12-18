@@ -1,2 +1,1 @@
 add_subdirectory(SimtStep)
-add_subdirectory(SimtStructured)
