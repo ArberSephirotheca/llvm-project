@@ -361,9 +361,7 @@ public:
                                             &resumedState)) {
                                     Effect eff = std::move(susp->effect);
                                     auto innerResume = std::move(susp->resume);
-                                    auto chained = [this, wave, key, block, nextIt, ctx, lane,
-                                                    isTerminator, hasNext, waveCtx, blockCtx,
-                                                    op, innerResume = std::move(innerResume),
+                                    auto chained = [innerResume = std::move(innerResume),
                                                     &handleResumed]() mutable -> StepType {
                                         return handleResumed(innerResume());
                                     };

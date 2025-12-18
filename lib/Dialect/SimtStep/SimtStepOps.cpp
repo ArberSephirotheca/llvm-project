@@ -234,7 +234,8 @@ mlir::LogicalResult SwitchOp::verify() {
   if (body.empty())
     return emitOpError("requires a non-empty body region");
 
-  if (caseValues.size() + 1 != body.getBlocks().size())
+  std::size_t caseCount = static_cast<std::size_t>(caseValues.size());
+  if (caseCount + 1 != body.getBlocks().size())
     return emitOpError(
         "case_values count must be one less than the number of case blocks");
 
