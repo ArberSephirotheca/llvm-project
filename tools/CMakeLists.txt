@@ -1,7 +1,3 @@
-add_subdirectory(simt-convert)
-add_subdirectory(simt-run)
 add_subdirectory(simt-hlsl-import)
-add_subdirectory(simt-opt)
-add_subdirectory(simt-step-parse)
 add_subdirectory(simt-step-fuzz)
 add_subdirectory(simt-step-raise)

@@ -18,8 +18,6 @@ target_link_libraries(simt-step
 )
 
 add_subdirectory(core)
-add_subdirectory(plugins)
 add_subdirectory(semantics)
 add_subdirectory(frontends)
 add_subdirectory(Dialect)
-add_subdirectory(Conversion)
