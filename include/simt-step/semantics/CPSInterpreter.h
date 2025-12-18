@@ -618,36 +618,6 @@ private:
         return StepType::halt();
     }
 
-    bool hasSwitchFallthroughAttr(simt::dialect::SwitchOp switchOp) const {
-        for (mlir::Block &block : switchOp.getCaseBody()) {
-            if (block.empty())
-                continue;
-            auto yield = llvm::dyn_cast<simt::dialect::YieldOp>(block.back());
-            if (!yield)
-                continue;
-            if (yield->hasAttr("fallthrough"))
-                return true;
-        }
-        return false;
-    }
-
-    bool isLegacySwitch(simt::dialect::SwitchOp switchOp) const {
-        if (hasSwitchFallthroughAttr(switchOp))
-            return false;
-        unsigned numResults = switchOp.getNumResults();
-        if (numResults < 4)
-            return false;
-        auto types = switchOp.getResultTypes();
-        auto isI1 = [](mlir::Type ty) {
-            if (auto intTy = mlir::dyn_cast<mlir::IntegerType>(ty))
-                return intTy.getWidth() == 1;
-            return false;
-        };
-        return isI1(types[numResults - 1]) &&
-               isI1(types[numResults - 2]) &&
-               isI1(types[numResults - 3]);
-    }
-
     std::optional<StepType> handleSwitchSplit(WaveId wave,
                                               const DynamicBlockKey &key,
                                               mlir::Block *block,
@@ -683,6 +653,10 @@ private:
         if (caseBlocks.empty())
             llvm::report_fatal_error("handleSwitchSplit: missing case blocks");
 
+        auto caseValues = switchOp.getCaseValues();
+        if (caseValues.size() + 1 != numBlocks)
+            llvm::report_fatal_error("handleSwitchSplit: case_values size mismatch");
+
         auto nextIt = std::next(it);
         StepType parentCont = StepType::continueWith(
             [this, wave, key, block, nextIt, context, lane]() mutable -> StepType {
@@ -715,92 +689,7 @@ private:
         std::uint64_t laneMask =
             parentExpected ? (parentExpected & laneBit) : laneBit;
 
-        if (isLegacySwitch(switchOp)) {
-            std::uint32_t baseSeq = key.sequenceId + 1;
-            if (!entry->switchFrame) {
-                SwitchFrameState<ValueType> frame;
-                frame.switchOp = switchOp.getOperation();
-                frame.baseSeq = baseSeq;
-                frame.caseBlocks.assign(caseBlocks.begin(), caseBlocks.end());
-                entry->switchFrame = std::move(frame);
-            }
-            auto &frame = *entry->switchFrame;
-            baseSeq = frame.baseSeq;
-            if (entry->expectedMask == 0)
-                entry->expectedMask = parentExpected ? parentExpected : laneMask;
-            entry->expectedMask |= laneMask;
-            if (entry->pendingChildren.empty()) {
-                for (unsigned idx = 0; idx < caseBlocks.size(); ++idx) {
-                    entry->pendingChildren.push_back(
-                        DynamicBlockKey{caseBlocks[idx], baseSeq + idx});
-                    entry->childMasks.push_back(0);
-                }
-            }
-
-            std::uint32_t seq = baseSeq;
-            DynamicBlockKey childKey{caseBlocks[0], seq};
-            auto &childCtx = waveCtx.blocks[childKey];
-            childCtx.block = childKey.block;
-            childCtx.sequenceId = childKey.sequenceId;
-            childCtx.parentKey = key;
-            if (childCtx.expectedMask == 0)
-                childCtx.expectedMask = parentExpected ? parentExpected : laneMask;
-            childCtx.expectedMask |= laneMask;
-            childCtx.activeMask |= laneBit;
-            childCtx.completedMask &= ~laneBit;
-            childCtx.kind = (caseBlocks.size() == 1)
-                                ? DynamicBlockKind::SwitchDefault
-                                : DynamicBlockKind::SwitchCase;
-            childCtx.switchOp = switchOp.getOperation();
-            childCtx.loopOp = nullptr;
-            childCtx.ifOp = nullptr;
-
-            llvm::SmallVector<ValueType, 8> initVals;
-            auto inits = switchOp.getInitialValues();
-            initVals.reserve(inits.size());
-            for (mlir::Value init : inits) {
-                auto valOrErr =
-                    evaluateValue(waveCtx, key, init, lane, parentBlock.activeMask,
-                                  parentBlock.expectedMask ? parentBlock.expectedMask
-                                                           : parentBlock.activeMask);
-                if (!valOrErr)
-                    llvm::report_fatal_error("handleSwitchSplit: failed to evaluate init");
-                initVals.push_back(*valOrErr);
-            }
-            frame.carried[lane] = initVals;
-
-            auto &env = childCtx.valueEnvs[lane];
-            auto childArgs = caseBlocks[0]->getArguments();
-            for (auto indexed : llvm::enumerate(childArgs)) {
-                if (indexed.index() < initVals.size())
-                    env[indexed.value()] = initVals[indexed.index()];
-            }
-
-            if (EnableCPSDebugLogs) {
-                auto fmt = [&](std::uint64_t m) { return formatMaskBits(m, 32); };
-                llvm::errs() << "[CPS] handleSwitchSplit lane=" << lane
-                             << " parent=" << key.block << " seq=" << key.sequenceId
-                             << " -> caseIdx=0"
-                             << " childSeq=" << seq
-                             << " active=" << fmt(parentBlock.activeMask)
-                             << " expected=" << fmt(parentBlock.expectedMask)
-                             << "\n";
-            }
-
-            SemanticsContext laneCtx = context;
-            laneCtx.activeMask = childCtx.activeMask;
-            laneCtx.expectedMask =
-                childCtx.expectedMask ? childCtx.expectedMask : childCtx.activeMask;
-            laneCtx.laneId = lane;
-            mlir::Block *childBlock = const_cast<mlir::Block *>(childKey.block);
-            StepType childStep = makeNextOp(wave, childKey, childBlock,
-                                            childBlock->begin(), laneCtx, lane);
-            enqueue(wave, childKey, lane, std::move(childStep));
-            parentBlock.activeMask &= ~laneBit;
-            return StepType::halt();
-        }
-
-        // C-like switch with optional fallthrough: pick a case by selector, then
+        // C-like switch with explicit fallthrough: pick a case by selector, then
         // allow fallthrough to subsequent cases when the terminator requests it.
         auto selectorOrErr = evaluateValue(
             waveCtx, key, switchOp.getSelector(), lane, parentBlock.activeMask,
@@ -811,7 +700,6 @@ private:
         else
             llvm::consumeError(selectorOrErr.takeError());
 
-        auto caseValues = switchOp.getCaseValues();
         unsigned caseIdx = caseValues.size(); // default
         for (auto indexed : llvm::enumerate(caseValues)) {
             if (indexed.value() == selectorValue) {
@@ -820,25 +708,24 @@ private:
             }
         }
         if (caseIdx >= numBlocks)
-            caseIdx = numBlocks ? (numBlocks - 1) : 0;
-        if (caseIdx >= caseBlocks.size())
             llvm::report_fatal_error("handleSwitchSplit: target block not found");
         llvm::SmallVector<bool, 4> caseFallthrough;
         caseFallthrough.reserve(numBlocks);
         for (unsigned idx = 0; idx < numBlocks; ++idx) {
-            bool fall = false;
             mlir::Block *caseBlock = caseBlocks[idx];
-            if (!caseBlock->empty()) {
-                if (auto yield =
-                        llvm::dyn_cast<simt::dialect::YieldOp>(caseBlock->back())) {
-                    if (auto attr =
-                            yield->getAttrOfType<mlir::BoolAttr>("fallthrough")) {
-                        fall = attr.getValue();
-                    }
-                }
-            }
-            if (idx + 1 >= numBlocks)
-                fall = false;
+            if (caseBlock->empty())
+                llvm::report_fatal_error("handleSwitchSplit: missing switch yield");
+            auto yield =
+                llvm::dyn_cast<simt::dialect::YieldOp>(caseBlock->back());
+            if (!yield)
+                llvm::report_fatal_error("handleSwitchSplit: missing switch yield");
+            auto attr = yield->getAttrOfType<mlir::BoolAttr>("fallthrough");
+            if (!attr)
+                llvm::report_fatal_error("handleSwitchSplit: missing fallthrough attr");
+            bool fall = attr.getValue();
+            if (idx + 1 == numBlocks && fall)
+                llvm::report_fatal_error(
+                    "handleSwitchSplit: default case cannot fallthrough");
             caseFallthrough.push_back(fall);
         }
 
@@ -1525,7 +1412,6 @@ private:
             values.push_back(*valOrErr);
         }
 
-        bool legacySwitch = isLegacySwitch(switchOp);
         MergeStackEntry<ValueType, StepType> *entry = nullptr;
         for (auto it = waveCtx.mergeStack.rbegin(); it != waveCtx.mergeStack.rend(); ++it) {
             if (!it->loopFrame && it->switchFrame &&
@@ -1568,27 +1454,27 @@ private:
         unsigned numCases = static_cast<unsigned>(frame.caseBlocks.size());
         if (numCases == 0)
             llvm::report_fatal_error("handleSwitchYield: no switch cases");
+        if (key.sequenceId < frame.baseSeq)
+            llvm::report_fatal_error("handleSwitchYield: invalid switch sequence");
         unsigned caseIdx = key.sequenceId - frame.baseSeq;
-        bool switchDone = false;
-        bool fallthrough = false;
-        if (legacySwitch) {
-            if (!values.empty())
-                switchDone = values.back().asBool();
-        } else if (auto attr = yieldOp->getAttrOfType<mlir::BoolAttr>("fallthrough")) {
-            fallthrough = attr.getValue();
-        }
+        if (caseIdx >= numCases)
+            llvm::report_fatal_error("handleSwitchYield: case index out of range");
+        auto fallthroughAttr = yieldOp->getAttrOfType<mlir::BoolAttr>("fallthrough");
+        if (!fallthroughAttr)
+            llvm::report_fatal_error("handleSwitchYield: missing fallthrough attr");
+        bool fallthrough = fallthroughAttr.getValue();
         bool lastCase = (caseIdx + 1 >= numCases);
+        if (lastCase && fallthrough)
+            llvm::report_fatal_error("handleSwitchYield: default case cannot fallthrough");
         if (EnableCPSDebugLogs) {
             llvm::errs() << "[CPS] handleSwitchYield lane=" << lane
                          << " caseIdx=" << caseIdx
-                         << " switchDone=" << switchDone
                          << " fallthrough=" << fallthrough
                          << " lastCase=" << lastCase << "\n";
         }
         frame.carried[lane] = values;
 
-        bool switchDoneNow =
-            legacySwitch ? (switchDone || lastCase) : (!fallthrough || lastCase);
+        bool switchDoneNow = !fallthrough || lastCase;
         if (switchDoneNow) {
             if (auto pendingIt = frame.pendingCases.find(lane);
                 pendingIt != frame.pendingCases.end()) {

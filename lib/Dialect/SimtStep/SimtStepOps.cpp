@@ -234,6 +234,11 @@ mlir::LogicalResult SwitchOp::verify() {
   if (body.empty())
     return emitOpError("requires a non-empty body region");
 
+  if (caseValues.size() + 1 != body.getBlocks().size())
+    return emitOpError(
+        "case_values count must be one less than the number of case blocks");
+
+  unsigned blockIndex = 0;
   for (mlir::Block &block : body) {
     if (block.getNumArguments() != getNumResults())
       return emitOpError(
@@ -241,6 +246,15 @@ mlir::LogicalResult SwitchOp::verify() {
     if (block.empty() || !llvm::isa<YieldOp>(block.back()))
       return emitOpError(
           "each block in the body must terminate with simt_step.yield");
+    auto yield = llvm::cast<YieldOp>(block.back());
+    auto fallthroughAttr = yield->getAttrOfType<mlir::BoolAttr>("fallthrough");
+    if (!fallthroughAttr)
+      return emitOpError(
+          "each switch case must have a bool 'fallthrough' attribute");
+    bool isDefault = (blockIndex + 1 == body.getBlocks().size());
+    if (isDefault && fallthroughAttr.getValue())
+      return emitOpError("default case cannot fall through");
+    ++blockIndex;
   }
 
   return mlir::success();

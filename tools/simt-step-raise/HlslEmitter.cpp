@@ -11,6 +11,8 @@
 #include <mlir/IR/BuiltinOps.h>
 #include <mlir/IR/Block.h>
 
+#include <llvm/Support/ErrorHandling.h>
+
 #include <optional>
 #include <string>
 #include <utility>
@@ -291,80 +293,35 @@ struct HlslEmitter {
             os << ";\n";
         }
 
-        bool hasFallthroughAttr = false;
+        auto caseValues = sw.getCaseValues();
+        auto &region = sw.getCaseBody();
+        unsigned numBlocks =
+            static_cast<unsigned>(std::distance(region.begin(), region.end()));
+        if (caseValues.size() + 1 != numBlocks)
+            llvm::report_fatal_error("HlslEmitter: switch case_values size mismatch");
+
         std::vector<bool> caseFallthrough;
-        caseFallthrough.reserve(sw.getCaseBody().getBlocks().size());
-        for (auto &blk : sw.getCaseBody()) {
-            bool fall = false;
-            if (!blk.empty()) {
-                if (auto y = dyn_cast<simt::dialect::YieldOp>(blk.back())) {
-                    if (auto attr = y->getAttrOfType<mlir::BoolAttr>("fallthrough")) {
-                        hasFallthroughAttr = true;
-                        fall = attr.getValue();
-                    }
-                }
-            }
+        caseFallthrough.reserve(numBlocks);
+        unsigned fallIndex = 0;
+        for (auto &blk : region) {
+            if (blk.empty())
+                llvm::report_fatal_error("HlslEmitter: switch case missing yield");
+            auto y = dyn_cast<simt::dialect::YieldOp>(blk.back());
+            if (!y)
+                llvm::report_fatal_error("HlslEmitter: switch case missing yield");
+            auto attr = y->getAttrOfType<mlir::BoolAttr>("fallthrough");
+            if (!attr)
+                llvm::report_fatal_error("HlslEmitter: switch missing fallthrough attr");
+            bool fall = attr.getValue();
+            if (fallIndex + 1 == numBlocks && fall)
+                llvm::report_fatal_error("HlslEmitter: default case cannot fallthrough");
             caseFallthrough.push_back(fall);
-        }
-
-        bool isLegacyFallthroughSwitch = false;
-        if (!hasFallthroughAttr && numResults >= 4) {
-            auto types = sw.getResultTypes();
-            auto isI1 = [](mlir::Type ty) {
-                if (auto intTy = mlir::dyn_cast<IntegerType>(ty))
-                    return intTy.getWidth() == 1;
-                return false;
-            };
-            isLegacyFallthroughSwitch = isI1(types[numResults - 1]) &&
-                                        isI1(types[numResults - 2]) &&
-                                        isI1(types[numResults - 3]);
-        }
-
-        if (isLegacyFallthroughSwitch) {
-            auto &region = sw.getCaseBody();
-            for (auto &blk : region) {
-                emitIndent();
-                os << "{\n";
-                indent += "  ";
-                for (unsigned i = 0; i < blk.getNumArguments(); ++i) {
-                    if (i < resultNames.size())
-                        names[blk.getArgument(i)] = resultNames[i];
-                }
-                bool sawYield = false;
-                for (auto &op : blk) {
-                    if (auto y = dyn_cast<simt::dialect::YieldOp>(op)) {
-                        if (y.getNumOperands() != numResults)
-                            return failure();
-                        for (unsigned i = 0; i < numResults; ++i) {
-                            emitIndent();
-                            os << resultNames[i] << " = " << get(y.getOperand(i)) << ";\n";
-                        }
-                        sawYield = true;
-                        break;
-                    }
-                    if (failed(emitOp(&op)))
-                        return failure();
-                }
-                if (!sawYield)
-                    return failure();
-                indent.pop_back();
-                indent.pop_back();
-                emitIndent();
-                os << "}\n";
-            }
-            for (unsigned i = 0; i < numResults; ++i)
-                names[sw.getResult(i)] = resultNames[i];
-            return success();
+            ++fallIndex;
         }
 
         emitIndent();
         os << "switch (" << get(sw.getSelector()) << ") {\n";
         indent += "  ";
-
-        auto caseValues = sw.getCaseValues();
-        auto &region = sw.getCaseBody();
-        unsigned numBlocks =
-            static_cast<unsigned>(std::distance(region.begin(), region.end()));
         unsigned blockIndex = 0;
 
         for (auto &blk : region) {
