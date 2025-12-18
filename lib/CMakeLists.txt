@@ -19,5 +19,5 @@ target_link_libraries(simt-step
 
 add_subdirectory(core)
 add_subdirectory(semantics)
-add_subdirectory(frontends)
+add_subdirectory(frontends/common)
 add_subdirectory(Dialect)
