@@ -137,7 +137,7 @@ static Value buildSwitch(OpBuilder &b, Location loc, BuildState &st,
         fallthroughCase.push_back(fall);
     }
 
-    int selectorMod = numCases;
+    int selectorMod = includeDefault ? numCases : (numCases - 1);
     Value selector = st.tid;
     if (selectorMod > 1) {
         Value mod = makeI32(b, loc, selectorMod);
@@ -147,16 +147,9 @@ static Value buildSwitch(OpBuilder &b, Location loc, BuildState &st,
     Value initVal = buildValue(b, loc, st);
 
     llvm::SmallVector<int64_t, 4> caseValues;
-    caseValues.reserve(numCases);
-    if (includeDefault) {
-        // Use a sentinel for the last case so it acts as the default block.
-        for (int i = 0; i < numCases - 1; ++i)
-            caseValues.push_back(i);
-        caseValues.push_back(-1);
-    } else {
-        for (int i = 0; i < numCases; ++i)
-            caseValues.push_back(i);
-    }
+    caseValues.reserve(numCases - 1);
+    for (int i = 0; i < numCases - 1; ++i)
+        caseValues.push_back(i);
 
     auto switchOp = b.create<simt::dialect::SwitchOp>(
         loc, TypeRange{b.getI32Type()}, selector, ValueRange{initVal}, caseValues);
@@ -164,7 +157,7 @@ static Value buildSwitch(OpBuilder &b, Location loc, BuildState &st,
     auto &region = switchOp.getCaseBody();
     while (static_cast<int>(region.getBlocks().size()) < numCases) {
         auto *blk = new Block();
-        blk->addArgument(b.getI32Type(), loc);
+        blk->addArguments({b.getI32Type()}, SmallVector<Location>{loc});
         region.push_back(blk);
     }
 
@@ -172,20 +165,15 @@ static Value buildSwitch(OpBuilder &b, Location loc, BuildState &st,
     for (auto &blk : region) {
         if (caseIdx >= numCases)
             break;
-        if (blk.getNumArguments() == 0)
-            blk.addArgument(b.getI32Type(), loc);
-        OpBuilder cb(&blk, blk.begin());
-        Value incoming = blk.getArgument(0);
-        Value val;
-        if (fallthroughCase[caseIdx]) {
-            // Simulate fallthrough by yielding the incoming value unchanged.
-            val = incoming;
-        } else {
-            val = buildPattern(cb, loc, st, depth + 1, maxDepth);
+        if (blk.getNumArguments() == 0) {
+            blk.addArguments({b.getI32Type()}, SmallVector<Location>{loc});
         }
+        OpBuilder cb(&blk, blk.begin());
+        Value bodyVal = buildPattern(cb, loc, st, depth + 1, maxDepth);
         if (emitWaveInCase[caseIdx])
             emitWaveCount(cb, loc, st, makeBool(cb, loc, true));
-        cb.create<simt::dialect::YieldOp>(loc, ValueRange{val});
+        auto yield = cb.create<simt::dialect::YieldOp>(loc, ValueRange{bodyVal});
+        yield->setAttr("fallthrough", b.getBoolAttr(fallthroughCase[caseIdx]));
         ++caseIdx;
     }
     return switchOp.getResult(0);

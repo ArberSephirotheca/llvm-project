@@ -83,6 +83,12 @@ struct HlslEmitter {
         if (auto mul = dyn_cast<arith::MulIOp>(op)) {
             return "(" + emitValue(mul.getLhs()) + " * " + emitValue(mul.getRhs()) + ")";
         }
+        if (auto andi = dyn_cast<arith::AndIOp>(op)) {
+            return "(" + emitValue(andi.getLhs()) + " & " + emitValue(andi.getRhs()) + ")";
+        }
+        if (auto ori = dyn_cast<arith::OrIOp>(op)) {
+            return "(" + emitValue(ori.getLhs()) + " | " + emitValue(ori.getRhs()) + ")";
+        }
         if (auto shl = dyn_cast<arith::ShLIOp>(op)) {
             return "(" + emitValue(shl.getLhs()) + " << " + emitValue(shl.getRhs()) + ")";
         }
@@ -114,13 +120,22 @@ struct HlslEmitter {
         return "<unsupported>";
     }
 
-    LogicalResult emitRegionAssign(Region &r, const std::string &target) {
+    LogicalResult emitRegionAssign(Region &r,
+                                   llvm::ArrayRef<std::string> targets) {
         auto &blk = r.front();
         for (auto &op : blk) {
             if (auto y = dyn_cast<simt::dialect::YieldOp>(op)) {
-                if (!y.getOperands().empty() && !target.empty()) {
+                if (targets.empty()) {
+                    if (!y.getOperands().empty())
+                        return failure();
+                } else if (y.getNumOperands() != targets.size()) {
+                    return failure();
+                }
+                for (unsigned i = 0; i < targets.size(); ++i) {
+                    if (targets[i].empty())
+                        continue;
                     emitIndent();
-                    os << target << " = " << get(y.getOperand(0)) << ";\n";
+                    os << targets[i] << " = " << get(y.getOperand(i)) << ";\n";
                 }
                 return success();
             }
@@ -131,48 +146,31 @@ struct HlslEmitter {
     }
 
     LogicalResult emitIf(simt::dialect::IfOp ifOp) {
-        if (ifOp.getNumResults() > 1)
-            return failure();
-        auto trivialElseYield = [&]() -> std::optional<std::string> {
-            auto &blk = ifOp.getElseRegion().front();
-            if (blk.empty())
-                return std::string{};
-            if (std::next(blk.begin()) != blk.end())
-                return std::nullopt;
-            if (auto y = dyn_cast<simt::dialect::YieldOp>(&blk.front())) {
-                if (y.getNumOperands() == 0)
-                    return std::string{};
-                if (y.getNumOperands() == 1)
-                    return emitValue(y.getOperand(0));
-            }
-            return std::nullopt;
-        };
-        std::string resName;
-        std::optional<std::string> elseInit;
-        bool hasResult = !ifOp.getResults().empty();
-        if (hasResult) {
-            resName = makeTmp();
-            elseInit = trivialElseYield();
+        unsigned numResults = ifOp.getNumResults();
+        std::vector<std::string> resultNames;
+        resultNames.reserve(numResults);
+        for (unsigned i = 0; i < numResults; ++i) {
+            std::string name = makeTmp();
+            resultNames.push_back(name);
             emitIndent();
-            os << emitType(ifOp.getResultTypes().front()) << " " << resName;
-            if (elseInit)
-                os << " = " << *elseInit;
-            os << ";\n";
+            os << emitType(ifOp.getResultTypes()[i]) << " " << name << ";\n";
         }
         emitIndent();
         os << "if (" << get(ifOp.getCondition()) << ") {\n";
         indent += "  ";
-        if (failed(emitRegionAssign(ifOp.getThenRegion(), resName)))
+        if (failed(emitRegionAssign(ifOp.getThenRegion(), resultNames)))
             return failure();
         indent.pop_back();
         indent.pop_back();
-        bool omitElse = (!hasResult && trivialElseYield().has_value()) ||
-                        (hasResult && elseInit.has_value());
-        if (!omitElse) {
+        bool hasElseRegion = !ifOp.getElseRegion().empty();
+        if (numResults > 0 && (!hasElseRegion || ifOp.getElseRegion().front().empty()))
+            return failure();
+        bool hasElse = hasElseRegion && !ifOp.getElseRegion().front().empty();
+        if (hasElse) {
             emitIndent();
             os << "} else {\n";
             indent += "  ";
-            if (failed(emitRegionAssign(ifOp.getElseRegion(), resName)))
+            if (failed(emitRegionAssign(ifOp.getElseRegion(), resultNames)))
                 return failure();
             indent.pop_back();
             indent.pop_back();
@@ -182,8 +180,8 @@ struct HlslEmitter {
             emitIndent();
             os << "}\n";
         }
-        if (!resName.empty())
-            names[ifOp.getResult(0)] = resName;
+        for (unsigned i = 0; i < numResults; ++i)
+            names[ifOp.getResult(i)] = resultNames[i];
         return success();
     }
 
@@ -287,6 +285,72 @@ struct HlslEmitter {
             os << ";\n";
         }
 
+        bool hasFallthroughAttr = false;
+        std::vector<bool> caseFallthrough;
+        caseFallthrough.reserve(sw.getCaseBody().getBlocks().size());
+        for (auto &blk : sw.getCaseBody()) {
+            bool fall = false;
+            if (!blk.empty()) {
+                if (auto y = dyn_cast<simt::dialect::YieldOp>(blk.back())) {
+                    if (auto attr = y->getAttrOfType<mlir::BoolAttr>("fallthrough")) {
+                        hasFallthroughAttr = true;
+                        fall = attr.getValue();
+                    }
+                }
+            }
+            caseFallthrough.push_back(fall);
+        }
+
+        bool isLegacyFallthroughSwitch = false;
+        if (!hasFallthroughAttr && numResults >= 4) {
+            auto types = sw.getResultTypes();
+            auto isI1 = [](mlir::Type ty) {
+                if (auto intTy = mlir::dyn_cast<IntegerType>(ty))
+                    return intTy.getWidth() == 1;
+                return false;
+            };
+            isLegacyFallthroughSwitch = isI1(types[numResults - 1]) &&
+                                        isI1(types[numResults - 2]) &&
+                                        isI1(types[numResults - 3]);
+        }
+
+        if (isLegacyFallthroughSwitch) {
+            auto &region = sw.getCaseBody();
+            for (auto &blk : region) {
+                emitIndent();
+                os << "{\n";
+                indent += "  ";
+                for (unsigned i = 0; i < blk.getNumArguments(); ++i) {
+                    if (i < resultNames.size())
+                        names[blk.getArgument(i)] = resultNames[i];
+                }
+                bool sawYield = false;
+                for (auto &op : blk) {
+                    if (auto y = dyn_cast<simt::dialect::YieldOp>(op)) {
+                        if (y.getNumOperands() != numResults)
+                            return failure();
+                        for (unsigned i = 0; i < numResults; ++i) {
+                            emitIndent();
+                            os << resultNames[i] << " = " << get(y.getOperand(i)) << ";\n";
+                        }
+                        sawYield = true;
+                        break;
+                    }
+                    if (failed(emitOp(&op)))
+                        return failure();
+                }
+                if (!sawYield)
+                    return failure();
+                indent.pop_back();
+                indent.pop_back();
+                emitIndent();
+                os << "}\n";
+            }
+            for (unsigned i = 0; i < numResults; ++i)
+                names[sw.getResult(i)] = resultNames[i];
+            return success();
+        }
+
         emitIndent();
         os << "switch (" << get(sw.getSelector()) << ") {\n";
         indent += "  ";
@@ -310,8 +374,8 @@ struct HlslEmitter {
             indent += "  ";
 
             for (unsigned i = 0; i < blk.getNumArguments(); ++i) {
-                if (i < initVals.size())
-                    names[blk.getArgument(i)] = get(initVals[i]);
+                if (i < resultNames.size())
+                    names[blk.getArgument(i)] = resultNames[i];
             }
 
             bool sawYield = false;
@@ -331,8 +395,13 @@ struct HlslEmitter {
             }
             if (!sawYield)
                 return failure();
-            emitIndent();
-            os << "break;\n";
+            bool fallthrough = false;
+            if (blockIndex < caseFallthrough.size())
+                fallthrough = caseFallthrough[blockIndex];
+            if (!fallthrough || isDefault) {
+                emitIndent();
+                os << "break;\n";
+            }
 
             indent.pop_back();
             indent.pop_back();
@@ -366,8 +435,8 @@ struct HlslEmitter {
             return success();
         }
         if (isa<arith::AddIOp, arith::RemSIOp, arith::CmpIOp,
-                arith::SubIOp, arith::MulIOp, arith::ShLIOp, arith::ShRSIOp,
-                simt::dialect::WaveCountBitsOp>(op)) {
+                arith::SubIOp, arith::MulIOp, arith::AndIOp, arith::OrIOp,
+                arith::ShLIOp, arith::ShRSIOp, simt::dialect::WaveCountBitsOp>(op)) {
             std::string tmp = makeTmp();
             names[op->getResult(0)] = tmp;
             emitIndent();

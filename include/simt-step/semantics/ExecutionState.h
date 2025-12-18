@@ -75,6 +75,15 @@ struct LoopFrameState {
     llvm::DenseMap<LaneId, llvm::SmallVector<ValueT, 4>> carried;
 };
 
+template <typename ValueT>
+struct SwitchFrameState {
+    const mlir::Operation *switchOp = nullptr;
+    std::uint32_t baseSeq = 0;
+    llvm::SmallVector<const mlir::Block *, 4> caseBlocks;
+    llvm::DenseMap<LaneId, llvm::SmallVector<ValueT, 8>> carried;
+    llvm::DenseMap<LaneId, DynamicBlockKey> pendingCases;
+};
+
 template <typename ValueT, typename StepT>
 struct CollectiveSyncPoint {
     CollectiveEffect effect;
@@ -111,6 +120,7 @@ struct MergeStackEntry {
     std::uint64_t expectedMask = 0;
     std::uint64_t completedMask = 0;
     std::optional<LoopFrameState<ValueT>> loopFrame;
+    std::optional<SwitchFrameState<ValueT>> switchFrame;
 };
 
 template <typename ValueT, typename StepT>

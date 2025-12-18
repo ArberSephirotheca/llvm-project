@@ -56,6 +56,9 @@ auto SimpleSemantics::evalOperation(mlir::Operation *op,
     if (auto andOp = llvm::dyn_cast<mlir::arith::AndIOp>(op))
         return handleAndIOp(andOp, context);
 
+    if (auto orOp = llvm::dyn_cast<mlir::arith::OrIOp>(op))
+        return handleOrIOp(orOp, context);
+
     if (auto cmpOp = llvm::dyn_cast<mlir::arith::CmpIOp>(op))
         return handleCmpIOp(cmpOp, context);
 
@@ -137,6 +140,22 @@ auto SimpleSemantics::handleAndIOp(mlir::arith::AndIOp op,
         return StepType::halt();
     }
     auto result = lhsOrErr->bitAnd(*rhsOrErr);
+    return StepType::produce(std::move(result));
+}
+
+auto SimpleSemantics::handleOrIOp(mlir::arith::OrIOp op,
+                                  SemanticsContext &context) -> StepType {
+    auto lhsOrErr = evaluateValue(op.getLhs(), context);
+    if (!lhsOrErr) {
+        llvm::consumeError(lhsOrErr.takeError());
+        return StepType::halt();
+    }
+    auto rhsOrErr = evaluateValue(op.getRhs(), context);
+    if (!rhsOrErr) {
+        llvm::consumeError(rhsOrErr.takeError());
+        return StepType::halt();
+    }
+    auto result = lhsOrErr->bitOr(*rhsOrErr);
     return StepType::produce(std::move(result));
 }
 
@@ -285,6 +304,17 @@ SimpleSemantics::evaluateValue(mlir::Value value,
         if (!step.isProduce())
             return llvm::make_error<llvm::StringError>(
                 "andi did not produce a value", llvm::inconvertibleErrorCode());
+        auto state = std::move(step).takeState();
+        auto v = std::get<typename StepType::Produce>(std::move(state)).value;
+        logVal(v);
+        return v;
+    }
+
+    if (auto orOp = value.getDefiningOp<mlir::arith::OrIOp>()) {
+        auto step = handleOrIOp(orOp, context);
+        if (!step.isProduce())
+            return llvm::make_error<llvm::StringError>(
+                "ori did not produce a value", llvm::inconvertibleErrorCode());
         auto state = std::move(step).takeState();
         auto v = std::get<typename StepType::Produce>(std::move(state)).value;
         logVal(v);
