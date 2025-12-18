@@ -139,6 +139,12 @@ struct HlslEmitter {
                 }
                 return success();
             }
+            if (auto br = dyn_cast<simt::dialect::BreakOp>(op)) {
+                (void)br;
+                emitIndent();
+                os << "break;\n";
+                return success();
+            }
             if (failed(emitOp(&op)))
                 return failure();
         }
@@ -441,6 +447,12 @@ struct HlslEmitter {
             names[op->getResult(0)] = tmp;
             emitIndent();
             os << emitType(op->getResult(0).getType()) << " " << tmp << " = " << emitExpr(op) << ";\n";
+            return success();
+        }
+        if (auto br = dyn_cast<simt::dialect::BreakOp>(op)) {
+            (void)br;
+            emitIndent();
+            os << "break;\n";
             return success();
         }
         if (auto ifOp = dyn_cast<simt::dialect::IfOp>(op))

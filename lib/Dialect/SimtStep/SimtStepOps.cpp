@@ -362,12 +362,26 @@ verifyLoopAncestor(mlir::Operation *op, llvm::StringRef opName) {
   return op->emitError() << opName << " must be nested inside 'simt_step.loop'";
 }
 
+static mlir::LogicalResult
+verifyLoopOrSwitchAncestor(mlir::Operation *op, llvm::StringRef opName) {
+  for (mlir::Operation *parent = op->getParentOp(); parent;
+       parent = parent->getParentOp()) {
+    if (llvm::isa<simt::dialect::LoopOp, simt::dialect::SwitchOp>(parent))
+      return mlir::success();
+    if (llvm::isa<mlir::ModuleOp>(parent))
+      break;
+  }
+  return op->emitError() << opName
+                         << " must be nested inside 'simt_step.loop' or "
+                            "'simt_step.switch'";
+}
+
 mlir::LogicalResult ContinueOp::verify() {
   return verifyLoopAncestor(getOperation(), "simt_step.continue");
 }
 
 mlir::LogicalResult BreakOp::verify() {
-  return verifyLoopAncestor(getOperation(), "simt_step.break");
+  return verifyLoopOrSwitchAncestor(getOperation(), "simt_step.break");
 }
 
 void BufferLoadOp::build(mlir::OpBuilder &builder, mlir::OperationState &state,

@@ -293,7 +293,7 @@ struct EmitInterpreter
             : switchFrame.carriedVars;
 
     llvm::SmallVector<mlir::Value, 8> yieldOperands;
-    yieldOperands.reserve(carriedVars.size() + 3);
+    yieldOperands.reserve(carriedVars.size());
 
     for (auto [index, vd] : llvm::enumerate(carriedVars)) {
       mlir::Value value = ctx.valueMap.lookup(vd);
@@ -307,21 +307,19 @@ struct EmitInterpreter
       noteMutation(vd);
     }
 
-    auto ensureBool = [&](mlir::Value v, int constant) -> mlir::Value {
-      if (v)
-        return v;
-      return ctx.builder.create<mlir::arith::ConstantIntOp>(mlirLoc, constant,
-                                                            1);
-    };
+    bool inCaseBlock = false;
+    if (auto *block = ctx.builder.getBlock()) {
+      if (auto *parent = block->getParentOp())
+        inCaseBlock = llvm::isa<simt::dialect::SwitchOp>(parent);
+    }
 
-    yieldOperands.push_back(
-        ensureBool(switchFrame.breakMatchSeenValue, /*constant=*/1));
-    yieldOperands.push_back(
-        ensureBool(switchFrame.breakFallthroughValue, /*constant=*/0));
-    yieldOperands.push_back(
-        ensureBool(switchFrame.breakSwitchDoneValue, /*constant=*/1));
-
-    ctx.builder.create<simt::dialect::YieldOp>(mlirLoc, yieldOperands);
+    if (inCaseBlock) {
+      auto yieldOp =
+          ctx.builder.create<simt::dialect::YieldOp>(mlirLoc, yieldOperands);
+      yieldOp->setAttr("fallthrough", ctx.builder.getBoolAttr(false));
+    } else {
+      ctx.builder.create<simt::dialect::BreakOp>(mlirLoc, yieldOperands);
+    }
     ctx.emittedTerminator = true;
     return true;
   }
@@ -4337,10 +4335,6 @@ static bool lowerSwitchStmt(const clang::SwitchStmt *switchStmt,
       switchMeta.symInfo[vd] = makeSymValue(vd);
   }
 
-  switchMeta.needsHasMatchedFlag = true;
-  switchMeta.needsExecutingFlag = true;
-  switchMeta.needsCompletedFlag = true;
-
   auto &mutatedVars = switchMeta.carriedVars;
   llvm::SmallVector<mlir::Value, 8> initialCarried;
   initialCarried.reserve(mutatedVars.size());
@@ -4368,31 +4362,40 @@ static bool lowerSwitchStmt(const clang::SwitchStmt *switchStmt,
     caseValueInts.push_back(intValue);
   }
 
+  int defaultIndex = -1;
+  for (auto [caseIndex, info] : llvm::enumerate(cases)) {
+    if (llvm::isa<clang::DefaultStmt>(info.label)) {
+      defaultIndex = static_cast<int>(caseIndex);
+      break;
+    }
+  }
+  if (defaultIndex != -1 && static_cast<size_t>(defaultIndex + 1) != cases.size()) {
+    signalError(ctx, switchStmt,
+                "default case must appear last for switch lowering");
+    return false;
+  }
+
   size_t previousSwitchDepth = ctx.switchMetadataStack.size();
   ctx.switchMetadataStack.push_back(&switchMeta);
   auto popSwitchMeta = llvm::make_scope_exit([&]() {
     ctx.switchMetadataStack.resize(previousSwitchDepth);
   });
 
-  auto i1Type = ctx.builder.getI1Type();
   llvm::SmallVector<mlir::Type, 8> resultTypes;
-  resultTypes.reserve(mutatedVars.size() + 3);
+  resultTypes.reserve(mutatedVars.size());
   for (mlir::Value value : initialCarried)
     resultTypes.push_back(value.getType());
-  resultTypes.push_back(i1Type);
-  resultTypes.push_back(i1Type);
-  resultTypes.push_back(i1Type);
 
-  mlir::Value boolZeroInit =
-      ctx.builder.create<mlir::arith::ConstantIntOp>(loc, 0, 1);
-
-  llvm::SmallVector<mlir::Value, 8> initialValues = initialCarried;
-  initialValues.push_back(boolZeroInit);
-  initialValues.push_back(boolZeroInit);
-  initialValues.push_back(boolZeroInit);
+  llvm::SmallVector<int64_t, 8> caseValues;
+  caseValues.reserve(cases.size() - (defaultIndex >= 0 ? 1 : 0));
+  for (auto [caseIndex, info] : llvm::enumerate(cases)) {
+    if (static_cast<int>(caseIndex) == defaultIndex)
+      continue;
+    caseValues.push_back(caseValueInts[caseIndex]);
+  }
 
   auto switchOp = ctx.builder.create<simt::dialect::SwitchOp>(
-      loc, resultTypes, selector, initialValues, caseValueInts);
+      loc, resultTypes, selector, initialCarried, caseValues);
   mlir::Region &switchRegion = switchOp.getCaseBody();
   mlir::Block &firstBlock = *switchRegion.begin();
   firstBlock.clear();
@@ -4410,173 +4413,91 @@ static bool lowerSwitchStmt(const clang::SwitchStmt *switchStmt,
 
   addBlockArguments(firstBlock);
 
-  size_t matchSeenIndex = mutatedVars.size();
-  size_t fallthroughIndex = mutatedVars.size() + 1;
-  size_t switchDoneIndex = mutatedVars.size() + 2;
+  bool addSyntheticDefault = (defaultIndex == -1);
+  unsigned totalBlocks =
+      static_cast<unsigned>(cases.size() + (addSyntheticDefault ? 1 : 0));
 
-  auto getCurrentTuple = [&](mlir::Block &block,
-                             llvm::SmallVectorImpl<mlir::Value> &tuple) {
-    tuple.clear();
-    tuple.reserve(mutatedVars.size());
-    for (size_t index = 0; index < mutatedVars.size(); ++index)
-      tuple.push_back(block.getArgument(index));
+  auto ensureCaseBlock = [&](unsigned caseIndex) -> mlir::Block * {
+    if (caseIndex == 0)
+      return &firstBlock;
+    mlir::Block *block = &switchRegion.emplaceBlock();
+    addBlockArguments(*block);
+    return block;
   };
 
-  if (cases.empty()) {
-    mlir::OpBuilder emptyBuilder(&firstBlock, firstBlock.begin());
-    llvm::SmallVector<mlir::Value, 8> tuple;
-    getCurrentTuple(firstBlock, tuple);
-    tuple.push_back(firstBlock.getArgument(matchSeenIndex));
-    tuple.push_back(firstBlock.getArgument(fallthroughIndex));
-    tuple.push_back(firstBlock.getArgument(switchDoneIndex));
-    emptyBuilder.create<simt::dialect::YieldOp>(loc, tuple);
-  } else {
-    auto ensureCaseBlock = [&](unsigned caseIndex) -> mlir::Block * {
-      if (caseIndex == 0)
-        return &firstBlock;
-      mlir::Block *block = &switchRegion.emplaceBlock();
-      addBlockArguments(*block);
-      return block;
-    };
+  for (unsigned caseIndex = 0; caseIndex < totalBlocks; ++caseIndex) {
+    bool isSyntheticDefault =
+        addSyntheticDefault && caseIndex == cases.size();
+    const CaseInfo *info = isSyntheticDefault ? nullptr : &cases[caseIndex];
+    mlir::Block *caseBlock = ensureCaseBlock(caseIndex);
+    caseBlock->clear();
 
-    for (auto [caseIndex, info] : llvm::enumerate(cases)) {
-      mlir::Block *caseBlock = ensureCaseBlock(caseIndex);
+    mlir::OpBuilder caseBuilder(caseBlock, caseBlock->begin());
 
-      mlir::OpBuilder caseBuilder(caseBlock, caseBlock->begin());
+    llvm::SmallVector<mlir::Value, 8> incomingValues;
+    incomingValues.reserve(mutatedVars.size());
+    for (size_t index = 0; index < mutatedVars.size(); ++index)
+      incomingValues.push_back(caseBlock->getArgument(index));
 
-      llvm::SmallVector<mlir::Value, 8> incomingValues;
-      getCurrentTuple(*caseBlock, incomingValues);
+    LoweringContext caseCtx(caseBuilder, loc, ctx.returnType,
+                            ctx.errorMessage, ctx.sourceManager);
+    cloneContextState(ctx, caseCtx);
+    for (auto [vd, value] : llvm::zip(mutatedVars, incomingValues))
+      caseCtx.valueMap[vd] = value;
 
-      mlir::Value currentMatchSeen =
-          caseBlock->getArgument(matchSeenIndex);
-      mlir::Value currentFallthrough =
-          caseBlock->getArgument(fallthroughIndex);
-      mlir::Value currentSwitchDone =
-          caseBlock->getArgument(switchDoneIndex);
+    auto caseInterp = interp.fork(caseCtx);
 
-      mlir::Value constFalse =
-          caseBuilder.create<mlir::arith::ConstantIntOp>(loc, 0, 1);
-      mlir::Value constTrue =
-          caseBuilder.create<mlir::arith::ConstantIntOp>(loc, 1, 1);
+    SwitchScopeGuard caseGuard(
+        caseCtx, makeSwitchFrame(caseCtx, mutatedVars, incomingValues));
+    if (SwitchMetadata *meta = caseGuard.frame().metadata) {
+      caseGuard.frame().caseIndex = caseIndex;
+      if (!isSyntheticDefault && caseIndex < meta->cases.size())
+        caseGuard.frame().activeCase = &meta->cases[caseIndex];
+    }
 
-      mlir::Value notSwitchDone = caseBuilder.create<mlir::arith::CmpIOp>(
-          loc, mlir::arith::CmpIPredicate::eq, currentSwitchDone, constFalse);
-      mlir::Value matchNotSeen = caseBuilder.create<mlir::arith::CmpIOp>(
-          loc, mlir::arith::CmpIPredicate::eq, currentMatchSeen, constFalse);
-
-      mlir::Value caseMatch;
-      if (const auto *caseStmt = llvm::dyn_cast<clang::CaseStmt>(info.label)) {
-        LoweringContext matchCtx(caseBuilder, loc, ctx.returnType,
-                                 ctx.errorMessage, ctx.sourceManager);
-        cloneContextState(ctx, matchCtx);
-        auto matchInterp = interp.fork(matchCtx);
-        auto caseValueResult =
-            lowerExprInterp(caseStmt->getLHS(), matchCtx, matchInterp);
-        if (matchCtx.failed)
-          return false;
-        mlir::Value caseValue = unwrapValue(caseValueResult);
-        if (!caseValue)
-          return false;
-        mlir::Value valueEquals = caseBuilder.create<mlir::arith::CmpIOp>(
-            loc, mlir::arith::CmpIPredicate::eq, selector, caseValue);
-        mlir::Value available = caseBuilder.create<mlir::arith::AndIOp>(
-            loc, matchNotSeen, notSwitchDone);
-        caseMatch = caseBuilder.create<mlir::arith::AndIOp>(loc, available,
-                                                            valueEquals);
-      } else {
-        caseMatch = caseBuilder.create<mlir::arith::AndIOp>(loc, matchNotSeen,
-                                                            notSwitchDone);
-      }
-
-      mlir::Value executeCondition = caseBuilder.create<mlir::arith::OrIOp>(
-          loc, currentFallthrough, caseMatch);
-      mlir::Value enterCase = caseBuilder.create<mlir::arith::AndIOp>(
-          loc, executeCondition, notSwitchDone);
-
-      const SwitchCaseMetadata *metaCase =
-          caseIndex < switchMeta.cases.size() ? &switchMeta.cases[caseIndex]
-                                              : nullptr;
-      bool caseFallsThrough = metaCase && metaCase->hasFallthrough;
-      bool fallsOutOfSwitch = caseFallsThrough && metaCase->fallsThroughToExit;
-
-      auto ifOp = caseBuilder.create<simt::dialect::IfOp>(
-          loc, resultTypes, enterCase, /*withElseRegion=*/true);
-
-      auto &thenBlock = ifOp.getThenRegion().front();
-      thenBlock.clear();
-      mlir::OpBuilder thenBuilder(caseBuilder.getContext());
-      thenBuilder.setInsertionPointToStart(&thenBlock);
-
-      LoweringContext caseCtx(thenBuilder, loc, ctx.returnType,
-                              ctx.errorMessage, ctx.sourceManager);
-      cloneContextState(ctx, caseCtx);
-      for (auto [vd, value] : llvm::zip(mutatedVars, incomingValues))
-        caseCtx.valueMap[vd] = value;
-
-      auto caseInterp = interp.fork(caseCtx);
-
-      SwitchScopeGuard caseGuard(
-          caseCtx, makeSwitchFrame(caseCtx, mutatedVars, incomingValues, loc));
-      if (SwitchMetadata *meta = caseGuard.frame().metadata) {
-        caseGuard.frame().caseIndex = caseIndex;
-        if (caseIndex < meta->cases.size())
-          caseGuard.frame().activeCase = &meta->cases[caseIndex];
-      }
-
-      for (const clang::Stmt *caseStmt : info.statements) {
+    if (!isSyntheticDefault && info) {
+      for (const clang::Stmt *caseStmt : info->statements) {
         if (!lowerStatement(caseStmt, caseCtx, caseInterp) || caseCtx.failed)
           return false;
         if (caseCtx.emittedTerminator)
           break;
       }
+    }
 
-      if (!caseCtx.emittedTerminator) {
-        llvm::SmallVector<mlir::Value, 8> yieldValues;
-        yieldValues.reserve(mutatedVars.size() + 3);
-        for (auto [index, vd] : llvm::enumerate(mutatedVars)) {
-          mlir::Value value = caseCtx.valueMap.lookup(vd);
-          if (!value && index < incomingValues.size())
-            value = incomingValues[index];
-          if (!value) {
-            const clang::Stmt *errorStmt = index < info.statements.size()
-                                              ? info.statements[index]
-                                              : info.label;
-            signalError(caseCtx, errorStmt,
-                        "switch case missing value for variable");
-            return false;
-          }
-          yieldValues.push_back(value);
-          caseInterp.noteMutation(vd);
+    if (!caseCtx.emittedTerminator) {
+      llvm::SmallVector<mlir::Value, 8> yieldValues;
+      yieldValues.reserve(mutatedVars.size());
+      for (auto [index, vd] : llvm::enumerate(mutatedVars)) {
+        mlir::Value value = caseCtx.valueMap.lookup(vd);
+        if (!value && index < incomingValues.size())
+          value = incomingValues[index];
+        if (!value) {
+          const clang::Stmt *errorStmt =
+              info && index < info->statements.size() ? info->statements[index]
+                                                      : switchStmt;
+          signalError(caseCtx, errorStmt,
+                      "switch case missing value for variable");
+          return false;
         }
-        mlir::Value updatedMatchSeen =
-            thenBuilder.create<mlir::arith::OrIOp>(loc, currentMatchSeen,
-                                                   caseMatch);
-        mlir::Value updatedFallthrough = caseFallsThrough && !fallsOutOfSwitch
-                                           ? constTrue
-                                           : constFalse;
-        yieldValues.push_back(updatedMatchSeen);
-        yieldValues.push_back(updatedFallthrough);
-        yieldValues.push_back(currentSwitchDone);
-        thenBuilder.create<simt::dialect::YieldOp>(loc, yieldValues);
+        yieldValues.push_back(value);
+        caseInterp.noteMutation(vd);
       }
 
-      for (const clang::ValueDecl *vd : caseCtx.mutatedVars)
-        interp.noteMutation(vd);
+      const SwitchCaseMetadata *metaCase =
+          !isSyntheticDefault && caseIndex < switchMeta.cases.size()
+              ? &switchMeta.cases[caseIndex]
+              : nullptr;
+      bool caseFallsThrough = metaCase && metaCase->hasFallthrough;
+      bool lastBlock = (caseIndex + 1 >= totalBlocks);
+      bool fallthrough = caseFallsThrough && !lastBlock;
 
-      auto &elseBlock = ifOp.getElseRegion().front();
-      elseBlock.clear();
-      mlir::OpBuilder elseBuilder(caseBuilder.getContext());
-      elseBuilder.setInsertionPointToStart(&elseBlock);
-
-      llvm::SmallVector<mlir::Value, 8> elseValues = incomingValues;
-      elseValues.push_back(currentMatchSeen);
-      elseValues.push_back(currentFallthrough);
-      elseValues.push_back(currentSwitchDone);
-      elseBuilder.create<simt::dialect::YieldOp>(loc, elseValues);
-
-      caseBuilder.setInsertionPointAfter(ifOp);
-      caseBuilder.create<simt::dialect::YieldOp>(loc, ifOp.getResults());
+      auto yieldOp =
+          caseBuilder.create<simt::dialect::YieldOp>(loc, yieldValues);
+      yieldOp->setAttr("fallthrough", ctx.builder.getBoolAttr(fallthrough));
     }
+
+    for (const clang::ValueDecl *vd : caseCtx.mutatedVars)
+      interp.noteMutation(vd);
   }
 
   for (auto [index, vd] : llvm::enumerate(mutatedVars)) {

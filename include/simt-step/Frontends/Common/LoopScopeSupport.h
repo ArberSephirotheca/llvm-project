@@ -114,13 +114,7 @@ struct LoopSkeleton {
 
 struct SwitchFrame {
   llvm::SmallVector<const clang::ValueDecl *, 8> carriedVars;
-  unsigned matchSeenIndex = 0;
-  unsigned fallthroughIndex = 0;
-  unsigned switchDoneIndex = 0;
   llvm::SmallVector<mlir::Value, 8> initialValues;
-  mlir::Value breakMatchSeenValue;
-  mlir::Value breakFallthroughValue;
-  mlir::Value breakSwitchDoneValue;
   bool analysisOnly = false;
   SwitchMetadata *metadata = nullptr;
   SwitchCaseMetadata *activeCase = nullptr;
@@ -216,11 +210,7 @@ void cloneContextState(const LoweringContext &parent, LoweringContext &child);
 
 SwitchFrame makeSwitchFrame(LoweringContext &ctx,
                             llvm::ArrayRef<const clang::ValueDecl *> carriedVars,
-                            llvm::ArrayRef<mlir::Value> currentValues,
-                            mlir::Location loc,
-                            bool matchSeenDefault = true,
-                            bool fallthroughDefault = false,
-                            bool switchDoneDefault = true);
+                            llvm::ArrayRef<mlir::Value> currentValues);
 
 class LoopScopeState : public LoopScopeProvider {
 public:

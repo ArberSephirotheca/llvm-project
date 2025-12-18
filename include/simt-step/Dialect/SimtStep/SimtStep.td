@@ -490,7 +490,7 @@ def SimtStep_LoopOp : Op<SimtStep_Dialect, "loop",
 
 def SimtStep_BreakOp : Op<SimtStep_Dialect, "break",
     [Terminator]> {
-  let summary = "Structured break from simt.loop";
+  let summary = "Structured break from simt.loop or simt.switch";
   let arguments = (ins Variadic<AnyType>:$results);
   let hasVerifier = 1;
 }
