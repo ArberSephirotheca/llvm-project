@@ -299,10 +299,16 @@ struct HlslEmitter {
             static_cast<unsigned>(std::distance(region.begin(), region.end()));
         if (caseValues.size() + 1 != numBlocks)
             llvm::report_fatal_error("HlslEmitter: switch case_values size mismatch");
+        auto defaultIndexAttr = sw.getDefaultIndexAttr();
+        if (!defaultIndexAttr)
+            llvm::report_fatal_error("HlslEmitter: switch missing default_index");
+        int64_t defaultIndex = defaultIndexAttr.getInt();
+        if (defaultIndex < 0 ||
+            static_cast<std::size_t>(defaultIndex) >= numBlocks)
+            llvm::report_fatal_error("HlslEmitter: switch default_index out of range");
 
         std::vector<bool> caseFallthrough;
         caseFallthrough.reserve(numBlocks);
-        unsigned fallIndex = 0;
         for (auto &blk : region) {
             if (blk.empty())
                 llvm::report_fatal_error("HlslEmitter: switch case missing yield");
@@ -313,10 +319,7 @@ struct HlslEmitter {
             if (!attr)
                 llvm::report_fatal_error("HlslEmitter: switch missing fallthrough attr");
             bool fall = attr.getValue();
-            if (fallIndex + 1 == numBlocks && fall)
-                llvm::report_fatal_error("HlslEmitter: default case cannot fallthrough");
             caseFallthrough.push_back(fall);
-            ++fallIndex;
         }
 
         emitIndent();
@@ -324,13 +327,14 @@ struct HlslEmitter {
         indent += "  ";
         unsigned blockIndex = 0;
 
+        unsigned caseValueIndex = 0;
         for (auto &blk : region) {
-            bool isDefault = (blockIndex + 1 == numBlocks);
+            bool isDefault = (blockIndex == static_cast<unsigned>(defaultIndex));
             emitIndent();
             if (isDefault)
                 os << "default:\n";
             else
-                os << "case " << caseValues[blockIndex] << ":\n";
+                os << "case " << caseValues[caseValueIndex++] << ":\n";
             indent += "  ";
             emitIndent();
             os << "{\n";
@@ -361,7 +365,7 @@ struct HlslEmitter {
             bool fallthrough = false;
             if (blockIndex < caseFallthrough.size())
                 fallthrough = caseFallthrough[blockIndex];
-            if (!fallthrough || isDefault) {
+            if (!fallthrough) {
                 emitIndent();
                 os << "break;\n";
             }
@@ -374,6 +378,8 @@ struct HlslEmitter {
             indent.pop_back();
             ++blockIndex;
         }
+        if (caseValueIndex != caseValues.size())
+            llvm::report_fatal_error("HlslEmitter: switch case_values mapping mismatch");
 
         indent.pop_back();
         indent.pop_back();

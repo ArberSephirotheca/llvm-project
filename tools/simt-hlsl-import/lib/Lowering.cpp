@@ -4369,11 +4369,8 @@ static bool lowerSwitchStmt(const clang::SwitchStmt *switchStmt,
       break;
     }
   }
-  if (defaultIndex != -1 && static_cast<size_t>(defaultIndex + 1) != cases.size()) {
-    signalError(ctx, switchStmt,
-                "default case must appear last for switch lowering");
-    return false;
-  }
+  if (defaultIndex == -1)
+    defaultIndex = static_cast<int>(cases.size());
 
   size_t previousSwitchDepth = ctx.switchMetadataStack.size();
   ctx.switchMetadataStack.push_back(&switchMeta);
@@ -4387,7 +4384,7 @@ static bool lowerSwitchStmt(const clang::SwitchStmt *switchStmt,
     resultTypes.push_back(value.getType());
 
   llvm::SmallVector<int64_t, 8> caseValues;
-  caseValues.reserve(cases.size() - (defaultIndex >= 0 ? 1 : 0));
+  caseValues.reserve(cases.size());
   for (auto [caseIndex, info] : llvm::enumerate(cases)) {
     if (static_cast<int>(caseIndex) == defaultIndex)
       continue;
@@ -4395,7 +4392,7 @@ static bool lowerSwitchStmt(const clang::SwitchStmt *switchStmt,
   }
 
   auto switchOp = ctx.builder.create<simt::dialect::SwitchOp>(
-      loc, resultTypes, selector, initialCarried, caseValues);
+      loc, resultTypes, selector, initialCarried, caseValues, defaultIndex);
   mlir::Region &switchRegion = switchOp.getCaseBody();
   mlir::Block &firstBlock = *switchRegion.begin();
   firstBlock.clear();
@@ -4413,7 +4410,8 @@ static bool lowerSwitchStmt(const clang::SwitchStmt *switchStmt,
 
   addBlockArguments(firstBlock);
 
-  bool addSyntheticDefault = (defaultIndex == -1);
+  bool addSyntheticDefault =
+      static_cast<size_t>(defaultIndex) == cases.size();
   unsigned totalBlocks =
       static_cast<unsigned>(cases.size() + (addSyntheticDefault ? 1 : 0));
 

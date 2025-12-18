@@ -654,6 +654,22 @@ private:
         auto caseValues = switchOp.getCaseValues();
         if (caseValues.size() + 1 != numBlocks)
             llvm::report_fatal_error("handleSwitchSplit: case_values size mismatch");
+        auto defaultIndexAttr = switchOp.getDefaultIndexAttr();
+        if (!defaultIndexAttr)
+            llvm::report_fatal_error("handleSwitchSplit: missing default_index attr");
+        int64_t defaultIndex = defaultIndexAttr.getInt();
+        if (defaultIndex < 0 ||
+            static_cast<std::size_t>(defaultIndex) >= caseBlocks.size())
+            llvm::report_fatal_error("handleSwitchSplit: default_index out of range");
+        llvm::SmallVector<unsigned, 4> caseValueBlocks;
+        caseValueBlocks.reserve(caseValues.size());
+        for (unsigned idx = 0; idx < caseBlocks.size(); ++idx) {
+            if (idx == static_cast<unsigned>(defaultIndex))
+                continue;
+            caseValueBlocks.push_back(idx);
+        }
+        if (caseValueBlocks.size() != caseValues.size())
+            llvm::report_fatal_error("handleSwitchSplit: case_values mapping mismatch");
 
         auto nextIt = std::next(it);
         StepType parentCont = StepType::continueWith(
@@ -698,10 +714,13 @@ private:
         else
             llvm::consumeError(selectorOrErr.takeError());
 
-        unsigned caseIdx = caseValues.size(); // default
+        unsigned caseIdx = static_cast<unsigned>(defaultIndex);
         for (auto indexed : llvm::enumerate(caseValues)) {
             if (indexed.value() == selectorValue) {
-                caseIdx = static_cast<unsigned>(indexed.index());
+                if (indexed.index() >= caseValueBlocks.size())
+                    llvm::report_fatal_error(
+                        "handleSwitchSplit: case_values mapping overflow");
+                caseIdx = caseValueBlocks[indexed.index()];
                 break;
             }
         }
@@ -721,9 +740,6 @@ private:
             if (!attr)
                 llvm::report_fatal_error("handleSwitchSplit: missing fallthrough attr");
             bool fall = attr.getValue();
-            if (idx + 1 == numBlocks && fall)
-                llvm::report_fatal_error(
-                    "handleSwitchSplit: default case cannot fallthrough");
             caseFallthrough.push_back(fall);
         }
 
@@ -765,7 +781,7 @@ private:
         childCtx.expectedMask |= laneMask;
         childCtx.activeMask |= laneBit;
         childCtx.completedMask &= ~laneBit;
-        childCtx.kind = (caseIdx + 1 == numBlocks)
+        childCtx.kind = (caseIdx == static_cast<unsigned>(defaultIndex))
                             ? DynamicBlockKind::SwitchDefault
                             : DynamicBlockKind::SwitchCase;
         childCtx.switchOp = switchOp.getOperation();
@@ -781,7 +797,7 @@ private:
             pathCtx.switchOp = switchOp.getOperation();
             pathCtx.loopOp = nullptr;
             pathCtx.ifOp = nullptr;
-            pathCtx.kind = (pathIdx + 1 == numBlocks)
+            pathCtx.kind = (pathIdx == static_cast<unsigned>(defaultIndex))
                                ? DynamicBlockKind::SwitchDefault
                                : DynamicBlockKind::SwitchCase;
             if (pathCtx.expectedMask == 0)
@@ -814,7 +830,7 @@ private:
             otherCtx.switchOp = switchOp.getOperation();
             otherCtx.loopOp = nullptr;
             otherCtx.ifOp = nullptr;
-            otherCtx.kind = (otherIdx + 1 == numBlocks)
+            otherCtx.kind = (otherIdx == static_cast<unsigned>(defaultIndex))
                                 ? DynamicBlockKind::SwitchDefault
                                 : DynamicBlockKind::SwitchCase;
             if (otherCtx.expectedMask == 0)
@@ -1387,6 +1403,12 @@ private:
         auto switchOp = llvm::dyn_cast<simt::dialect::SwitchOp>(switchOperation);
         if (!switchOp)
             return std::nullopt;
+        auto defaultIndexAttr = switchOp.getDefaultIndexAttr();
+        if (!defaultIndexAttr)
+            llvm::report_fatal_error("handleSwitchYield: missing default_index attr");
+        int64_t defaultIndex = defaultIndexAttr.getInt();
+        if (defaultIndex < 0)
+            llvm::report_fatal_error("handleSwitchYield: invalid default_index");
 
         llvm::SmallVector<ValueType, 8> values;
         values.reserve(yieldOp.getNumOperands());
@@ -1452,6 +1474,8 @@ private:
         unsigned numCases = static_cast<unsigned>(frame.caseBlocks.size());
         if (numCases == 0)
             llvm::report_fatal_error("handleSwitchYield: no switch cases");
+        if (static_cast<std::size_t>(defaultIndex) >= numCases)
+            llvm::report_fatal_error("handleSwitchYield: default_index out of range");
         if (key.sequenceId < frame.baseSeq)
             llvm::report_fatal_error("handleSwitchYield: invalid switch sequence");
         unsigned caseIdx = key.sequenceId - frame.baseSeq;
@@ -1462,8 +1486,6 @@ private:
             llvm::report_fatal_error("handleSwitchYield: missing fallthrough attr");
         bool fallthrough = fallthroughAttr.getValue();
         bool lastCase = (caseIdx + 1 >= numCases);
-        if (lastCase && fallthrough)
-            llvm::report_fatal_error("handleSwitchYield: default case cannot fallthrough");
         if (EnableCPSDebugLogs) {
             llvm::errs() << "[CPS] handleSwitchYield lane=" << lane
                          << " caseIdx=" << caseIdx
@@ -1514,7 +1536,7 @@ private:
         nextCtx.expectedMask |= laneBit;
         nextCtx.activeMask |= laneBit;
         nextCtx.completedMask &= ~laneBit;
-        nextCtx.kind = (nextIdx + 1 == numCases)
+        nextCtx.kind = (nextIdx == static_cast<unsigned>(defaultIndex))
                            ? DynamicBlockKind::SwitchDefault
                            : DynamicBlockKind::SwitchCase;
         nextCtx.switchOp = blockCtx->switchOp;

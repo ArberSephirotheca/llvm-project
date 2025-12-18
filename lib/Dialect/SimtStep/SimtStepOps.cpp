@@ -204,12 +204,14 @@ mlir::LogicalResult CustomOp::verify() {
 void SwitchOp::build(mlir::OpBuilder &builder, mlir::OperationState &state,
                      mlir::TypeRange resultTypes, mlir::Value selector,
                      mlir::ValueRange initialValues,
-                     mlir::ArrayRef<int64_t> caseValues) {
+                     mlir::ArrayRef<int64_t> caseValues,
+                     int64_t defaultIndex) {
   state.addTypes(resultTypes);
   state.addOperands(selector);
   state.addOperands(initialValues);
   state.addAttribute("case_values",
                      builder.getDenseI64ArrayAttr(caseValues));
+  state.addAttribute("default_index", builder.getI64IntegerAttr(defaultIndex));
 
   mlir::OpBuilder::InsertionGuard guard(builder);
   auto *body = state.addRegion();
@@ -229,6 +231,9 @@ mlir::LogicalResult SwitchOp::verify() {
   auto caseValues = getCaseValuesAttr();
   if (!caseValues)
     return emitOpError("requires 'case_values' attribute");
+  auto defaultIndexAttr = getDefaultIndexAttr();
+  if (!defaultIndexAttr)
+    return emitOpError("requires 'default_index' attribute");
 
   mlir::Region &body = getCaseBody();
   if (body.empty())
@@ -238,8 +243,11 @@ mlir::LogicalResult SwitchOp::verify() {
   if (caseCount + 1 != body.getBlocks().size())
     return emitOpError(
         "case_values count must be one less than the number of case blocks");
+  int64_t defaultIndex = defaultIndexAttr.getInt();
+  if (defaultIndex < 0 ||
+      static_cast<std::size_t>(defaultIndex) >= body.getBlocks().size())
+    return emitOpError("default_index must name a valid case block");
 
-  unsigned blockIndex = 0;
   for (mlir::Block &block : body) {
     if (block.getNumArguments() != getNumResults())
       return emitOpError(
@@ -252,10 +260,6 @@ mlir::LogicalResult SwitchOp::verify() {
     if (!fallthroughAttr)
       return emitOpError(
           "each switch case must have a bool 'fallthrough' attribute");
-    bool isDefault = (blockIndex + 1 == body.getBlocks().size());
-    if (isDefault && fallthroughAttr.getValue())
-      return emitOpError("default case cannot fall through");
-    ++blockIndex;
   }
 
   return mlir::success();

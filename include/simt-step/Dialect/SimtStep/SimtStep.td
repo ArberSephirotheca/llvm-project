@@ -406,12 +406,15 @@ def SimtStep_SwitchOp : Op<SimtStep_Dialect, "switch"> {
     Structured container for lowering switch statements. The selector operand
     chooses among cases enumerated in the `case_values` attribute. Each case
     and the default branch end with `simt_step.yield`, forwarding the
-    switch-carried values.
+    switch-carried values. The `default_index` attribute identifies which
+    block in the case region is the default; `case_values` are ordered to
+    match the remaining blocks.
   }];
 
   let arguments = (ins AnyType:$selector,
                        Variadic<AnyType>:$initialValues,
-                       DenseI64ArrayAttr:$case_values);
+                       DenseI64ArrayAttr:$case_values,
+                       I64Attr:$default_index);
   let results = (outs Variadic<AnyType>:$results);
   let regions = (region AnyRegion:$caseBody);
 
@@ -419,7 +422,8 @@ def SimtStep_SwitchOp : Op<SimtStep_Dialect, "switch"> {
   let builders = [
     OpBuilder<(ins "mlir::TypeRange":$resultTypes, "mlir::Value":$selector,
                     "mlir::ValueRange":$initialValues,
-                    "mlir::ArrayRef<int64_t>":$caseValues)>
+                    "mlir::ArrayRef<int64_t>":$caseValues,
+                    "int64_t":$defaultIndex)>
   ];
 
   let hasVerifier = 1;

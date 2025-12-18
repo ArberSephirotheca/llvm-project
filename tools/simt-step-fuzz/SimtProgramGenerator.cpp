@@ -115,6 +115,7 @@ static Value buildSwitch(OpBuilder &b, Location loc, BuildState &st,
     int numCases = st.rng.pick(2, 4);
     bool includeDefault = st.rng.coin();
     bool allowFallthrough = st.rng.coin();
+    int defaultIndex = st.rng.pick(0, numCases - 1);
     llvm::SmallVector<bool, 4> emitWaveInCase;
     emitWaveInCase.reserve(numCases);
     bool anyWave = false;
@@ -148,11 +149,16 @@ static Value buildSwitch(OpBuilder &b, Location loc, BuildState &st,
 
     llvm::SmallVector<int64_t, 4> caseValues;
     caseValues.reserve(numCases - 1);
-    for (int i = 0; i < numCases - 1; ++i)
-        caseValues.push_back(i);
+    int nextCaseValue = 0;
+    for (int i = 0; i < numCases; ++i) {
+        if (i == defaultIndex)
+            continue;
+        caseValues.push_back(nextCaseValue++);
+    }
 
     auto switchOp = b.create<simt::dialect::SwitchOp>(
-        loc, TypeRange{b.getI32Type()}, selector, ValueRange{initVal}, caseValues);
+        loc, TypeRange{b.getI32Type()}, selector, ValueRange{initVal}, caseValues,
+        defaultIndex);
 
     auto &region = switchOp.getCaseBody();
     while (static_cast<int>(region.getBlocks().size()) < numCases) {
