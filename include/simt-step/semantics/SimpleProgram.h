@@ -4,6 +4,7 @@
 #include "simt-step/semantics/CPSInterpreter.h"
 #include "simt-step/semantics/ExecutionState.h"
 #include "simt-step/semantics/SimpleSemantics.h"
+#include "simt-step/semantics/Trace.h"
 
 #include <mlir/IR/Block.h>
 
@@ -17,6 +18,8 @@ public:
     using StateType = DefaultInterpreterState;
 
     SimpleProgramRunner() : semantics_(), interpreter_(semantics_) {}
+
+    void setTraceSink(TraceSink *sink) { interpreter_.setTraceSink(sink); }
 
     llvm::Error runBlock(mlir::Block *block,
                          SemanticsContext context = SemanticsContext{});

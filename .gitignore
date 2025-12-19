@@ -8,3 +8,4 @@
 .vscode
 Agent.md
 /*.log
+*.jsonl

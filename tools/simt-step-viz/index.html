@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SIMT-Step Trace Viewer</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="bg-blur"></div>
+    <header class="hero">
+      <div>
+        <div class="eyebrow">SIMT-Step Interpreter Visualization</div>
+        <h1>Trace Viewer</h1>
+        <p>
+          Load a JSONL trace from <code>--trace-file</code>, step through execution,
+          and inspect per-lane behavior over time.
+        </p>
+      </div>
+      <div class="hero-actions">
+        <button id="resetBtn" class="btn ghost">Reset</button>
+        <button id="stepBtn" class="btn">Step</button>
+        <button id="runBtn" class="btn accent">Play</button>
+      </div>
+    </header>
+
+    <main class="grid">
+      <section class="panel controls">
+        <h2>Controls</h2>
+        <div class="field">
+          <label for="threadsInput">Lanes</label>
+          <input type="number" id="threadsInput" min="1" max="64" value="4" />
+        </div>
+        <div class="field">
+          <label for="seedInput">Seed</label>
+          <input type="number" id="seedInput" min="0" value="0" />
+        </div>
+        <div class="field">
+          <label for="programSelect">Program</label>
+          <select id="programSelect">
+            <option value="richer" selected>Richer Random</option>
+            <option value="randomized">Randomized</option>
+            <option value="deterministic">Deterministic</option>
+          </select>
+        </div>
+        <div class="field">
+          <button id="generateBtn" class="btn">Run Interpreter</button>
+          <div class="hint" id="runStatus">Local server required for generation.</div>
+        </div>
+        <div class="field">
+          <label for="speedInput">Run Speed (events/sec)</label>
+          <input type="range" id="speedInput" min="1" max="120" value="24" />
+          <div class="hint" id="speedLabel">24</div>
+        </div>
+        <div class="field">
+          <label for="programText">Program (MLIR)</label>
+          <textarea id="programText" rows="8" placeholder="MLIR appears here after running."></textarea>
+        </div>
+        <div class="stats">
+          <div>
+            <div class="stat-label">Events</div>
+            <div class="stat-value" id="eventCount">0</div>
+          </div>
+          <div>
+            <div class="stat-label">Position</div>
+            <div class="stat-value" id="eventIndex">0</div>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel timeline">
+        <h2>Timeline</h2>
+        <div class="canvas-wrap">
+          <canvas id="timelineCanvas"></canvas>
+          <div id="tooltip" class="tooltip hidden"></div>
+        </div>
+      </section>
+
+      <section class="panel lane-state">
+        <h2>Lane State</h2>
+        <div id="laneTable" class="lane-table"></div>
+      </section>
+
+      <section class="panel event-log">
+        <h2>Event Log</h2>
+        <div id="eventLog" class="log"></div>
+      </section>
+    </main>
+
+    <footer class="footer">
+      Trace format: JSONL events with <code>event</code>, <code>wave</code>,
+      <code>lane</code>, <code>op</code>, <code>active</code>, <code>expected</code>.
+    </footer>
+
+    <script src="app.js"></script>
+  </body>
+</html>

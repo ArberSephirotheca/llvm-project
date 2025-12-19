@@ -4,4 +4,5 @@ target_sources(simt-step
         ${CMAKE_CURRENT_SOURCE_DIR}/ValueStorage.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/SimpleSemantics.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/SimpleProgram.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/TraceJsonWriter.cpp
 )

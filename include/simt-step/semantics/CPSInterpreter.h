@@ -3,6 +3,7 @@
 #include "simt-step/semantics/Effects.h"
 #include "simt-step/semantics/ExecutionState.h"
 #include "simt-step/semantics/SemanticsContext.h"
+#include "simt-step/semantics/Trace.h"
 
 #include <algorithm>
 #include <bit>
@@ -36,6 +37,22 @@ inline std::string formatMaskBits(std::uint64_t mask, unsigned width) {
         s.push_back((mask & (1ull << i)) ? '1' : '0');
     }
     return s;
+}
+
+inline const char *blockKindLabel(DynamicBlockKind kind) {
+    switch (kind) {
+    case DynamicBlockKind::Plain:
+        return "plain";
+    case DynamicBlockKind::IfThen:
+        return "if.then";
+    case DynamicBlockKind::IfElse:
+        return "if.else";
+    case DynamicBlockKind::SwitchCase:
+        return "switch.case";
+    case DynamicBlockKind::SwitchDefault:
+        return "switch.default";
+    }
+    return "unknown";
 }
 
 template <typename ValueT, typename StepT>
@@ -162,6 +179,8 @@ public:
     explicit CPSInterpreter(SemanticsT semantics)
         : semantics_(std::move(semantics)) {}
 
+    void setTraceSink(TraceSink *sink) { traceSink_ = sink; }
+
     StateType &state() { return state_; }
     const StateType &state() const { return state_; }
 
@@ -266,6 +285,10 @@ public:
                             ctx.valueEnv = &envIt->second;
                     }
                 }
+                const std::uint32_t blockSeq = key.sequenceId;
+                const void *blockPtr = key.block;
+                const char *blockKind =
+                    blockCtx ? blockKindLabel(blockCtx->kind) : "unknown";
 
                 if (auto handled =
                         handleLoopSplit(wave, key, block, it, ctx, lane))
@@ -312,6 +335,14 @@ public:
                             LaneContext<ValueType, StepType>::Phase::Completed;
                         laneCtx.hasReturned = true;
                     }
+                    if (traceSink_) {
+                        std::uint64_t expectedMask =
+                            ctx.expectedMask ? ctx.expectedMask : ctx.activeMask;
+                        traceSink_->onReturn(wave, lane,
+                                             retOp.getNumOperands() > 0,
+                                             ctx.activeMask, expectedMask,
+                                             blockSeq, blockPtr, blockKind);
+                    }
                 }
 
                 if (EnableCPSDebugLogs) {
@@ -320,6 +351,15 @@ public:
                                  << " seq=" << key.sequenceId
                                  << " op=" << it->getName().getStringRef() << "\n";
                 }
+                if (traceSink_) {
+                    std::uint64_t expectedMask =
+                        ctx.expectedMask ? ctx.expectedMask : ctx.activeMask;
+                    traceSink_->onStepBegin(
+                        wave, lane, it->getName().getStringRef().str(),
+                        ctx.activeMask, expectedMask,
+                        blockSeq, blockPtr, blockKind);
+                }
+
                 StepType current = adaptor_.eval(semantics_, &*it, ctx);
                 mlir::Block::iterator nextIt = std::next(it);
                 bool isTerminator = it->hasTrait<mlir::OpTrait::IsTerminator>();
@@ -340,12 +380,27 @@ public:
                             std::get_if<typename StepType::Suspend>(&stateVariant)) {
                         Effect effect = std::move(suspend->effect);
                         auto resume = std::move(suspend->resume);
+                        if (traceSink_) {
+                            std::uint64_t expectedMask =
+                                ctx.expectedMask ? ctx.expectedMask : ctx.activeMask;
+                            traceSink_->onSuspend(
+                                wave, lane, effect, ctx.activeMask, expectedMask,
+                                blockSeq, blockPtr, blockKind);
+                        }
 
                         std::function<StepType(StepType)> handleResumed;
                         handleResumed = [this, wave, key, block, nextIt, ctx, lane,
                                          isTerminator, hasNext, waveCtx, blockCtx,
+                                         blockSeq, blockPtr, blockKind,
                                          op = &*it, &handleResumed](StepType current)
                                          mutable -> StepType {
+                            if (traceSink_) {
+                                std::uint64_t expectedMask =
+                                    ctx.expectedMask ? ctx.expectedMask : ctx.activeMask;
+                                traceSink_->onResume(
+                                    wave, lane, ctx.activeMask, expectedMask,
+                                    blockSeq, blockPtr, blockKind);
+                            }
                             while (true) {
                                 auto resumedState = std::move(current).takeState();
                                 if (auto *cont =
@@ -2536,6 +2591,7 @@ private:
 
     SimtStepSemanticsAdaptor<SemanticsT> adaptor_;
     SemanticsT semantics_;
+    TraceSink *traceSink_ = nullptr;
     StateType state_;
 };
 
