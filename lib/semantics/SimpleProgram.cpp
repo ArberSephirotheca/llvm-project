@@ -59,6 +59,7 @@ llvm::Error SimpleProgramRunner::runBlock(mlir::Block *block,
         laneCtx.returnValue.reset();
         laneCtx.phase = decltype(laneCtx.phase)::Running;
         laneCtx.currentBlock = entryKey;
+        laneCtx.callStack.clear();
 
         SemanticsContext laneContext = context;
         laneContext.activeMask = laneMask;

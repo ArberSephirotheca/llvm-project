@@ -7,6 +7,7 @@
 #include <limits>
 #include <optional>
 #include <queue>
+#include <string>
 #include <utility>
 
 #include <mlir/IR/Block.h>
@@ -16,6 +17,10 @@
 #include <llvm/ADT/DenseMapInfo.h>
 #include <llvm/ADT/DenseSet.h>
 #include <llvm/ADT/SmallVector.h>
+
+namespace mlir {
+class Operation;
+} // namespace mlir
 
 namespace simt::semantics {
 
@@ -63,6 +68,7 @@ struct DynamicBlock {
     llvm::DenseMap<LaneId, StepT> continuations;
     llvm::DenseMap<LaneId, StepT> pendingOps;
     llvm::DenseMap<LaneId, llvm::DenseMap<mlir::Value, ValueT>> valueEnvs;
+    llvm::DenseMap<const mlir::Operation *, DynamicBlockKey> callChildren;
 };
 
 template <typename ValueT>
@@ -103,6 +109,15 @@ struct SynchronizationSyncPoint {
     llvm::DenseMap<LaneId, StepT> continuations;
 };
 
+template <typename ValueT>
+struct CallFrame {
+    DynamicBlockKey callerKey;
+    mlir::Block *callerBlock = nullptr;
+    mlir::Block::iterator resumeIt;
+    llvm::SmallVector<mlir::Value, 4> results;
+    std::string calleeName;
+};
+
 template <typename ValueT, typename StepT>
 struct LaneContext {
     llvm::DenseMap<mlir::Value, ValueT> values;
@@ -110,6 +125,7 @@ struct LaneContext {
     std::optional<ValueT> returnValue;
     std::optional<DynamicBlockKey> currentBlock;
     enum class Phase { Running, Waiting, Completed } phase = Phase::Running;
+    llvm::SmallVector<CallFrame<ValueT>, 4> callStack;
 };
 
 template <typename ValueT, typename StepT>
@@ -131,6 +147,7 @@ struct WaveContext {
     llvm::DenseMap<std::uint32_t, CollectiveSyncPoint<ValueT, StepT>> collectives;
     llvm::DenseMap<std::uint32_t, SynchronizationSyncPoint<ValueT, StepT>> syncPoints;
     llvm::DenseMap<LaneId, LaneContext<ValueT, StepT>> lanes;
+    std::uint32_t nextCallSeq = 1;
 };
 
 template <typename ValueT, typename StepT>

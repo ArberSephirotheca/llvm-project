@@ -440,6 +440,39 @@ struct HlslEmitter {
                << "[" << get(store.getIndex()) << "] = " << get(store.getValue()) << ";\n";
             return success();
         }
+        if (auto call = dyn_cast<func::CallOp>(op)) {
+            if (call.getNumResults() > 1)
+                llvm::report_fatal_error("HlslEmitter: call with multiple results");
+            std::string callee = call.getCallee().str();
+            if (call.getNumResults() == 1) {
+                std::string tmp = makeTmp();
+                names[call.getResult(0)] = tmp;
+                emitIndent();
+                os << emitType(call.getResult(0).getType()) << " " << tmp << " = ";
+            } else {
+                emitIndent();
+            }
+            os << callee << "(";
+            for (unsigned i = 0; i < call.getNumOperands(); ++i) {
+                if (i)
+                    os << ", ";
+                os << get(call.getOperand(i));
+            }
+            os << ");\n";
+            return success();
+        }
+        if (auto ret = dyn_cast<func::ReturnOp>(op)) {
+            emitIndent();
+            if (ret.getNumOperands() == 0) {
+                os << "return;\n";
+                return success();
+            }
+            if (ret.getNumOperands() == 1) {
+                os << "return " << get(ret.getOperand(0)) << ";\n";
+                return success();
+            }
+            llvm::report_fatal_error("HlslEmitter: multiple return values");
+        }
         if (isa<simt::dialect::YieldOp, simt::dialect::ConditionOp>(op))
             return success();
         return failure();
@@ -447,6 +480,40 @@ struct HlslEmitter {
 };
 
 } // namespace
+
+static LogicalResult emitHelperFunction(func::FuncOp func,
+                                        llvm::raw_ostream &os) {
+    auto results = func.getFunctionType().getResults();
+    if (results.size() > 1)
+        llvm::report_fatal_error("HlslEmitter: helper multiple results");
+
+    HlslEmitter emitter(os);
+    std::string retType = results.empty() ? "void" : emitter.emitType(results[0]);
+
+    os << retType << " " << func.getName() << "(";
+    bool first = true;
+    for (auto arg : func.getArguments()) {
+        if (!first)
+            os << ", ";
+        first = false;
+        os << emitter.emitType(arg.getType()) << " arg" << arg.getArgNumber();
+        emitter.names[arg] = "arg" + std::to_string(arg.getArgNumber());
+    }
+    os << ") {\n";
+    emitter.indent = "  ";
+
+    auto &entry = func.getBody().front();
+    for (auto &op : entry) {
+        if (failed(emitter.emitOp(&op))) {
+            os << "unsupported op in helper: " << op.getName() << "\n";
+            return failure();
+        }
+        if (isa<func::ReturnOp>(op))
+            break;
+    }
+    os << "}\n\n";
+    return success();
+}
 
 LogicalResult emitModuleAsHlsl(ModuleOp module, llvm::raw_ostream &os) {
     func::FuncOp func;
@@ -496,6 +563,13 @@ LogicalResult emitModuleAsHlsl(ModuleOp module, llvm::raw_ostream &os) {
     }
     if (!resources.empty())
         os << "\n";
+
+    for (auto op : module.getOps<func::FuncOp>()) {
+        if (op == func)
+            continue;
+        if (failed(emitHelperFunction(op, os)))
+            return failure();
+    }
 
     os << "[numthreads(" << ntx << "," << nty << "," << ntz << ")]\n";
     os << "void main(";

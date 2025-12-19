@@ -20,6 +20,7 @@
 #include <llvm/Support/Error.h>
 #include <llvm/Support/ErrorHandling.h>
 #include <llvm/Support/raw_ostream.h>
+#include <mlir/IR/SymbolTable.h>
 
 namespace mlir {
 class Operation;
@@ -326,11 +327,55 @@ public:
                         handleIfSplit(wave, key, block, it, ctx, lane))
                     return *handled;
 
+                if (auto handled =
+                        handleCallOp(wave, key, block, it, ctx, lane))
+                    return *handled;
+
                 // Mark return as terminal for this lane so we don't resume parents.
                 if (auto retOp = llvm::dyn_cast<mlir::func::ReturnOp>(&*it)) {
                     auto waveIt = state_.waves.find(wave);
                     if (waveIt != state_.waves.end()) {
-                        auto &laneCtx = waveIt->second.lanes[lane];
+                        auto &waveCtx = waveIt->second;
+                        auto &laneCtx = waveCtx.lanes[lane];
+                        if (!laneCtx.callStack.empty()) {
+                            auto frame = std::move(laneCtx.callStack.back());
+                            laneCtx.callStack.pop_back();
+                            if (auto *blockCtx = getBlock(waveCtx, key))
+                                blockCtx->activeMask &= ~(1ull << lane);
+                            if (frame.results.size() != retOp.getNumOperands())
+                                llvm::report_fatal_error(
+                                    "call return value count mismatch");
+                            auto *callerBlockCtx = getBlock(waveCtx, frame.callerKey);
+                            if (!callerBlockCtx)
+                                llvm::report_fatal_error(
+                                    "call return missing caller block");
+                            if (!frame.results.empty()) {
+                                auto valOrErr =
+                                    evaluateValue(waveCtx, key, retOp.getOperand(0),
+                                                  lane, ctx.activeMask, ctx.expectedMask);
+                                if (!valOrErr)
+                                    llvm::report_fatal_error(
+                                        "call return value evaluation failed");
+                                callerBlockCtx->valueEnvs[lane][frame.results[0]] =
+                                    *valOrErr;
+                            }
+                            callerBlockCtx->activeMask |= (1ull << lane);
+                            laneCtx.phase =
+                                LaneContext<ValueType, StepType>::Phase::Running;
+                            laneCtx.hasReturned = false;
+                            laneCtx.returnValue.reset();
+                            laneCtx.currentBlock = frame.callerKey;
+                            SemanticsContext resumeCtx;
+                            resumeCtx.laneId = lane;
+                            return StepType::continueWith(
+                                [this, wave, frame = std::move(frame), lane,
+                                 resumeCtx]() mutable -> StepType {
+                                    return makeNextOp(wave, frame.callerKey,
+                                                      frame.callerBlock,
+                                                      frame.resumeIt, resumeCtx,
+                                                      lane);
+                                });
+                        }
                         laneCtx.phase =
                             LaneContext<ValueType, StepType>::Phase::Completed;
                         laneCtx.hasReturned = true;
@@ -2084,6 +2129,109 @@ private:
             parentBlock.continuations.erase(contIt);
         }
         return StepType::halt();
+    }
+
+    std::optional<StepType> handleCallOp(WaveId wave,
+                                         const DynamicBlockKey &key,
+                                         mlir::Block *block,
+                                         mlir::Block::iterator it,
+                                         SemanticsContext context,
+                                         LaneId lane) {
+        auto callOp = llvm::dyn_cast<mlir::func::CallOp>(&*it);
+        if (!callOp)
+            return std::nullopt;
+
+        auto waveIt = state_.waves.find(wave);
+        if (waveIt == state_.waves.end())
+            llvm::report_fatal_error("call: missing wave context");
+        auto &waveCtx = waveIt->second;
+        auto &laneCtx = waveCtx.lanes[lane];
+        auto *callerBlockCtx = getBlock(waveCtx, key);
+        if (!callerBlockCtx)
+            llvm::report_fatal_error("call: missing caller block");
+
+        auto calleeAttr = callOp.getCalleeAttr();
+        if (!calleeAttr)
+            llvm::report_fatal_error("call: missing callee symbol");
+        auto calleeOp =
+            mlir::dyn_cast_or_null<mlir::func::FuncOp>(
+                mlir::SymbolTable::lookupNearestSymbolFrom(callOp, calleeAttr));
+        if (!calleeOp)
+            llvm::report_fatal_error("call: unresolved callee");
+        if (calleeOp.isExternal())
+            llvm::report_fatal_error("call: external callee unsupported");
+
+        auto currentFunc = callOp->getParentOfType<mlir::func::FuncOp>();
+        if (!currentFunc)
+            llvm::report_fatal_error("call: missing parent function");
+        if (calleeOp == currentFunc)
+            llvm::report_fatal_error("call: recursion unsupported");
+        for (const auto &frame : laneCtx.callStack) {
+            if (frame.calleeName == calleeOp.getName().str())
+                llvm::report_fatal_error("call: recursion unsupported");
+        }
+
+        if (callOp.getNumResults() > 1)
+            llvm::report_fatal_error("call: multiple results unsupported");
+        if (callOp.getNumOperands() != calleeOp.getNumArguments())
+            llvm::report_fatal_error("call: argument count mismatch");
+
+        llvm::SmallVector<ValueType, 4> argValues;
+        argValues.reserve(callOp.getNumOperands());
+        for (auto arg : callOp.getOperands()) {
+            auto valOrErr = evaluateValue(
+                waveCtx, key, arg, lane, context.activeMask, context.expectedMask);
+            if (!valOrErr)
+                llvm::report_fatal_error("call: argument evaluation failed");
+            argValues.push_back(*valOrErr);
+        }
+
+        DynamicBlockKey calleeKey;
+        auto callChildIt = callerBlockCtx->callChildren.find(callOp.getOperation());
+        if (callChildIt != callerBlockCtx->callChildren.end()) {
+            calleeKey = callChildIt->second;
+        } else {
+            calleeKey = DynamicBlockKey{&calleeOp.getBody().front(),
+                                        waveCtx.nextCallSeq++};
+            callerBlockCtx->callChildren[callOp.getOperation()] = calleeKey;
+        }
+
+        auto &calleeBlockCtx = waveCtx.blocks[calleeKey];
+        calleeBlockCtx.block = calleeKey.block;
+        calleeBlockCtx.sequenceId = calleeKey.sequenceId;
+        calleeBlockCtx.kind = DynamicBlockKind::Plain;
+        std::uint64_t expected =
+            context.expectedMask ? context.expectedMask : context.activeMask;
+        if (calleeBlockCtx.expectedMask == 0)
+            calleeBlockCtx.expectedMask = expected ? expected : (1ull << lane);
+        calleeBlockCtx.activeMask |= (1ull << lane);
+        calleeBlockCtx.completedMask &= ~(1ull << lane);
+
+        auto &env = calleeBlockCtx.valueEnvs[lane];
+        env.clear();
+        auto &entryBlock = calleeOp.getBody().front();
+        for (unsigned i = 0; i < entryBlock.getNumArguments(); ++i)
+            env[entryBlock.getArgument(i)] = argValues[i];
+
+        callerBlockCtx->activeMask &= ~(1ull << lane);
+
+        CallFrame<ValueType> frame;
+        frame.callerKey = key;
+        frame.callerBlock = block;
+        frame.resumeIt = std::next(it);
+        frame.results.assign(callOp.getResults().begin(), callOp.getResults().end());
+        frame.calleeName = calleeOp.getName().str();
+        laneCtx.callStack.push_back(std::move(frame));
+        laneCtx.currentBlock = calleeKey;
+
+        SemanticsContext calleeContext = context;
+        return StepType::continueWith(
+            [this, wave, calleeKey, calleeBlock = const_cast<mlir::Block *>(
+                                             calleeKey.block),
+             calleeContext, lane]() mutable -> StepType {
+                return makeNextOp(wave, calleeKey, calleeBlock,
+                                  calleeBlock->begin(), calleeContext, lane);
+            });
     }
 
     /// Evaluate an SSA value to a SemValue for a given lane in a block.

@@ -42,6 +42,24 @@ static Value makeBool(OpBuilder &b, Location loc, bool v) {
     return b.create<arith::ConstantIntOp>(loc, v ? 1 : 0, 1);
 }
 
+static func::FuncOp buildScalarHelper(OpBuilder &b, Location loc,
+                                      llvm::StringRef name, RNG *rng) {
+    auto i32 = b.getI32Type();
+    auto funcType = b.getFunctionType({i32}, {i32});
+    auto func = b.create<func::FuncOp>(loc, name, funcType);
+    auto *entry = func.addEntryBlock();
+    OpBuilder fb(entry, entry->begin());
+    Value arg = entry->getArgument(0);
+    int c1 = rng ? rng->pick(1, 4) : 1;
+    int c2 = rng ? rng->pick(2, 5) : 3;
+    int c3 = rng ? rng->pick(0, 4) : 2;
+    Value v1 = fb.create<arith::AddIOp>(loc, arg, makeI32(fb, loc, c1));
+    Value v2 = fb.create<arith::RemSIOp>(loc, v1, makeI32(fb, loc, c2));
+    Value v3 = fb.create<arith::AddIOp>(loc, v2, makeI32(fb, loc, c3));
+    fb.create<func::ReturnOp>(loc, ValueRange{v3});
+    return func;
+}
+
 static Value makeNonUniformCond(OpBuilder &b, Location loc, RNG &rng,
                                 const GeneratorConfig &cfg, Value tid) {
     int lanes = static_cast<int>(cfg.numThreads[0]);
@@ -297,6 +315,8 @@ createDeterministicIfLoopModule(mlir::MLIRContext &context,
         &context, simt::dialect::MemorySpace::Global, builder.getI32Type());
     llvm::errs() << "[fuzz-gen] resource type ready\n";
 
+    auto helper = buildScalarHelper(builder, loc, "helper0", nullptr);
+
     auto funcType = builder.getFunctionType({resTy}, {});
     auto func = builder.create<func::FuncOp>(loc, "main", funcType);
     llvm::errs() << "[fuzz-gen] func created\n";
@@ -311,6 +331,11 @@ createDeterministicIfLoopModule(mlir::MLIRContext &context,
     Value tid =
         builder.create<simt::dialect::DispatchThreadIdOp>(loc, builder.getI32Type());
     llvm::errs() << "[fuzz-gen] tid op created\n";
+    auto call = builder.create<func::CallOp>(loc, helper, ValueRange{tid});
+    Value callRes = call.getResult(0);
+    Value callBase = makeI32(builder, loc, 128);
+    Value callIdx = builder.create<arith::AddIOp>(loc, callBase, tid);
+    builder.create<simt::dialect::BufferStoreOp>(loc, outWave, callIdx, callRes);
     Value c0 = builder.create<arith::ConstantIntOp>(loc, 0, 32);
     Value cond =
         builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, tid, c0);
@@ -429,6 +454,7 @@ createRandomizedModule(mlir::MLIRContext &context,
 
     auto resTy = simt::dialect::ResourceType::get(
         &context, simt::dialect::MemorySpace::Global, builder.getI32Type());
+    auto helper = buildScalarHelper(builder, loc, "helper0", &rng);
     auto funcType = builder.getFunctionType({resTy}, {});
     auto func = builder.create<func::FuncOp>(loc, "main", funcType);
     func->setAttr("simt.num_threads",
@@ -441,6 +467,11 @@ createRandomizedModule(mlir::MLIRContext &context,
     Value outWave = entry->getArgument(0);
     Value tid =
         builder.create<simt::dialect::DispatchThreadIdOp>(loc, builder.getI32Type());
+    auto call = builder.create<func::CallOp>(loc, helper, ValueRange{tid});
+    Value callRes = call.getResult(0);
+    Value callBase = makeI32(builder, loc, 128);
+    Value callIdx = builder.create<arith::AddIOp>(loc, callBase, tid);
+    builder.create<simt::dialect::BufferStoreOp>(loc, outWave, callIdx, callRes);
 
     // Build a non-uniform branch predicate.
     Value cond = makeNonUniformCond(builder, loc, rng, cfg, tid);
@@ -534,6 +565,7 @@ createRicherRandomModule(mlir::MLIRContext &context,
 
     auto resTy = simt::dialect::ResourceType::get(
         &context, simt::dialect::MemorySpace::Global, builder.getI32Type());
+    auto helper = buildScalarHelper(builder, loc, "helper0", &rng);
     auto funcType = builder.getFunctionType({resTy}, {});
     auto func = builder.create<func::FuncOp>(loc, "main", funcType);
     func->setAttr("simt.num_threads",
@@ -546,6 +578,11 @@ createRicherRandomModule(mlir::MLIRContext &context,
     Value outWave = entry->getArgument(0);
     Value tid =
         builder.create<simt::dialect::DispatchThreadIdOp>(loc, builder.getI32Type());
+    auto call = builder.create<func::CallOp>(loc, helper, ValueRange{tid});
+    Value callRes = call.getResult(0);
+    Value callBase = makeI32(builder, loc, 128);
+    Value callIdx = builder.create<arith::AddIOp>(loc, callBase, tid);
+    builder.create<simt::dialect::BufferStoreOp>(loc, outWave, callIdx, callRes);
 
     BuildState st{cfg, rng, /*waveId=*/0, tid, outWave};
 
