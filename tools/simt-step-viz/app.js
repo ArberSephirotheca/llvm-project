@@ -16,6 +16,13 @@
   const programModal = document.getElementById("programModal");
   const programCopy = document.getElementById("programCopy");
   const programClose = document.getElementById("programClose");
+  const raiseSelect = document.getElementById("raiseSelect");
+  const raiseSummary = document.getElementById("raiseSummary");
+  const raiseButton = document.getElementById("raiseButton");
+  const raiseModal = document.getElementById("raiseModal");
+  const raiseCopy = document.getElementById("raiseCopy");
+  const raiseClose = document.getElementById("raiseClose");
+  const raiseText = document.getElementById("raiseText");
   const generateBtn = document.getElementById("generateBtn");
   const runStatus = document.getElementById("runStatus");
   const speedInput = document.getElementById("speedInput");
@@ -119,6 +126,30 @@
     programSummary.textContent = `Loaded ${lines} lines.`;
   }
 
+  function setRaiseModal(open) {
+    if (!raiseModal)
+      return;
+    raiseModal.classList.toggle("is-open", open);
+    raiseModal.setAttribute("aria-hidden", open ? "false" : "true");
+  }
+
+  function updateRaiseSummary(errorText) {
+    if (!raiseSummary || !raiseText)
+      return;
+    if (errorText) {
+      raiseSummary.textContent = errorText;
+      return;
+    }
+    const value = raiseText.value.trim();
+    if (!value) {
+      raiseSummary.textContent = "No raised output.";
+      return;
+    }
+    const lines = value.split(/\r?\n/).length;
+    const label = raiseSelect ? raiseSelect.value.toUpperCase() : "OUTPUT";
+    raiseSummary.textContent = `${label}: ${lines} lines.`;
+  }
+
   [syncCfInput, collectiveCfInput, syncMemInput, collectiveMemInput].forEach(
     (input) => {
       if (!input)
@@ -175,8 +206,48 @@
         setProgramModal(false);
     });
 
+  if (raiseButton)
+    raiseButton.addEventListener("click", () => setRaiseModal(true));
+  if (raiseSummary)
+    raiseSummary.addEventListener("click", () => setRaiseModal(true));
+  if (raiseClose)
+    raiseClose.addEventListener("click", () => setRaiseModal(false));
+  if (raiseModal)
+    raiseModal.addEventListener("click", (event) => {
+      const target = event.target;
+      if (target && target.dataset && target.dataset.close)
+        setRaiseModal(false);
+    });
+  if (raiseCopy)
+    raiseCopy.addEventListener("click", async () => {
+      if (!raiseText)
+        return;
+      const value = raiseText.value;
+      if (!value)
+        return;
+      try {
+        await navigator.clipboard.writeText(value);
+        raiseCopy.textContent = "Copied";
+        setTimeout(() => {
+          raiseCopy.textContent = "Copy";
+        }, 1200);
+      } catch (err) {
+        raiseCopy.textContent = "Failed";
+        setTimeout(() => {
+          raiseCopy.textContent = "Copy";
+        }, 1200);
+      }
+    });
+  if (raiseSelect)
+    raiseSelect.addEventListener("change", () => {
+      if (raiseText)
+        raiseText.value = "";
+      updateRaiseSummary();
+    });
+
   updateModeSummary();
   updateProgramSummary();
+  updateRaiseSummary();
 
   function fixLegacyLine(line) {
     return line
@@ -659,6 +730,8 @@
       seed: String(seed),
       program,
     });
+    if (raiseSelect && raiseSelect.value)
+      query.set("raise", raiseSelect.value);
     if (syncCfInput && syncCfInput.checked)
       query.set("sync_cf", "1");
     if (collectiveCfInput && collectiveCfInput.checked)
@@ -684,6 +757,11 @@
         if (payload.ir) {
           programText.value = payload.ir;
           updateProgramSummary();
+        }
+        if (raiseText) {
+          raiseText.value = payload.raised || "";
+          const raiseError = payload.raise_error || "";
+          updateRaiseSummary(raiseError);
         }
         runStatus.textContent = `Loaded ${events.length} events.`;
         runStatus.style.color = "var(--run)";

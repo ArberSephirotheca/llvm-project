@@ -44,6 +44,7 @@ class TraceHandler(http.server.SimpleHTTPRequestHandler):
         lanes = parse_int(params.get("lanes", ["4"])[0], 4)
         seed = parse_int(params.get("seed", ["0"])[0], 0)
         program = params.get("program", ["richer"])[0]
+        raise_target = params.get("raise", ["none"])[0]
         collective_cf = parse_bool(params.get("collective_cf", [None])[0], False)
         sync_cf = parse_bool(params.get("sync_cf", [None])[0], False)
         sync_mem = parse_bool(params.get("sync_mem", [None])[0], False)
@@ -68,6 +69,12 @@ class TraceHandler(http.server.SimpleHTTPRequestHandler):
                 {"error": "program must be one of: richer, randomized, deterministic"},
             )
             return
+        if raise_target not in ("none", "hlsl", "glsl", "cuda"):
+            self.send_json(
+                400,
+                {"error": "raise must be one of: none, hlsl, glsl, cuda"},
+            )
+            return
         if collective_cf and sync_cf:
             self.send_json(
                 400,
@@ -89,6 +96,8 @@ class TraceHandler(http.server.SimpleHTTPRequestHandler):
             return
 
         trace_path = None
+        raised_text = ""
+        raise_error = ""
         try:
             with tempfile.NamedTemporaryFile(
                 suffix=".jsonl", prefix="simt-step-trace-", delete=False
@@ -134,6 +143,34 @@ class TraceHandler(http.server.SimpleHTTPRequestHandler):
             payload = {"trace": trace_text}
             if ir_text:
                 payload["ir"] = ir_text
+            if raise_target in ("glsl", "cuda"):
+                raise_error = f"{raise_target.upper()} raiser not supported yet"
+            elif raise_target == "hlsl":
+                raise_cmd = [
+                    str(FUZZ_BIN),
+                    f"--lanes={lanes}",
+                    f"--seed={seed}",
+                    f"--program={program_map[program]}",
+                    "--raise-hlsl",
+                ]
+                raise_result = subprocess.run(
+                    raise_cmd,
+                    cwd=str(ROOT),
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+                if raise_result.returncode != 0:
+                    raise_error = "raiser failed"
+                    stderr = raise_result.stderr.strip()
+                    if stderr:
+                        raise_error = f"{raise_error}: {stderr}"
+                else:
+                    raised_text = raise_result.stdout.strip()
+            if raise_error:
+                payload["raise_error"] = raise_error
+            if raised_text:
+                payload["raised"] = raised_text
             self.send_json(200, payload)
         finally:
             if trace_path:

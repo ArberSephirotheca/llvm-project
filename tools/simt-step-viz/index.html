@@ -64,6 +64,17 @@
           <div class="summary-box" id="programSummary">No program loaded.</div>
           <button id="programButton" class="btn ghost" type="button">View</button>
         </div>
+        <div class="field">
+          <label for="raiseSelect">Raiser Output</label>
+          <select id="raiseSelect">
+            <option value="hlsl" selected>HLSL</option>
+            <option value="glsl">GLSL (coming)</option>
+            <option value="cuda">CUDA (coming)</option>
+            <option value="none">None</option>
+          </select>
+          <div class="summary-box" id="raiseSummary">No raised output.</div>
+          <button id="raiseButton" class="btn ghost" type="button">View</button>
+        </div>
         <div class="stats">
           <div>
             <div class="stat-label">Events</div>
@@ -141,6 +152,20 @@
           </div>
         </div>
         <textarea id="programText" class="program-text" rows="18" placeholder="MLIR appears here after running."></textarea>
+      </div>
+    </div>
+
+    <div class="modal" id="raiseModal" aria-hidden="true">
+      <div class="modal-backdrop" data-close="true"></div>
+      <div class="modal-card modal-card-wide" role="dialog" aria-modal="true" aria-labelledby="raiseTitle">
+        <div class="modal-head">
+          <h3 id="raiseTitle">Raised Output</h3>
+          <div class="modal-head-actions">
+            <button class="btn ghost" id="raiseCopy" type="button">Copy</button>
+            <button class="btn ghost" id="raiseClose" type="button">Close</button>
+          </div>
+        </div>
+        <textarea id="raiseText" class="program-text" rows="18" placeholder="Raised output appears here after running."></textarea>
       </div>
     </div>
 
