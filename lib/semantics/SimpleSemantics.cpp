@@ -464,9 +464,10 @@ auto SimpleSemantics::handleBufferStore(mlir::Operation *op,
     if (expectedMask == 0)
         expectedMask = 1ull << context.laneId;
 
+    ExecutionMode defaultMode =
+        context.policy ? context.policy->memoryOps : ExecutionMode::Independent;
     ExecutionMode mode =
-        resolveExecutionMode(context, op->getName().getStringRef(),
-                             ExecutionMode::Independent);
+        resolveExecutionMode(context, op->getName().getStringRef(), defaultMode);
     auto doStore = [res, idx, val]() -> StepType {
         globalMemory()[res][idx] = val;
         return StepType::halt();
@@ -508,9 +509,10 @@ auto SimpleSemantics::handleBufferLoad(mlir::Operation *op,
     if (expectedMask == 0)
         expectedMask = 1ull << context.laneId;
 
+    ExecutionMode defaultMode =
+        context.policy ? context.policy->memoryOps : ExecutionMode::Independent;
     ExecutionMode mode =
-        resolveExecutionMode(context, op->getName().getStringRef(),
-                             ExecutionMode::Independent);
+        resolveExecutionMode(context, op->getName().getStringRef(), defaultMode);
     auto doLoad = [res, idx]() -> StepType {
         auto resIt = globalMemory().find(res);
         if (resIt == globalMemory().end())

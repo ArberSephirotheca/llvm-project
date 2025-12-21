@@ -20,6 +20,7 @@ enum class ExecutionMode {
 struct ExecutionPolicy {
     ExecutionMode controlFlow = ExecutionMode::Independent;
     ExecutionMode waveOps = ExecutionMode::Collective;
+    ExecutionMode memoryOps = ExecutionMode::Independent;
     llvm::StringMap<ExecutionMode> overrides;
 };
 

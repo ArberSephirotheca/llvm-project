@@ -2,7 +2,10 @@
   const threadsInput = document.getElementById("threadsInput");
   const seedInput = document.getElementById("seedInput");
   const programSelect = document.getElementById("programSelect");
+  const syncCfInput = document.getElementById("syncCfInput");
   const collectiveCfInput = document.getElementById("collectiveCfInput");
+  const syncMemInput = document.getElementById("syncMemInput");
+  const collectiveMemInput = document.getElementById("collectiveMemInput");
   const generateBtn = document.getElementById("generateBtn");
   const runStatus = document.getElementById("runStatus");
   const speedInput = document.getElementById("speedInput");
@@ -36,6 +39,22 @@
   let running = false;
   let timer = null;
   let eventPoints = [];
+
+  function wireExclusive(primary, secondary) {
+    if (!primary || !secondary)
+      return;
+    primary.addEventListener("change", () => {
+      if (primary.checked)
+        secondary.checked = false;
+    });
+    secondary.addEventListener("change", () => {
+      if (secondary.checked)
+        primary.checked = false;
+    });
+  }
+
+  wireExclusive(syncCfInput, collectiveCfInput);
+  wireExclusive(syncMemInput, collectiveMemInput);
 
   function fixLegacyLine(line) {
     return line
@@ -518,8 +537,14 @@
       seed: String(seed),
       program,
     });
+    if (syncCfInput && syncCfInput.checked)
+      query.set("sync_cf", "1");
     if (collectiveCfInput && collectiveCfInput.checked)
       query.set("collective_cf", "1");
+    if (syncMemInput && syncMemInput.checked)
+      query.set("sync_mem", "1");
+    if (collectiveMemInput && collectiveMemInput.checked)
+      query.set("collective_mem", "1");
 
     generateBtn.disabled = true;
     runStatus.textContent = "Running interpreter...";

@@ -46,6 +46,18 @@ int main(int argc, char **argv) {
         "collective-cf",
         llvm::cl::desc("Make control-flow ops collective before split"),
         llvm::cl::init(false));
+    llvm::cl::opt<bool> syncControlFlow(
+        "sync-cf",
+        llvm::cl::desc("Make control-flow ops synchronous (barriered)"),
+        llvm::cl::init(false));
+    llvm::cl::opt<bool> syncMemory(
+        "sync-mem",
+        llvm::cl::desc("Make buffer load/store synchronous (barriered)"),
+        llvm::cl::init(false));
+    llvm::cl::opt<bool> collectiveMemory(
+        "collective-mem",
+        llvm::cl::desc("Make buffer load/store collective"),
+        llvm::cl::init(false));
     llvm::cl::opt<std::string> traceFile(
         "trace-file", llvm::cl::desc("Write interpreter trace to JSONL file"),
         llvm::cl::init(""));
@@ -111,9 +123,24 @@ int main(int argc, char **argv) {
         traceWriter = std::make_unique<simt::semantics::TraceJsonWriter>(traceFile);
         runner.setTraceSink(traceWriter.get());
     }
+    if (collectiveControlFlow && syncControlFlow) {
+        llvm::errs() << "error: --collective-cf conflicts with --sync-cf\n";
+        return 1;
+    }
+    if (collectiveMemory && syncMemory) {
+        llvm::errs() << "error: --collective-mem conflicts with --sync-mem\n";
+        return 1;
+    }
+
     simt::semantics::ExecutionPolicy execPolicy;
     if (collectiveControlFlow)
         execPolicy.controlFlow = simt::semantics::ExecutionMode::Collective;
+    else if (syncControlFlow)
+        execPolicy.controlFlow = simt::semantics::ExecutionMode::Synchronous;
+    if (collectiveMemory)
+        execPolicy.memoryOps = simt::semantics::ExecutionMode::Collective;
+    else if (syncMemory)
+        execPolicy.memoryOps = simt::semantics::ExecutionMode::Synchronous;
     simt::semantics::SemanticsContext semaCtx;
     unsigned width = std::min<unsigned>(64, std::max<unsigned>(1, numLanes));
     semaCtx.activeMask =

@@ -45,11 +45,29 @@
           </select>
         </div>
         <div class="field">
-          <label for="collectiveCfInput">Collective Control Flow</label>
-          <div class="toggle">
-            <input type="checkbox" id="collectiveCfInput" />
-            <span>Barrier before if/loop/switch</span>
+          <label>Execution Mode</label>
+          <div class="mode-grid">
+            <div class="mode-head"></div>
+            <div class="mode-head">Control Flow</div>
+            <div class="mode-head">Memory</div>
+
+            <div class="mode-label">Synchronous</div>
+            <label class="mode-toggle" for="syncCfInput">
+              <input type="checkbox" id="syncCfInput" />
+            </label>
+            <label class="mode-toggle" for="syncMemInput">
+              <input type="checkbox" id="syncMemInput" />
+            </label>
+
+            <div class="mode-label">Collective</div>
+            <label class="mode-toggle" for="collectiveCfInput">
+              <input type="checkbox" id="collectiveCfInput" />
+            </label>
+            <label class="mode-toggle" for="collectiveMemInput">
+              <input type="checkbox" id="collectiveMemInput" />
+            </label>
           </div>
+          <div class="hint">Select at most one mode per column.</div>
         </div>
         <div class="field">
           <button id="generateBtn" class="btn">Run Interpreter</button>

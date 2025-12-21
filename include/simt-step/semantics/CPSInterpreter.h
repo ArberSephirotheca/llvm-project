@@ -437,6 +437,18 @@ public:
                             std::get_if<typename StepType::Suspend>(&stateVariant)) {
                         Effect effect = std::move(suspend->effect);
                         auto resume = std::move(suspend->resume);
+                        if (waveCtx && executionModeForOp(&*it, ctx) ==
+                                           ExecutionMode::Collective) {
+                            if (isMemoryOp(&*it)) {
+                                if (auto *collective =
+                                        effect.template get_if<CollectiveEffect>()) {
+                                    std::uint32_t token =
+                                        collective->token.value_or(
+                                            collective->operation);
+                                    waveCtx->collectiveTokenToOp[token] = &*it;
+                                }
+                            }
+                        }
                         if (waveCtx && isWaveOp(&*it) &&
                             executionModeForOp(&*it, ctx) == ExecutionMode::Collective) {
                             if (!blockCtx)
@@ -633,6 +645,11 @@ private:
                          simt::dialect::SwitchOp>(op);
     }
 
+    static bool isMemoryOp(mlir::Operation *op) {
+        auto name = op->getName().getStringRef();
+        return name == "simt_step.buffer.load" || name == "simt_step.buffer.store";
+    }
+
     static bool isWaveOp(mlir::Operation *op) {
         return op->hasTrait<simt::dialect::SimtWave>();
     }
@@ -696,6 +713,8 @@ private:
                 return context.policy->controlFlow;
             if (isWaveOp(op))
                 return context.policy->waveOps;
+            if (isMemoryOp(op))
+                return context.policy->memoryOps;
         }
         if (isWaveOp(op))
             return ExecutionMode::Collective;
@@ -2929,6 +2948,8 @@ private:
                 waveOp = waveIt->second;
             bool isWaveCollective =
                 waveOp && isWaveOp(const_cast<mlir::Operation *>(waveOp));
+            bool isMemoryCollective =
+                waveOp && isMemoryOp(const_cast<mlir::Operation *>(waveOp));
             auto &syncPoint = waveCtx.collectives[key];
             syncPoint.effect = *collective;
             syncPoint.block = block;
@@ -2991,6 +3012,21 @@ private:
                         blockKindLabel(blockCtx->kind),
                         blockCtx->loopIteration);
                 }
+                if (isMemoryCollective && traceSink_) {
+                    std::string opName;
+                    if (waveOp)
+                        opName = const_cast<mlir::Operation *>(waveOp)
+                                     ->getName()
+                                     .getStringRef()
+                                     .str();
+                    traceSink_->onCollectiveComplete(
+                        wave,
+                        opName,
+                        syncPoint.expectedMask, syncPoint.expectedMask,
+                        block.sequenceId, block.block,
+                        blockKindLabel(blockCtx->kind),
+                        blockCtx->loopIteration);
+                }
                 std::uint64_t mask = syncPoint.expectedMask;
                 while (mask) {
                     unsigned l = std::countr_zero(mask);
@@ -3005,6 +3041,8 @@ private:
                 }
                 if (!isWaveCollective)
                     waveCtx.collectives.erase(key);
+                if (isMemoryCollective)
+                    waveCtx.collectiveTokenToOp.erase(key);
             }
             return llvm::Error::success();
         }

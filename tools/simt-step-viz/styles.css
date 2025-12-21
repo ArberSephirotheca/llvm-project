@@ -119,6 +119,33 @@ code {
   color: var(--text);
 }
 
+.mode-grid {
+  display: grid;
+  grid-template-columns: 1fr 110px 110px;
+  gap: 8px 12px;
+  align-items: center;
+  font-family: var(--font-mono);
+}
+
+.mode-head {
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.mode-label {
+  font-size: 12px;
+  color: var(--text);
+}
+
+.mode-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 28px;
+}
+
 input[type="checkbox"] {
   width: 16px;
   height: 16px;

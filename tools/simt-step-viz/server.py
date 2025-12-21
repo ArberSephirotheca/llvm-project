@@ -45,6 +45,9 @@ class TraceHandler(http.server.SimpleHTTPRequestHandler):
         seed = parse_int(params.get("seed", ["0"])[0], 0)
         program = params.get("program", ["richer"])[0]
         collective_cf = parse_bool(params.get("collective_cf", [None])[0], False)
+        sync_cf = parse_bool(params.get("sync_cf", [None])[0], False)
+        sync_mem = parse_bool(params.get("sync_mem", [None])[0], False)
+        collective_mem = parse_bool(params.get("collective_mem", [None])[0], False)
 
         if lanes < 1 or lanes > 64:
             self.send_json(400, {"error": "lanes must be between 1 and 64"})
@@ -63,6 +66,18 @@ class TraceHandler(http.server.SimpleHTTPRequestHandler):
             self.send_json(
                 400,
                 {"error": "program must be one of: richer, randomized, deterministic"},
+            )
+            return
+        if collective_cf and sync_cf:
+            self.send_json(
+                400,
+                {"error": "control flow mode cannot be both sync and collective"},
+            )
+            return
+        if collective_mem and sync_mem:
+            self.send_json(
+                400,
+                {"error": "memory mode cannot be both sync and collective"},
             )
             return
 
@@ -91,6 +106,12 @@ class TraceHandler(http.server.SimpleHTTPRequestHandler):
             ]
             if collective_cf:
                 cmd.append("--collective-cf")
+            if sync_cf:
+                cmd.append("--sync-cf")
+            if sync_mem:
+                cmd.append("--sync-mem")
+            if collective_mem:
+                cmd.append("--collective-mem")
             result = subprocess.run(
                 cmd,
                 cwd=str(ROOT),
