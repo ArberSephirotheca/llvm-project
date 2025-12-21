@@ -32,8 +32,6 @@ struct SemanticsContext {
     const ExecutionPolicy *policy = nullptr;
     std::optional<ExecutionMode> overrideMode;
     bool suppressStepTrace = false;
-    std::optional<bool> forcedPredicate;
-    std::optional<std::int64_t> forcedSelector;
 };
 
 } // namespace simt::semantics

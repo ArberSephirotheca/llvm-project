@@ -619,6 +619,9 @@ public:
     }
 
 private:
+    using IfDecisionMap = llvm::DenseMap<LaneId, bool>;
+    using SwitchDecisionMap = llvm::DenseMap<LaneId, std::int64_t>;
+
     static bool isControlFlowOp(mlir::Operation *op) {
         return llvm::isa<simt::dialect::IfOp, simt::dialect::LoopOp,
                          simt::dialect::SwitchOp>(op);
@@ -896,8 +899,6 @@ private:
             laneCtx.policy = waveCtx.policy;
             laneCtx.overrideMode = ExecutionMode::Independent;
             laneCtx.suppressStepTrace = true;
-            laneCtx.forcedPredicate.reset();
-            laneCtx.forcedSelector.reset();
             auto envIt = blockCtx->valueEnvs.find(lane);
             if (envIt != blockCtx->valueEnvs.end())
                 laneCtx.valueEnv = &envIt->second;
@@ -909,10 +910,8 @@ private:
             }
 
             if (llvm::isa<simt::dialect::IfOp>(op)) {
-                auto decisionIt = ifDecisions.find(lane);
-                if (decisionIt != ifDecisions.end())
-                    laneCtx.forcedPredicate = decisionIt->second;
-                (void)handleIfSplit(wave, key, block, it, laneCtx, lane);
+                (void)handleIfSplit(wave, key, block, it, laneCtx, lane,
+                                    &ifDecisions);
                 return;
             }
             if (llvm::isa<simt::dialect::LoopOp>(op)) {
@@ -920,10 +919,8 @@ private:
                 return;
             }
             if (llvm::isa<simt::dialect::SwitchOp>(op)) {
-                auto decisionIt = switchDecisions.find(lane);
-                if (decisionIt != switchDecisions.end())
-                    laneCtx.forcedSelector = decisionIt->second;
-                (void)handleSwitchSplit(wave, key, block, it, laneCtx, lane);
+                (void)handleSwitchSplit(wave, key, block, it, laneCtx, lane,
+                                        &switchDecisions);
                 return;
             }
 
@@ -1031,8 +1028,6 @@ private:
         SemanticsContext parentContext = context;
         parentContext.overrideMode.reset();
         parentContext.suppressStepTrace = false;
-        parentContext.forcedPredicate.reset();
-        parentContext.forcedSelector.reset();
         StepType parentCont = StepType::continueWith(
             [this, wave, key, block, nextIt, parentContext, lane]() mutable
             -> StepType {
@@ -1109,8 +1104,6 @@ private:
         SemanticsContext childContext = context;
         childContext.overrideMode.reset();
         childContext.suppressStepTrace = false;
-        childContext.forcedPredicate.reset();
-        childContext.forcedSelector.reset();
         childContext.activeMask = prepareCtx.activeMask;
         childContext.laneId = lane;
         StepType childStep = makeNextOp(wave, prepKey, prepareBlock,
@@ -1126,7 +1119,8 @@ private:
                                               mlir::Block *block,
                                               mlir::Block::iterator it,
                                               SemanticsContext context,
-                                              LaneId lane) {
+                                              LaneId lane,
+                                              const SwitchDecisionMap *decisions = nullptr) {
         auto switchOp = llvm::dyn_cast<simt::dialect::SwitchOp>(&*it);
         if (!switchOp)
             return std::nullopt;
@@ -1193,8 +1187,6 @@ private:
         SemanticsContext parentContext = context;
         parentContext.overrideMode.reset();
         parentContext.suppressStepTrace = false;
-        parentContext.forcedPredicate.reset();
-        parentContext.forcedSelector.reset();
         StepType parentCont = StepType::continueWith(
             [this, wave, key, block, nextIt, parentContext, lane]() mutable
             -> StepType {
@@ -1237,8 +1229,12 @@ private:
                 : (parentBlock.expectedMask ? parentBlock.expectedMask
                                             : parentBlock.activeMask);
         std::int64_t selectorValue = 0;
-        if (context.forcedSelector) {
-            selectorValue = *context.forcedSelector;
+        if (decisions) {
+            auto decisionIt = decisions->find(lane);
+            if (decisionIt == decisions->end())
+                llvm::report_fatal_error(
+                    "handleSwitchSplit: missing selector decision");
+            selectorValue = decisionIt->second;
         } else {
             auto selectorOrErr =
                 evaluateValue(waveCtx, key, switchOp.getSelector(), lane,
@@ -1412,8 +1408,6 @@ private:
         SemanticsContext laneCtx = context;
         laneCtx.overrideMode.reset();
         laneCtx.suppressStepTrace = false;
-        laneCtx.forcedPredicate.reset();
-        laneCtx.forcedSelector.reset();
         laneCtx.activeMask = childCtx.activeMask;
         laneCtx.expectedMask =
             childCtx.expectedMask ? childCtx.expectedMask : childCtx.activeMask;
@@ -2324,7 +2318,8 @@ private:
                                           mlir::Block *block,
                                           mlir::Block::iterator it,
                                           SemanticsContext context,
-                                          LaneId lane) {
+                                          LaneId lane,
+                                          const IfDecisionMap *decisions = nullptr) {
         auto ifOp = llvm::dyn_cast<simt::dialect::IfOp>(&*it);
         if (!ifOp)
             return std::nullopt;
@@ -2357,8 +2352,6 @@ private:
         SemanticsContext parentContext = context;
         parentContext.overrideMode.reset();
         parentContext.suppressStepTrace = false;
-        parentContext.forcedPredicate.reset();
-        parentContext.forcedSelector.reset();
         StepType parentCont = StepType::continueWith(
             [this, wave, key, block, nextIt, parentContext, lane]() mutable
             -> StepType {
@@ -2380,8 +2373,12 @@ private:
                                             : parentBlock.activeMask);
         bool takeThen = false;
         bool takeElse = false;
-        if (context.forcedPredicate) {
-            takeThen = *context.forcedPredicate;
+        if (decisions) {
+            auto decisionIt = decisions->find(lane);
+            if (decisionIt == decisions->end())
+                llvm::report_fatal_error(
+                    "handleIfSplit: missing predicate decision");
+            takeThen = decisionIt->second;
         } else {
             auto condOrErr =
                 evaluateBool(waveCtx, key, ifOp.getCondition(), lane,
@@ -2510,8 +2507,6 @@ private:
             SemanticsContext laneCtx = context;
             laneCtx.overrideMode.reset();
             laneCtx.suppressStepTrace = false;
-            laneCtx.forcedPredicate.reset();
-            laneCtx.forcedSelector.reset();
             laneCtx.activeMask = child.activeMask;
             laneCtx.expectedMask =
                 child.expectedMask ? child.expectedMask : child.activeMask;
@@ -2581,8 +2576,6 @@ private:
             SemanticsContext laneCtx = context;
             laneCtx.overrideMode.reset();
             laneCtx.suppressStepTrace = false;
-            laneCtx.forcedPredicate.reset();
-            laneCtx.forcedSelector.reset();
             laneCtx.activeMask = child.activeMask;
             laneCtx.expectedMask =
                 child.expectedMask ? child.expectedMask : child.activeMask;
