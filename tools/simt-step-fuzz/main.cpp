@@ -111,11 +111,14 @@ int main(int argc, char **argv) {
         traceWriter = std::make_unique<simt::semantics::TraceJsonWriter>(traceFile);
         runner.setTraceSink(traceWriter.get());
     }
+    simt::semantics::ExecutionPolicy execPolicy;
+    if (collectiveControlFlow)
+        execPolicy.controlFlow = simt::semantics::ExecutionMode::Collective;
     simt::semantics::SemanticsContext semaCtx;
     unsigned width = std::min<unsigned>(64, std::max<unsigned>(1, numLanes));
     semaCtx.activeMask =
         width >= 64 ? ~0ull : ((1ull << static_cast<std::uint64_t>(width)) - 1ull);
-    semaCtx.collectiveControlFlow = collectiveControlFlow;
+    semaCtx.policy = &execPolicy;
     simt::semantics::SimpleSemantics::clearMemory();
 
     if (llvm::Error err = runner.runBlock(&entry, semaCtx)) {

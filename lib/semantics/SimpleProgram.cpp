@@ -36,6 +36,7 @@ llvm::Error SimpleProgramRunner::runBlock(mlir::Block *block,
         context.activeMask ? context.activeMask : ((1ull << 4) - 1ull);
 
     auto &waveCtx = state.waves[wave];
+    waveCtx.policy = context.policy;
     waveCtx.currentMask = 0;
 
     DynamicBlockKey entryKey{block, 0};

@@ -19,4 +19,24 @@ template <typename ConcreteType>
 class SimtCollective
     : public mlir::OpTrait::TraitBase<ConcreteType, SimtCollective> {};
 
+/// Trait for wave-level ops.
+template <typename ConcreteType>
+class SimtWave : public mlir::OpTrait::TraitBase<ConcreteType, SimtWave> {};
+
 } // namespace simt::dialect
+
+namespace mlir::OpTrait {
+
+template <typename ConcreteType>
+using SimtIndependent = ::simt::dialect::SimtIndependent<ConcreteType>;
+
+template <typename ConcreteType>
+using SimtSynchronized = ::simt::dialect::SimtSynchronized<ConcreteType>;
+
+template <typename ConcreteType>
+using SimtCollective = ::simt::dialect::SimtCollective<ConcreteType>;
+
+template <typename ConcreteType>
+using SimtWave = ::simt::dialect::SimtWave<ConcreteType>;
+
+} // namespace mlir::OpTrait

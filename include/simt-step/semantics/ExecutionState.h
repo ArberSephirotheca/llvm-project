@@ -24,6 +24,8 @@ class Operation;
 
 namespace simt::semantics {
 
+struct ExecutionPolicy;
+
 using LaneId = std::uint32_t;
 using WaveId = std::uint32_t;
 
@@ -99,6 +101,7 @@ struct CollectiveSyncPoint {
     std::uint64_t expectedMask = 0;
     llvm::DenseSet<LaneId> arrivals;
     llvm::DenseMap<LaneId, ValueT> operands;
+    llvm::DenseMap<LaneId, ValueT> results;
     llvm::DenseMap<LaneId, StepT> continuations;
 };
 
@@ -160,6 +163,9 @@ struct WaveContext {
     std::uint32_t nextCallSeq = 1;
     std::uint32_t nextControlToken = 1;
     llvm::DenseMap<std::uint32_t, const mlir::Operation *> controlTokenToOp;
+    llvm::DenseMap<std::uint32_t, const mlir::Operation *> syncTokenToOp;
+    llvm::DenseMap<std::uint32_t, const mlir::Operation *> collectiveTokenToOp;
+    const ExecutionPolicy *policy = nullptr;
 };
 
 template <typename ValueT, typename StepT>

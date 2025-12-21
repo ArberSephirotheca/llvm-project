@@ -5,6 +5,7 @@
 
 #include <llvm/ADT/DenseMap.h>
 #include <llvm/ADT/STLExtras.h>
+#include <llvm/ADT/StringRef.h>
 #include <llvm/Support/Error.h>
 #include <llvm/Support/ErrorHandling.h>
 #include <vector>
@@ -29,6 +30,19 @@ SemValue makeValueFromAttribute(mlir::Attribute attr) {
 
     llvm::errs() << "simple semantics: unsupported constant attribute\n";
     return SemValue();
+}
+
+ExecutionMode resolveWaveExecutionMode(const SemanticsContext &context,
+                                       llvm::StringRef opName) {
+    if (context.overrideMode)
+        return *context.overrideMode;
+    if (context.policy) {
+        auto it = context.policy->overrides.find(opName);
+        if (it != context.policy->overrides.end())
+            return it->second;
+        return context.policy->waveOps;
+    }
+    return ExecutionMode::Collective;
 }
 
 } // namespace
@@ -479,10 +493,28 @@ auto SimpleSemantics::handleWaveCountBits(mlir::Operation *op,
     }
     std::uint64_t expectedMask =
         context.expectedMask ? context.expectedMask : context.activeMask;
-    // Treat as a collective: wait for all lanes in expectedMask, then produce the
-    // same count for each lane. Predicate participates in the collective; if it is
-    // false, the lane still waits but returns 0 to match the HLSL contract.
+    if (expectedMask == 0)
+        expectedMask = 1ull << context.laneId;
     constexpr std::uint32_t WaveCountBitsOp = 1;
+    bool pred = predOrErr->asBool();
+    ExecutionMode mode =
+        resolveWaveExecutionMode(context, op->getName().getStringRef());
+    auto resume = [expectedMask, pred]() -> StepType {
+        std::int32_t count =
+            pred ? static_cast<std::int32_t>(std::popcount(expectedMask)) : 0;
+        return StepType::produce(SemValue::fromInt32(count));
+    };
+    if (mode == ExecutionMode::Independent)
+        return resume();
+    if (mode == ExecutionMode::Synchronous) {
+        SynchronizationEffect effect;
+        effect.operation = WaveCountBitsOp;
+        effect.activeMask = expectedMask;
+        effect.token = static_cast<std::uint32_t>(
+            reinterpret_cast<std::uintptr_t>(op) ^
+            (reinterpret_cast<std::uintptr_t>(op) >> 32));
+        return StepType::suspend(effect, std::move(resume));
+    }
     CollectiveEffect effect;
     effect.operation = WaveCountBitsOp;
     effect.activeMask = expectedMask;
@@ -490,12 +522,7 @@ auto SimpleSemantics::handleWaveCountBits(mlir::Operation *op,
     effect.token = static_cast<std::uint32_t>(
         reinterpret_cast<std::uintptr_t>(op) ^
         (reinterpret_cast<std::uintptr_t>(op) >> 32));
-    bool pred = predOrErr->asBool();
-    return StepType::suspend(effect, [expectedMask, pred]() -> StepType {
-        std::int32_t count =
-            pred ? static_cast<std::int32_t>(std::popcount(expectedMask)) : 0;
-        return StepType::produce(SemValue::fromInt32(count));
-    });
+    return StepType::suspend(effect, std::move(resume));
 }
 
 namespace {
