@@ -52,6 +52,10 @@ inline const char *blockKindLabel(DynamicBlockKind kind) {
         return "switch.case";
     case DynamicBlockKind::SwitchDefault:
         return "switch.default";
+    case DynamicBlockKind::LoopPrepare:
+        return "loop.prepare";
+    case DynamicBlockKind::LoopBody:
+        return "loop.body";
     }
     return "unknown";
 }
@@ -294,6 +298,8 @@ public:
                 const void *blockPtr = key.block;
                 const char *blockKind =
                     blockCtx ? blockKindLabel(blockCtx->kind) : "unknown";
+                std::optional<std::uint32_t> blockIter =
+                    blockCtx ? blockCtx->loopIteration : std::nullopt;
 
                 if (auto handled =
                         handleLoopSplit(wave, key, block, it, ctx, lane))
@@ -392,7 +398,7 @@ public:
                         traceSink_->onReturn(wave, lane,
                                              retOp.getNumOperands() > 0,
                                              ctx.activeMask, expectedMask,
-                                             blockSeq, blockPtr, blockKind);
+                                             blockSeq, blockPtr, blockKind, blockIter);
                     }
                 }
 
@@ -408,7 +414,7 @@ public:
                     traceSink_->onStepBegin(
                         wave, lane, it->getName().getStringRef().str(),
                         ctx.activeMask, expectedMask,
-                        blockSeq, blockPtr, blockKind);
+                        blockSeq, blockPtr, blockKind, blockIter);
                 }
 
                 StepType current = adaptor_.eval(semantics_, &*it, ctx);
@@ -488,13 +494,13 @@ public:
                                 ctx.expectedMask ? ctx.expectedMask : ctx.activeMask;
                             traceSink_->onSuspend(
                                 wave, lane, effect, ctx.activeMask, expectedMask,
-                                blockSeq, blockPtr, blockKind);
+                                blockSeq, blockPtr, blockKind, blockIter);
                         }
 
                         std::function<StepType(StepType)> handleResumed;
                         handleResumed = [this, wave, key, block, nextIt, ctx, lane,
                                          isTerminator, hasNext, waveCtx, blockCtx,
-                                         blockSeq, blockPtr, blockKind,
+                                         blockSeq, blockPtr, blockKind, blockIter,
                                          op = &*it, &handleResumed](StepType current)
                                          mutable -> StepType {
                             if (traceSink_) {
@@ -502,7 +508,7 @@ public:
                                     ctx.expectedMask ? ctx.expectedMask : ctx.activeMask;
                                 traceSink_->onResume(
                                     wave, lane, ctx.activeMask, expectedMask,
-                                    blockSeq, blockPtr, blockKind);
+                                    blockSeq, blockPtr, blockKind, blockIter);
                             }
                             while (true) {
                                 auto resumedState = std::move(current).takeState();
@@ -759,7 +765,8 @@ private:
         if (traceSink_) {
             traceSink_->onSuspend(
                 wave, lane, Effect(effect), context.activeMask, expected,
-                key.sequenceId, key.block, blockKindLabel(blockCtx->kind));
+                key.sequenceId, key.block, blockKindLabel(blockCtx->kind),
+                blockCtx->loopIteration);
         }
 
         return StepType::suspend(
@@ -821,7 +828,8 @@ private:
         if (traceSink_) {
             traceSink_->onSuspend(
                 wave, lane, Effect(effect), context.activeMask, expected,
-                key.sequenceId, key.block, blockKindLabel(blockCtx->kind));
+                key.sequenceId, key.block, blockKindLabel(blockCtx->kind),
+                blockCtx->loopIteration);
         }
 
         return StepType::suspend(
@@ -906,7 +914,7 @@ private:
             if (traceSink_ && !laneCtx.suppressStepTrace) {
                 traceSink_->onResume(
                     wave, lane, evalActive, evalExpected, key.sequenceId, key.block,
-                    blockKindLabel(blockCtx->kind));
+                    blockKindLabel(blockCtx->kind), blockCtx->loopIteration);
             }
 
             if (llvm::isa<simt::dialect::IfOp>(op)) {
@@ -972,7 +980,7 @@ private:
             traceSink_->onStepBegin(
                 wave, lane, it->getName().getStringRef().str(),
                 context.activeMask, expectedMask, key.sequenceId, key.block,
-                blockKindLabel(parentBlock.kind));
+                blockKindLabel(parentBlock.kind), parentBlock.loopIteration);
         }
 
         if (EnableCPSDebugLogs) {
@@ -1003,7 +1011,8 @@ private:
         prepareCtx.switchOp = nullptr;
         prepareCtx.isLoopPrepare = true;
         prepareCtx.isLoopBody = false;
-        prepareCtx.kind = DynamicBlockKind::Plain;
+        prepareCtx.loopIteration = 0;
+        prepareCtx.kind = DynamicBlockKind::LoopPrepare;
         assert(!(prepareCtx.loopOp && prepareCtx.switchOp) &&
                "dynamic block cannot have both loopOp and switchOp");
 
@@ -1020,7 +1029,8 @@ private:
         bodyCtx.ifOp = nullptr;
         bodyCtx.isLoopPrepare = false;
         bodyCtx.isLoopBody = true;
-        bodyCtx.kind = DynamicBlockKind::Plain;
+        bodyCtx.loopIteration = 0;
+        bodyCtx.kind = DynamicBlockKind::LoopBody;
         assert(!(bodyCtx.loopOp && bodyCtx.switchOp) &&
                "dynamic block cannot have both loopOp and switchOp");
 
@@ -1150,7 +1160,7 @@ private:
             traceSink_->onStepBegin(
                 wave, lane, it->getName().getStringRef().str(),
                 context.activeMask, expectedMask, key.sequenceId, key.block,
-                blockKindLabel(parentBlock.kind));
+                blockKindLabel(parentBlock.kind), parentBlock.loopIteration);
         }
 
         mlir::Region &caseRegion = switchOp.getCaseBody();
@@ -1519,6 +1529,13 @@ private:
             bodyCtx.loopOp = blockCtx->loopOp;
             bodyCtx.isLoopBody = true;
             bodyCtx.isLoopPrepare = false;
+            bodyCtx.kind = DynamicBlockKind::LoopBody;
+            if (key.sequenceId >= loopFrame.prepareKey.sequenceId) {
+                bodyCtx.loopIteration =
+                    (key.sequenceId - loopFrame.prepareKey.sequenceId) / 2;
+            } else {
+                bodyCtx.loopIteration.reset();
+            }
 
             auto &env = bodyCtx.valueEnvs[lane];
             auto bodyArgs =
@@ -1668,6 +1685,10 @@ private:
         DynamicBlockKey nextPrep{loopFrame.prepareKey.block, nextSeq};
         DynamicBlockKey nextBody{loopFrame.bodyKey.block,
                                  static_cast<std::uint32_t>(nextSeq + 1)};
+        std::uint32_t loopIteration = 0;
+        if (nextPrep.sequenceId >= loopFrame.prepareKey.sequenceId)
+            loopIteration =
+                (nextPrep.sequenceId - loopFrame.prepareKey.sequenceId) / 2;
         auto &prepCtx = waveCtx.blocks[nextPrep];
         prepCtx.block = nextPrep.block;
         prepCtx.sequenceId = nextPrep.sequenceId;
@@ -1681,7 +1702,8 @@ private:
         prepCtx.ifOp = nullptr;
         prepCtx.isLoopPrepare = true;
         prepCtx.isLoopBody = false;
-        prepCtx.kind = DynamicBlockKind::Plain;
+        prepCtx.loopIteration = loopIteration;
+        prepCtx.kind = DynamicBlockKind::LoopPrepare;
 
         auto &bodyCtx = waveCtx.blocks[nextBody];
         bodyCtx.block = nextBody.block;
@@ -1696,7 +1718,8 @@ private:
         bodyCtx.ifOp = nullptr;
         bodyCtx.isLoopPrepare = false;
         bodyCtx.isLoopBody = true;
-        bodyCtx.kind = DynamicBlockKind::Plain;
+        bodyCtx.loopIteration = loopIteration;
+        bodyCtx.kind = DynamicBlockKind::LoopBody;
         assert(!(prepCtx.loopOp && prepCtx.switchOp) &&
                "dynamic block cannot have both loopOp and switchOp");
         assert(!(bodyCtx.loopOp && bodyCtx.switchOp) &&
@@ -1792,6 +1815,10 @@ private:
         DynamicBlockKey nextPrep{loopFrame.prepareKey.block, nextSeq};
         DynamicBlockKey nextBody{loopFrame.bodyKey.block,
                                  static_cast<std::uint32_t>(nextSeq + 1)};
+        std::uint32_t loopIteration = 0;
+        if (nextPrep.sequenceId >= loopFrame.prepareKey.sequenceId)
+            loopIteration =
+                (nextPrep.sequenceId - loopFrame.prepareKey.sequenceId) / 2;
         bool nextExists = waveCtx.blocks.contains(nextPrep);
 
         auto &prepCtx = waveCtx.blocks[nextPrep];
@@ -1806,7 +1833,8 @@ private:
         prepCtx.ifOp = nullptr;
         prepCtx.isLoopPrepare = true;
         prepCtx.isLoopBody = false;
-        prepCtx.kind = DynamicBlockKind::Plain;
+        prepCtx.loopIteration = loopIteration;
+        prepCtx.kind = DynamicBlockKind::LoopPrepare;
 
         auto &bodyCtx = waveCtx.blocks[nextBody];
         bodyCtx.block = nextBody.block;
@@ -1820,7 +1848,8 @@ private:
         bodyCtx.ifOp = nullptr;
         bodyCtx.isLoopPrepare = false;
         bodyCtx.isLoopBody = true;
-        bodyCtx.kind = DynamicBlockKind::Plain;
+        bodyCtx.loopIteration = loopIteration;
+        bodyCtx.kind = DynamicBlockKind::LoopBody;
 
         if (!nextExists && !llvm::is_contained(entry->pendingChildren, nextPrep)) {
             entry->pendingChildren.push_back(nextPrep);
@@ -2345,7 +2374,7 @@ private:
             traceSink_->onStepBegin(
                 wave, lane, it->getName().getStringRef().str(),
                 context.activeMask, expectedMask, key.sequenceId, key.block,
-                blockKindLabel(parentBlock.kind));
+                blockKindLabel(parentBlock.kind), parentBlock.loopIteration);
         }
 
         auto nextIt = std::next(it);
@@ -2935,7 +2964,8 @@ private:
                             traceSink_->onCollectiveComplete(
                                 wave, opName, expectedMask, expectedMask,
                                 controlBlock.sequenceId, controlBlock.block,
-                                blockKindLabel(blockCtx->kind));
+                                blockKindLabel(blockCtx->kind),
+                                blockCtx->loopIteration);
                         }
                         waveCtx.controlTokenToOp.erase(controlIt);
                         waveCtx.collectives.erase(key);
@@ -2958,7 +2988,8 @@ private:
                         opName,
                         syncPoint.expectedMask, syncPoint.expectedMask,
                         block.sequenceId, block.block,
-                        blockKindLabel(blockCtx->kind));
+                        blockKindLabel(blockCtx->kind),
+                        blockCtx->loopIteration);
                 }
                 std::uint64_t mask = syncPoint.expectedMask;
                 while (mask) {
@@ -3028,7 +3059,8 @@ private:
                                 wave, l, syncPoint.expectedMask,
                                 syncPoint.expectedMask, block.sequenceId,
                                 block.block,
-                                blockKindLabel(blockCtx->kind));
+                                blockKindLabel(blockCtx->kind),
+                                blockCtx->loopIteration);
                         }
                         state_.readyQueue.push(
                             ReadyContinuation<ValueType, StepType>{wave, block, l,
@@ -3110,7 +3142,8 @@ private:
                         opName,
                         it->second.expectedMask, it->second.expectedMask,
                         it->second.block.sequenceId, it->second.block.block,
-                        blockKindLabel(blockCtx->kind));
+                        blockKindLabel(blockCtx->kind),
+                        blockCtx->loopIteration);
                 }
                 if (blockCtx && scheduleNow) {
                     std::uint64_t mask = it->second.expectedMask;

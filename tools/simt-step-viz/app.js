@@ -88,6 +88,7 @@
           blockSeq: extractNumber(trimmed, "blockSeq"),
           blockKind: extractString(trimmed, "blockKind"),
           blockAddr: extractString(trimmed, "blockAddr"),
+          loopIter: extractNumber(trimmed, "loopIter"),
           hasValue: extractBool(trimmed, "hasValue"),
         };
         return parsed.event ? parsed : null;
@@ -121,6 +122,7 @@
       blockSeq: Number.isFinite(Number(raw.blockSeq)) ? Number(raw.blockSeq) : null,
       blockKind: raw.blockKind ? String(raw.blockKind) : "",
       blockAddr: raw.blockAddr ? String(raw.blockAddr) : "",
+      loopIter: Number.isFinite(Number(raw.loopIter)) ? Number(raw.loopIter) : null,
       hasValue: typeof raw.hasValue === "boolean" ? raw.hasValue : undefined,
       active: normalizeMask(raw.active),
       expected: normalizeMask(raw.expected),
@@ -155,8 +157,9 @@
 
   function formatBlock(ev) {
     const kind = ev.blockKind || "block";
+    const iter = Number.isFinite(ev.loopIter) ? `@${ev.loopIter}` : "";
     if (Number.isFinite(ev.blockSeq))
-      return `${kind}#${ev.blockSeq}`;
+      return `${kind}#${ev.blockSeq}${iter}`;
     if (ev.blockAddr)
       return ev.blockAddr;
     return "";
@@ -407,6 +410,8 @@
       parts.push(`blockSeq=${ev.blockSeq}`);
     if (ev.blockAddr)
       parts.push(`blockAddr=${ev.blockAddr}`);
+    if (Number.isFinite(ev.loopIter))
+      parts.push(`loopIter=${ev.loopIter}`);
     if (typeof ev.hasValue === "boolean")
       parts.push(`hasValue=${ev.hasValue}`);
     if (ev.active)

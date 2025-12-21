@@ -5,6 +5,7 @@
 #include <llvm/Support/raw_ostream.h>
 
 #include <memory>
+#include <optional>
 #include <string>
 
 namespace simt::semantics {
@@ -20,36 +21,43 @@ public:
     void onStepBegin(WaveId wave, LaneId lane, const std::string &opName,
                      std::uint64_t activeMask, std::uint64_t expectedMask,
                      std::uint32_t blockSeq, const void *blockPtr,
-                     const char *blockKind) override;
+                     const char *blockKind,
+                     std::optional<std::uint32_t> loopIteration) override;
 
     void onSuspend(WaveId wave, LaneId lane, const Effect &effect,
                    std::uint64_t activeMask, std::uint64_t expectedMask,
                    std::uint32_t blockSeq, const void *blockPtr,
-                   const char *blockKind) override;
+                   const char *blockKind,
+                   std::optional<std::uint32_t> loopIteration) override;
 
     void onResume(WaveId wave, LaneId lane, std::uint64_t activeMask,
                   std::uint64_t expectedMask, std::uint32_t blockSeq,
-                  const void *blockPtr, const char *blockKind) override;
+                  const void *blockPtr, const char *blockKind,
+                  std::optional<std::uint32_t> loopIteration) override;
 
     void onCollectiveComplete(WaveId wave, const std::string &opName,
                               std::uint64_t activeMask,
                               std::uint64_t expectedMask,
                               std::uint32_t blockSeq, const void *blockPtr,
-                              const char *blockKind) override;
+                              const char *blockKind,
+                              std::optional<std::uint32_t> loopIteration) override;
 
     void onReturn(WaveId wave, LaneId lane, bool hasValue,
                   std::uint64_t activeMask, std::uint64_t expectedMask,
                   std::uint32_t blockSeq, const void *blockPtr,
-                  const char *blockKind) override;
+                  const char *blockKind,
+                  std::optional<std::uint32_t> loopIteration) override;
 
 private:
     void writeMask(std::uint64_t mask);
     void writeBlock(std::uint32_t blockSeq, const void *blockPtr,
-                    const char *blockKind);
+                    const char *blockKind,
+                    std::optional<std::uint32_t> loopIteration);
     void writeEventPrefix(const char *kind, WaveId wave, int lane,
                           std::uint64_t activeMask, std::uint64_t expectedMask,
                           std::uint32_t blockSeq, const void *blockPtr,
-                          const char *blockKind);
+                          const char *blockKind,
+                          std::optional<std::uint32_t> loopIteration);
 
     std::unique_ptr<llvm::raw_fd_ostream> os_;
     std::uint64_t counter_ = 0;
