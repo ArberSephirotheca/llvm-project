@@ -2,6 +2,7 @@
   const threadsInput = document.getElementById("threadsInput");
   const seedInput = document.getElementById("seedInput");
   const programSelect = document.getElementById("programSelect");
+  const collectiveCfInput = document.getElementById("collectiveCfInput");
   const generateBtn = document.getElementById("generateBtn");
   const runStatus = document.getElementById("runStatus");
   const speedInput = document.getElementById("speedInput");
@@ -23,6 +24,7 @@
     suspend: "#f97316",
     resume: "#30c9c9",
     return: "#94a3b8",
+    control: "#f43f5e",
     unknown: "#9aa4b2",
   };
 
@@ -271,6 +273,25 @@
     eventLog.scrollTop = eventLog.scrollHeight;
   }
 
+  function isControlFlowOp(op) {
+    if (!op)
+      return false;
+    return (
+      op === "simt_step.if" ||
+      op === "simt_step.loop" ||
+      op === "simt_step.switch"
+    );
+  }
+
+  function drawDiamond(ctx, x, y, size) {
+    ctx.beginPath();
+    ctx.moveTo(x, y - size);
+    ctx.lineTo(x + size, y);
+    ctx.lineTo(x, y + size);
+    ctx.lineTo(x - size, y);
+    ctx.closePath();
+  }
+
   function resizeCanvas(ctx) {
     const rect = canvas.getBoundingClientRect();
     const dpr = window.devicePixelRatio || 1;
@@ -313,13 +334,24 @@
         continue;
       const x = pad + ev.index * xScale;
       const y = pad + (ev.lane / Math.max(1, laneCount - 1)) * (height - pad * 2);
-      const color = palette[ev.event] || palette.unknown;
+      const isControl = ev.event === "step" && isControlFlowOp(ev.op);
+      const color = isControl
+        ? palette.control
+        : (palette[ev.event] || palette.unknown);
       const active = ev.index <= currentIndex;
-      ctx.globalAlpha = active ? 1 : 0.2;
+      ctx.globalAlpha = active ? 1 : 0.25;
       ctx.fillStyle = color;
-      ctx.beginPath();
-      ctx.arc(x, y, 3, 0, Math.PI * 2);
-      ctx.fill();
+      if (isControl) {
+        drawDiamond(ctx, x, y, 5);
+        ctx.fill();
+        ctx.strokeStyle = "rgba(255, 255, 255, 0.5)";
+        ctx.lineWidth = 1;
+        ctx.stroke();
+      } else {
+        ctx.beginPath();
+        ctx.arc(x, y, 3, 0, Math.PI * 2);
+        ctx.fill();
+      }
       eventPoints.push({ x, y, ev });
     }
     ctx.globalAlpha = 1;
@@ -458,6 +490,8 @@
       seed: String(seed),
       program,
     });
+    if (collectiveCfInput && collectiveCfInput.checked)
+      query.set("collective_cf", "1");
 
     generateBtn.disabled = true;
     runStatus.textContent = "Running interpreter...";

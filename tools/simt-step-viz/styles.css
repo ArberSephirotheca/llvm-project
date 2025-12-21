@@ -111,6 +111,20 @@ code {
   margin-bottom: 14px;
 }
 
+.toggle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-family: var(--font-mono);
+  color: var(--text);
+}
+
+input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  accent-color: #33d6b8;
+}
+
 label {
   font-size: 12px;
   text-transform: uppercase;

@@ -15,6 +15,7 @@ struct SemanticsContext {
     std::uint64_t expectedMask = 0;
     std::uint32_t laneId = 0;
     const llvm::DenseMap<mlir::Value, SemValue> *valueEnv = nullptr;
+    bool collectiveControlFlow = false;
 };
 
 } // namespace simt::semantics

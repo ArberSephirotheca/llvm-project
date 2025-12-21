@@ -45,6 +45,13 @@
           </select>
         </div>
         <div class="field">
+          <label for="collectiveCfInput">Collective Control Flow</label>
+          <div class="toggle">
+            <input type="checkbox" id="collectiveCfInput" />
+            <span>Barrier before if/loop/switch</span>
+          </div>
+        </div>
+        <div class="field">
           <button id="generateBtn" class="btn">Run Interpreter</button>
           <div class="hint" id="runStatus">Local server required for generation.</div>
         </div>
@@ -93,6 +100,6 @@
       <code>lane</code>, <code>op</code>, <code>active</code>, <code>expected</code>.
     </footer>
 
-    <script src="app.js"></script>
+    <script src="app.js?v=2"></script>
   </body>
 </html>

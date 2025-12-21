@@ -42,6 +42,10 @@ int main(int argc, char **argv) {
         "program",
         llvm::cl::desc("Program generator (deterministic|randomized|richer)"),
         llvm::cl::init("richer"));
+    llvm::cl::opt<bool> collectiveControlFlow(
+        "collective-cf",
+        llvm::cl::desc("Make control-flow ops collective before split"),
+        llvm::cl::init(false));
     llvm::cl::opt<std::string> traceFile(
         "trace-file", llvm::cl::desc("Write interpreter trace to JSONL file"),
         llvm::cl::init(""));
@@ -111,6 +115,7 @@ int main(int argc, char **argv) {
     unsigned width = std::min<unsigned>(64, std::max<unsigned>(1, numLanes));
     semaCtx.activeMask =
         width >= 64 ? ~0ull : ((1ull << static_cast<std::uint64_t>(width)) - 1ull);
+    semaCtx.collectiveControlFlow = collectiveControlFlow;
     simt::semantics::SimpleSemantics::clearMemory();
 
     if (llvm::Error err = runner.runBlock(&entry, semaCtx)) {

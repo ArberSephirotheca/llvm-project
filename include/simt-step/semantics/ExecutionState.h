@@ -69,6 +69,8 @@ struct DynamicBlock {
     llvm::DenseMap<LaneId, StepT> pendingOps;
     llvm::DenseMap<LaneId, llvm::DenseMap<mlir::Value, ValueT>> valueEnvs;
     llvm::DenseMap<const mlir::Operation *, DynamicBlockKey> callChildren;
+    llvm::DenseMap<const mlir::Operation *, std::uint32_t> controlTokens;
+    llvm::DenseMap<const mlir::Operation *, std::uint64_t> controlReadyMask;
 };
 
 template <typename ValueT>
@@ -105,6 +107,14 @@ struct SynchronizationSyncPoint {
     SynchronizationEffect effect;
     DynamicBlockKey block;
     std::uint64_t expectedMask = 0;
+    llvm::DenseSet<LaneId> arrivals;
+    llvm::DenseMap<LaneId, StepT> continuations;
+};
+
+template <typename StepT>
+struct ControlFlowSyncPoint {
+    std::uint64_t expectedMask = 0;
+    std::uint64_t readyMask = 0;
     llvm::DenseSet<LaneId> arrivals;
     llvm::DenseMap<LaneId, StepT> continuations;
 };
@@ -148,6 +158,8 @@ struct WaveContext {
     llvm::DenseMap<std::uint32_t, SynchronizationSyncPoint<ValueT, StepT>> syncPoints;
     llvm::DenseMap<LaneId, LaneContext<ValueT, StepT>> lanes;
     std::uint32_t nextCallSeq = 1;
+    std::uint32_t nextControlToken = 1;
+    llvm::DenseMap<std::uint32_t, const mlir::Operation *> controlTokenToOp;
 };
 
 template <typename ValueT, typename StepT>

@@ -20,6 +20,14 @@ def parse_int(value, default):
         return default
 
 
+def parse_bool(value, default=False):
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
 class TraceHandler(http.server.SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(WEB_ROOT), **kwargs)
@@ -36,6 +44,7 @@ class TraceHandler(http.server.SimpleHTTPRequestHandler):
         lanes = parse_int(params.get("lanes", ["4"])[0], 4)
         seed = parse_int(params.get("seed", ["0"])[0], 0)
         program = params.get("program", ["richer"])[0]
+        collective_cf = parse_bool(params.get("collective_cf", [None])[0], False)
 
         if lanes < 1 or lanes > 64:
             self.send_json(400, {"error": "lanes must be between 1 and 64"})
@@ -80,6 +89,8 @@ class TraceHandler(http.server.SimpleHTTPRequestHandler):
                 "--run",
                 f"--trace-file={trace_path}",
             ]
+            if collective_cf:
+                cmd.append("--collective-cf")
             result = subprocess.run(
                 cmd,
                 cwd=str(ROOT),
