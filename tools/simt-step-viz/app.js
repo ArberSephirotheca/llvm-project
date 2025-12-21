@@ -23,6 +23,7 @@
     step: "#4f8bff",
     suspend: "#f97316",
     resume: "#30c9c9",
+    collective: "#34d399",
     return: "#94a3b8",
     control: "#f43f5e",
     unknown: "#9aa4b2",
@@ -106,11 +107,15 @@
 
   function normalizeEvent(raw, index) {
     const tValue = Number(raw.t);
+    const laneRaw = Number(raw.lane);
+    const laneValue = Number.isFinite(laneRaw)
+      ? laneRaw
+      : (raw.event === "collective" ? -1 : 0);
     return {
       t: Number.isFinite(tValue) ? tValue : index,
       event: raw.event ? String(raw.event) : "step",
       wave: Number.isFinite(Number(raw.wave)) ? Number(raw.wave) : 0,
-      lane: Number.isFinite(Number(raw.lane)) ? Number(raw.lane) : 0,
+      lane: laneValue,
       op: raw.op ? String(raw.op) : "",
       effect: raw.effect ? String(raw.effect) : "",
       blockSeq: Number.isFinite(Number(raw.blockSeq)) ? Number(raw.blockSeq) : null,
@@ -233,7 +238,7 @@
     const parts = [
       `#${ev.t}`,
       `wave ${ev.wave}`,
-      `lane ${ev.lane}`,
+      ev.lane < 0 ? "lane *" : `lane ${ev.lane}`,
       ev.event,
     ];
     if (ev.op)
@@ -328,8 +333,26 @@
 
     const count = events.length;
     const xScale = count > 1 ? (width - pad * 2) / (count - 1) : 0;
+    const midY = pad + (height - pad * 2) / 2;
 
     for (const ev of events) {
+      const isWaveWide = ev.event === "collective" && ev.lane < 0;
+      if (isWaveWide) {
+        const x = pad + ev.index * xScale;
+        const active = ev.index <= currentIndex;
+        ctx.globalAlpha = active ? 0.9 : 0.25;
+        ctx.strokeStyle = palette.collective;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(x, pad);
+        ctx.lineTo(x, height - pad);
+        ctx.stroke();
+        ctx.fillStyle = palette.collective;
+        drawDiamond(ctx, x, midY, 6);
+        ctx.fill();
+        eventPoints.push({ x, y: midY, ev });
+        continue;
+      }
       if (ev.lane < 0 || ev.lane >= laneCount)
         continue;
       const x = pad + ev.index * xScale;
@@ -371,7 +394,7 @@
     const parts = [
       `t=${ev.t}`,
       `wave=${ev.wave}`,
-      `lane=${ev.lane}`,
+      ev.lane < 0 ? "lane=*" : `lane=${ev.lane}`,
       `event=${ev.event}`,
     ];
     if (ev.op)

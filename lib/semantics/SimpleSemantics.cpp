@@ -32,17 +32,17 @@ SemValue makeValueFromAttribute(mlir::Attribute attr) {
     return SemValue();
 }
 
-ExecutionMode resolveWaveExecutionMode(const SemanticsContext &context,
-                                       llvm::StringRef opName) {
+ExecutionMode resolveExecutionMode(const SemanticsContext &context,
+                                   llvm::StringRef opName,
+                                   ExecutionMode defaultMode) {
     if (context.overrideMode)
         return *context.overrideMode;
     if (context.policy) {
         auto it = context.policy->overrides.find(opName);
         if (it != context.policy->overrides.end())
             return it->second;
-        return context.policy->waveOps;
     }
-    return ExecutionMode::Collective;
+    return defaultMode;
 }
 
 } // namespace
@@ -458,8 +458,38 @@ auto SimpleSemantics::handleBufferStore(mlir::Operation *op,
     }
     int64_t idx = idxOrErr->asInt64();
     mlir::Value res = op->getOperand(0);
-    globalMemory()[res][idx] = *valOrErr;
-    return StepType::halt();
+    SemValue val = *valOrErr;
+    std::uint64_t expectedMask =
+        context.expectedMask ? context.expectedMask : context.activeMask;
+    if (expectedMask == 0)
+        expectedMask = 1ull << context.laneId;
+
+    ExecutionMode mode =
+        resolveExecutionMode(context, op->getName().getStringRef(),
+                             ExecutionMode::Independent);
+    auto doStore = [res, idx, val]() -> StepType {
+        globalMemory()[res][idx] = val;
+        return StepType::halt();
+    };
+    if (mode == ExecutionMode::Independent)
+        return doStore();
+
+    constexpr std::uint32_t BufferStoreOp = 2;
+    std::uint32_t token = static_cast<std::uint32_t>(
+        reinterpret_cast<std::uintptr_t>(op) ^
+        (reinterpret_cast<std::uintptr_t>(op) >> 32));
+    if (mode == ExecutionMode::Synchronous) {
+        SynchronizationEffect effect;
+        effect.operation = BufferStoreOp;
+        effect.activeMask = expectedMask;
+        effect.token = token;
+        return StepType::suspend(effect, std::move(doStore));
+    }
+    CollectiveEffect effect;
+    effect.operation = BufferStoreOp;
+    effect.activeMask = expectedMask;
+    effect.token = token;
+    return StepType::suspend(effect, std::move(doStore));
 }
 
 auto SimpleSemantics::handleBufferLoad(mlir::Operation *op,
@@ -473,13 +503,42 @@ auto SimpleSemantics::handleBufferLoad(mlir::Operation *op,
     }
     int64_t idx = idxOrErr->asInt64();
     mlir::Value res = op->getOperand(0);
-    auto resIt = globalMemory().find(res);
-    if (resIt == globalMemory().end())
-        llvm::report_fatal_error("buffer.load: missing value at index");
-    auto it = resIt->second.find(idx);
-    if (it == resIt->second.end())
-        llvm::report_fatal_error("buffer.load: missing value at index");
-    return StepType::produce(it->second);
+    std::uint64_t expectedMask =
+        context.expectedMask ? context.expectedMask : context.activeMask;
+    if (expectedMask == 0)
+        expectedMask = 1ull << context.laneId;
+
+    ExecutionMode mode =
+        resolveExecutionMode(context, op->getName().getStringRef(),
+                             ExecutionMode::Independent);
+    auto doLoad = [res, idx]() -> StepType {
+        auto resIt = globalMemory().find(res);
+        if (resIt == globalMemory().end())
+            llvm::report_fatal_error("buffer.load: missing value at index");
+        auto it = resIt->second.find(idx);
+        if (it == resIt->second.end())
+            llvm::report_fatal_error("buffer.load: missing value at index");
+        return StepType::produce(it->second);
+    };
+    if (mode == ExecutionMode::Independent)
+        return doLoad();
+
+    constexpr std::uint32_t BufferLoadOp = 3;
+    std::uint32_t token = static_cast<std::uint32_t>(
+        reinterpret_cast<std::uintptr_t>(op) ^
+        (reinterpret_cast<std::uintptr_t>(op) >> 32));
+    if (mode == ExecutionMode::Synchronous) {
+        SynchronizationEffect effect;
+        effect.operation = BufferLoadOp;
+        effect.activeMask = expectedMask;
+        effect.token = token;
+        return StepType::suspend(effect, std::move(doLoad));
+    }
+    CollectiveEffect effect;
+    effect.operation = BufferLoadOp;
+    effect.activeMask = expectedMask;
+    effect.token = token;
+    return StepType::suspend(effect, std::move(doLoad));
 }
 
 auto SimpleSemantics::handleWaveCountBits(mlir::Operation *op,
@@ -497,8 +556,9 @@ auto SimpleSemantics::handleWaveCountBits(mlir::Operation *op,
         expectedMask = 1ull << context.laneId;
     constexpr std::uint32_t WaveCountBitsOp = 1;
     bool pred = predOrErr->asBool();
-    ExecutionMode mode =
-        resolveWaveExecutionMode(context, op->getName().getStringRef());
+    ExecutionMode mode = resolveExecutionMode(
+        context, op->getName().getStringRef(),
+        context.policy ? context.policy->waveOps : ExecutionMode::Collective);
     auto resume = [expectedMask, pred]() -> StepType {
         std::int32_t count =
             pred ? static_cast<std::int32_t>(std::popcount(expectedMask)) : 0;

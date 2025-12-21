@@ -431,6 +431,58 @@ public:
                             std::get_if<typename StepType::Suspend>(&stateVariant)) {
                         Effect effect = std::move(suspend->effect);
                         auto resume = std::move(suspend->resume);
+                        if (waveCtx && isWaveOp(&*it) &&
+                            executionModeForOp(&*it, ctx) == ExecutionMode::Collective) {
+                            if (!blockCtx)
+                                llvm::report_fatal_error(
+                                    "collective wave op: missing block context");
+                            auto *collective =
+                                effect.template get_if<CollectiveEffect>();
+                            if (!collective)
+                                llvm::report_fatal_error(
+                                    "collective wave op: missing collective effect");
+                            if (it->getNumOperands() != 1)
+                                llvm::report_fatal_error(
+                                    "collective wave op: expected one operand");
+                            auto predOrErr =
+                                evaluateValue(*waveCtx, key, it->getOperand(0),
+                                              lane, ctx.activeMask,
+                                              ctx.expectedMask);
+                            if (!predOrErr) {
+                                llvm::consumeError(predOrErr.takeError());
+                                llvm::report_fatal_error(
+                                    "collective wave op: failed to evaluate operand");
+                            }
+                            std::uint32_t token =
+                                collective->token.value_or(collective->operation);
+                            waveCtx->collectiveTokenToOp[token] = &*it;
+                            auto &syncPoint = waveCtx->collectives[token];
+                            syncPoint.operands[lane] = std::move(*predOrErr);
+                            resume = [this, wave, token, lane]() mutable -> StepType {
+                                auto waveIt = state_.waves.find(wave);
+                                if (waveIt == state_.waves.end())
+                                    llvm::report_fatal_error(
+                                        "collective wave resume: missing wave context");
+                                auto &waveCtx = waveIt->second;
+                                auto syncIt = waveCtx.collectives.find(token);
+                                if (syncIt == waveCtx.collectives.end())
+                                    llvm::report_fatal_error(
+                                        "collective wave resume: missing sync point");
+                                auto &syncPoint = syncIt->second;
+                                auto resultIt = syncPoint.results.find(lane);
+                                if (resultIt == syncPoint.results.end())
+                                    llvm::report_fatal_error(
+                                        "collective wave resume: missing lane result");
+                                ValueType result = resultIt->second;
+                                syncPoint.results.erase(resultIt);
+                                syncPoint.continuations.erase(lane);
+                                if (syncPoint.results.empty()) {
+                                    waveCtx.collectives.erase(syncIt);
+                                    waveCtx.collectiveTokenToOp.erase(token);
+                                }
+                                return StepType::produce(std::move(result));
+                            };
+                        }
                         if (traceSink_) {
                             std::uint64_t expectedMask =
                                 ctx.expectedMask ? ctx.expectedMask : ctx.activeMask;
@@ -574,6 +626,52 @@ private:
 
     static bool isWaveOp(mlir::Operation *op) {
         return op->hasTrait<simt::dialect::SimtWave>();
+    }
+
+    static bool valueToBool(const ValueType &value) {
+        if constexpr (std::is_same_v<ValueType, SemValue>)
+            return value.asBool();
+        llvm::report_fatal_error("collective wave op: unsupported value type");
+        return false;
+    }
+
+    static ValueType makeInt32Value(std::int32_t value) {
+        if constexpr (std::is_same_v<ValueType, SemValue>)
+            return SemValue::fromInt32(value);
+        llvm::report_fatal_error("collective wave op: unsupported value type");
+        return ValueType();
+    }
+
+    void computeWaveCollectiveResults(
+        const mlir::Operation *op,
+        CollectiveSyncPoint<ValueType, StepType> &syncPoint) {
+        if (syncPoint.expectedMask == 0)
+            llvm::report_fatal_error(
+                "collective wave op: missing expected mask");
+        if (!llvm::isa<simt::dialect::WaveCountBitsOp>(op))
+            llvm::report_fatal_error(
+                "collective wave op: unsupported operation");
+        std::uint64_t predMask = 0;
+        std::uint64_t mask = syncPoint.expectedMask;
+        while (mask) {
+            unsigned lane = std::countr_zero(mask);
+            mask &= mask - 1;
+            auto operandIt = syncPoint.operands.find(lane);
+            if (operandIt == syncPoint.operands.end())
+                llvm::report_fatal_error(
+                    "collective wave op: missing operand value");
+            if (valueToBool(operandIt->second))
+                predMask |= (1ull << lane);
+        }
+        std::int32_t count =
+            static_cast<std::int32_t>(std::popcount(predMask));
+        mask = syncPoint.expectedMask;
+        while (mask) {
+            unsigned lane = std::countr_zero(mask);
+            mask &= mask - 1;
+            syncPoint.results[lane] = makeInt32Value(count);
+        }
+        syncPoint.operands.clear();
     }
 
     ExecutionMode executionModeForOp(mlir::Operation *op,
@@ -756,6 +854,39 @@ private:
         if (blockCtx->expectedMask == 0)
             blockCtx->expectedMask = evalExpected;
 
+        llvm::DenseMap<LaneId, bool> ifDecisions;
+        llvm::DenseMap<LaneId, std::int64_t> switchDecisions;
+        if (auto ifOp = llvm::dyn_cast<simt::dialect::IfOp>(op)) {
+            std::uint64_t mask = evalExpected;
+            while (mask) {
+                LaneId lane = static_cast<LaneId>(std::countr_zero(mask));
+                mask &= mask - 1;
+                auto condOrErr = evaluateBool(waveCtx, key, ifOp.getCondition(),
+                                              lane, evalActive, evalExpected);
+                bool takeThen = false;
+                if (condOrErr)
+                    takeThen = *condOrErr;
+                else
+                    llvm::consumeError(condOrErr.takeError());
+                ifDecisions[lane] = takeThen;
+            }
+        } else if (auto switchOp = llvm::dyn_cast<simt::dialect::SwitchOp>(op)) {
+            std::uint64_t mask = evalExpected;
+            while (mask) {
+                LaneId lane = static_cast<LaneId>(std::countr_zero(mask));
+                mask &= mask - 1;
+                auto selectorOrErr =
+                    evaluateValue(waveCtx, key, switchOp.getSelector(), lane,
+                                  evalActive, evalExpected);
+                std::int64_t selectorValue = 0;
+                if (selectorOrErr)
+                    selectorValue = selectorOrErr->asInt64();
+                else
+                    llvm::consumeError(selectorOrErr.takeError());
+                switchDecisions[lane] = selectorValue;
+            }
+        }
+
         auto dispatchLane = [&](LaneId lane) {
             blockCtx->activeMask |= (1ull << lane);
             SemanticsContext laneCtx;
@@ -764,17 +895,23 @@ private:
             laneCtx.laneId = lane;
             laneCtx.policy = waveCtx.policy;
             laneCtx.overrideMode = ExecutionMode::Independent;
+            laneCtx.suppressStepTrace = true;
+            laneCtx.forcedPredicate.reset();
+            laneCtx.forcedSelector.reset();
             auto envIt = blockCtx->valueEnvs.find(lane);
             if (envIt != blockCtx->valueEnvs.end())
                 laneCtx.valueEnv = &envIt->second;
 
-            if (traceSink_) {
+            if (traceSink_ && !laneCtx.suppressStepTrace) {
                 traceSink_->onResume(
                     wave, lane, evalActive, evalExpected, key.sequenceId, key.block,
                     blockKindLabel(blockCtx->kind));
             }
 
             if (llvm::isa<simt::dialect::IfOp>(op)) {
+                auto decisionIt = ifDecisions.find(lane);
+                if (decisionIt != ifDecisions.end())
+                    laneCtx.forcedPredicate = decisionIt->second;
                 (void)handleIfSplit(wave, key, block, it, laneCtx, lane);
                 return;
             }
@@ -783,6 +920,9 @@ private:
                 return;
             }
             if (llvm::isa<simt::dialect::SwitchOp>(op)) {
+                auto decisionIt = switchDecisions.find(lane);
+                if (decisionIt != switchDecisions.end())
+                    laneCtx.forcedSelector = decisionIt->second;
                 (void)handleSwitchSplit(wave, key, block, it, laneCtx, lane);
                 return;
             }
@@ -827,7 +967,7 @@ private:
 
         if (auto gated = gateControlFlowOp(wave, key, block, it, context, lane))
             return gated;
-        if (traceSink_) {
+        if (traceSink_ && !context.suppressStepTrace) {
             std::uint64_t expectedMask =
                 context.expectedMask ? context.expectedMask : context.activeMask;
             if (expectedMask == 0)
@@ -890,6 +1030,9 @@ private:
         auto nextIt = std::next(it);
         SemanticsContext parentContext = context;
         parentContext.overrideMode.reset();
+        parentContext.suppressStepTrace = false;
+        parentContext.forcedPredicate.reset();
+        parentContext.forcedSelector.reset();
         StepType parentCont = StepType::continueWith(
             [this, wave, key, block, nextIt, parentContext, lane]() mutable
             -> StepType {
@@ -965,6 +1108,9 @@ private:
 
         SemanticsContext childContext = context;
         childContext.overrideMode.reset();
+        childContext.suppressStepTrace = false;
+        childContext.forcedPredicate.reset();
+        childContext.forcedSelector.reset();
         childContext.activeMask = prepareCtx.activeMask;
         childContext.laneId = lane;
         StepType childStep = makeNextOp(wave, prepKey, prepareBlock,
@@ -1002,7 +1148,7 @@ private:
 
         if (auto gated = gateControlFlowOp(wave, key, block, it, context, lane))
             return gated;
-        if (traceSink_) {
+        if (traceSink_ && !context.suppressStepTrace) {
             std::uint64_t expectedMask =
                 context.expectedMask ? context.expectedMask : context.activeMask;
             if (expectedMask == 0)
@@ -1046,6 +1192,9 @@ private:
         auto nextIt = std::next(it);
         SemanticsContext parentContext = context;
         parentContext.overrideMode.reset();
+        parentContext.suppressStepTrace = false;
+        parentContext.forcedPredicate.reset();
+        parentContext.forcedSelector.reset();
         StepType parentCont = StepType::continueWith(
             [this, wave, key, block, nextIt, parentContext, lane]() mutable
             -> StepType {
@@ -1087,13 +1236,18 @@ private:
                 ? context.expectedMask
                 : (parentBlock.expectedMask ? parentBlock.expectedMask
                                             : parentBlock.activeMask);
-        auto selectorOrErr = evaluateValue(waveCtx, key, switchOp.getSelector(),
-                                           lane, evalActive, evalExpected);
         std::int64_t selectorValue = 0;
-        if (selectorOrErr)
-            selectorValue = selectorOrErr->asInt64();
-        else
-            llvm::consumeError(selectorOrErr.takeError());
+        if (context.forcedSelector) {
+            selectorValue = *context.forcedSelector;
+        } else {
+            auto selectorOrErr =
+                evaluateValue(waveCtx, key, switchOp.getSelector(), lane,
+                              evalActive, evalExpected);
+            if (selectorOrErr)
+                selectorValue = selectorOrErr->asInt64();
+            else
+                llvm::consumeError(selectorOrErr.takeError());
+        }
 
         unsigned caseIdx = static_cast<unsigned>(defaultIndex);
         for (auto indexed : llvm::enumerate(caseValues)) {
@@ -1257,6 +1411,9 @@ private:
 
         SemanticsContext laneCtx = context;
         laneCtx.overrideMode.reset();
+        laneCtx.suppressStepTrace = false;
+        laneCtx.forcedPredicate.reset();
+        laneCtx.forcedSelector.reset();
         laneCtx.activeMask = childCtx.activeMask;
         laneCtx.expectedMask =
             childCtx.expectedMask ? childCtx.expectedMask : childCtx.activeMask;
@@ -2185,7 +2342,7 @@ private:
 
         if (auto gated = gateControlFlowOp(wave, key, block, it, context, lane))
             return gated;
-        if (traceSink_) {
+        if (traceSink_ && !context.suppressStepTrace) {
             std::uint64_t expectedMask =
                 context.expectedMask ? context.expectedMask : context.activeMask;
             if (expectedMask == 0)
@@ -2199,6 +2356,9 @@ private:
         auto nextIt = std::next(it);
         SemanticsContext parentContext = context;
         parentContext.overrideMode.reset();
+        parentContext.suppressStepTrace = false;
+        parentContext.forcedPredicate.reset();
+        parentContext.forcedSelector.reset();
         StepType parentCont = StepType::continueWith(
             [this, wave, key, block, nextIt, parentContext, lane]() mutable
             -> StepType {
@@ -2218,15 +2378,19 @@ private:
                 ? context.expectedMask
                 : (parentBlock.expectedMask ? parentBlock.expectedMask
                                             : parentBlock.activeMask);
-        auto condOrErr =
-            evaluateBool(waveCtx, key, ifOp.getCondition(), lane,
-                         evalActive, evalExpected);
         bool takeThen = false;
         bool takeElse = false;
-        if (condOrErr) {
-            takeThen = *condOrErr;
+        if (context.forcedPredicate) {
+            takeThen = *context.forcedPredicate;
         } else {
-            llvm::consumeError(condOrErr.takeError());
+            auto condOrErr =
+                evaluateBool(waveCtx, key, ifOp.getCondition(), lane,
+                             evalActive, evalExpected);
+            if (condOrErr) {
+                takeThen = *condOrErr;
+            } else {
+                llvm::consumeError(condOrErr.takeError());
+            }
         }
         if (!takeThen && !ifOp.getElseRegion().empty())
             takeElse = true;
@@ -2345,6 +2509,9 @@ private:
 
             SemanticsContext laneCtx = context;
             laneCtx.overrideMode.reset();
+            laneCtx.suppressStepTrace = false;
+            laneCtx.forcedPredicate.reset();
+            laneCtx.forcedSelector.reset();
             laneCtx.activeMask = child.activeMask;
             laneCtx.expectedMask =
                 child.expectedMask ? child.expectedMask : child.activeMask;
@@ -2413,6 +2580,9 @@ private:
 
             SemanticsContext laneCtx = context;
             laneCtx.overrideMode.reset();
+            laneCtx.suppressStepTrace = false;
+            laneCtx.forcedPredicate.reset();
+            laneCtx.forcedSelector.reset();
             laneCtx.activeMask = child.activeMask;
             laneCtx.expectedMask =
                 child.expectedMask ? child.expectedMask : child.activeMask;
@@ -2731,6 +2901,12 @@ private:
                 collective->token.value_or(collective->operation);
             bool isControlFlow =
                 waveCtx.controlTokenToOp.find(key) != waveCtx.controlTokenToOp.end();
+            const mlir::Operation *waveOp = nullptr;
+            auto waveIt = waveCtx.collectiveTokenToOp.find(key);
+            if (waveIt != waveCtx.collectiveTokenToOp.end())
+                waveOp = waveIt->second;
+            bool isWaveCollective =
+                waveOp && isWaveOp(const_cast<mlir::Operation *>(waveOp));
             auto &syncPoint = waveCtx.collectives[key];
             syncPoint.effect = *collective;
             syncPoint.block = block;
@@ -2760,12 +2936,36 @@ private:
                             const_cast<mlir::Operation *>(controlIt->second);
                         std::uint64_t expectedMask = syncPoint.expectedMask;
                         DynamicBlockKey controlBlock = syncPoint.block;
+                        if (traceSink_) {
+                            std::string opName =
+                                controlOp->getName().getStringRef().str();
+                            traceSink_->onCollectiveComplete(
+                                wave, opName, expectedMask, expectedMask,
+                                controlBlock.sequenceId, controlBlock.block,
+                                blockKindLabel(blockCtx->kind));
+                        }
                         waveCtx.controlTokenToOp.erase(controlIt);
                         waveCtx.collectives.erase(key);
                         handleControlFlowCollective(wave, controlBlock, controlOp,
                                                     expectedMask);
                         return llvm::Error::success();
                     }
+                }
+                if (isWaveCollective && syncPoint.results.empty())
+                    computeWaveCollectiveResults(waveOp, syncPoint);
+                if (isWaveCollective && traceSink_) {
+                    std::string opName;
+                    if (waveOp)
+                        opName = const_cast<mlir::Operation *>(waveOp)
+                                     ->getName()
+                                     .getStringRef()
+                                     .str();
+                    traceSink_->onCollectiveComplete(
+                        wave,
+                        opName,
+                        syncPoint.expectedMask, syncPoint.expectedMask,
+                        block.sequenceId, block.block,
+                        blockKindLabel(blockCtx->kind));
                 }
                 std::uint64_t mask = syncPoint.expectedMask;
                 while (mask) {
@@ -2779,7 +2979,8 @@ private:
                                                                    contIt->second});
                     }
                 }
-                waveCtx.collectives.erase(key);
+                if (!isWaveCollective)
+                    waveCtx.collectives.erase(key);
             }
             return llvm::Error::success();
         }
@@ -2880,13 +3081,45 @@ private:
             it->second.expectedMask &= ~(1ull << lane);
             it->second.arrivals.erase(lane);
             it->second.continuations.erase(lane);
+            it->second.operands.erase(lane);
+            it->second.results.erase(lane);
+            const mlir::Operation *waveOp = nullptr;
+            auto waveIt = waveCtx.collectiveTokenToOp.find(it->first);
+            if (waveIt != waveCtx.collectiveTokenToOp.end())
+                waveOp = waveIt->second;
+            bool isWaveCollective =
+                waveOp && isWaveOp(const_cast<mlir::Operation *>(waveOp));
             bool ready = it->second.expectedMask &&
                          it->second.arrivals.size() ==
                              static_cast<unsigned>(
                                  std::popcount(it->second.expectedMask));
             if (ready) {
                 auto *blockCtx = getBlock(waveCtx, it->second.block);
-                if (blockCtx) {
+                bool scheduleNow = true;
+                bool emitCollective = false;
+                if (isWaveCollective) {
+                    if (it->second.results.empty()) {
+                        computeWaveCollectiveResults(waveOp, it->second);
+                        emitCollective = true;
+                    } else {
+                        scheduleNow = false;
+                    }
+                }
+                if (emitCollective && traceSink_ && blockCtx) {
+                    std::string opName;
+                    if (waveOp)
+                        opName = const_cast<mlir::Operation *>(waveOp)
+                                     ->getName()
+                                     .getStringRef()
+                                     .str();
+                    traceSink_->onCollectiveComplete(
+                        waveId,
+                        opName,
+                        it->second.expectedMask, it->second.expectedMask,
+                        it->second.block.sequenceId, it->second.block.block,
+                        blockKindLabel(blockCtx->kind));
+                }
+                if (blockCtx && scheduleNow) {
                     std::uint64_t mask = it->second.expectedMask;
                     while (mask) {
                         unsigned l = std::countr_zero(mask);
@@ -2900,10 +3133,12 @@ private:
                         }
                     }
                 }
-                auto cur = it;
-                ++it;
-                waveCtx.collectives.erase(cur);
-                continue;
+                if (!isWaveCollective) {
+                    auto cur = it;
+                    ++it;
+                    waveCtx.collectives.erase(cur);
+                    continue;
+                }
             }
             ++it;
         }

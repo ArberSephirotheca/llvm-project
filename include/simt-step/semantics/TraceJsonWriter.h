@@ -31,6 +31,12 @@ public:
                   std::uint64_t expectedMask, std::uint32_t blockSeq,
                   const void *blockPtr, const char *blockKind) override;
 
+    void onCollectiveComplete(WaveId wave, const std::string &opName,
+                              std::uint64_t activeMask,
+                              std::uint64_t expectedMask,
+                              std::uint32_t blockSeq, const void *blockPtr,
+                              const char *blockKind) override;
+
     void onReturn(WaveId wave, LaneId lane, bool hasValue,
                   std::uint64_t activeMask, std::uint64_t expectedMask,
                   std::uint32_t blockSeq, const void *blockPtr,
@@ -40,7 +46,7 @@ private:
     void writeMask(std::uint64_t mask);
     void writeBlock(std::uint32_t blockSeq, const void *blockPtr,
                     const char *blockKind);
-    void writeEventPrefix(const char *kind, WaveId wave, LaneId lane,
+    void writeEventPrefix(const char *kind, WaveId wave, int lane,
                           std::uint64_t activeMask, std::uint64_t expectedMask,
                           std::uint32_t blockSeq, const void *blockPtr,
                           const char *blockKind);

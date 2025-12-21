@@ -29,6 +29,12 @@ public:
                           std::uint64_t expectedMask, std::uint32_t blockSeq,
                           const void *blockPtr, const char *blockKind) = 0;
 
+    virtual void onCollectiveComplete(WaveId wave, const std::string &opName,
+                                      std::uint64_t activeMask,
+                                      std::uint64_t expectedMask,
+                                      std::uint32_t blockSeq, const void *blockPtr,
+                                      const char *blockKind) = 0;
+
     virtual void onReturn(WaveId wave, LaneId lane, bool hasValue,
                           std::uint64_t activeMask, std::uint64_t expectedMask,
                           std::uint32_t blockSeq, const void *blockPtr,

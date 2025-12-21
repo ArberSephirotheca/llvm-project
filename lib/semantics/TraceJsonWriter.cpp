@@ -51,7 +51,7 @@ void TraceJsonWriter::writeBlock(std::uint32_t blockSeq, const void *blockPtr,
     }
 }
 
-void TraceJsonWriter::writeEventPrefix(const char *kind, WaveId wave, LaneId lane,
+void TraceJsonWriter::writeEventPrefix(const char *kind, WaveId wave, int lane,
                                        std::uint64_t activeMask,
                                        std::uint64_t expectedMask,
                                        std::uint32_t blockSeq, const void *blockPtr,
@@ -73,8 +73,8 @@ void TraceJsonWriter::onStepBegin(WaveId wave, LaneId lane,
                                   const char *blockKind) {
     if (!os_)
         return;
-    writeEventPrefix("step", wave, lane, activeMask, expectedMask, blockSeq,
-                     blockPtr, blockKind);
+    writeEventPrefix("step", wave, static_cast<int>(lane), activeMask,
+                     expectedMask, blockSeq, blockPtr, blockKind);
     (*os_) << ",\"op\":\"" << opName << "\"}\n";
 }
 
@@ -85,8 +85,8 @@ void TraceJsonWriter::onSuspend(WaveId wave, LaneId lane, const Effect &effect,
                                 const char *blockKind) {
     if (!os_)
         return;
-    writeEventPrefix("suspend", wave, lane, activeMask, expectedMask, blockSeq,
-                     blockPtr, blockKind);
+    writeEventPrefix("suspend", wave, static_cast<int>(lane), activeMask,
+                     expectedMask, blockSeq, blockPtr, blockKind);
     (*os_) << ",\"effect\":\"" << effectName(effect) << "\"}\n";
 }
 
@@ -96,8 +96,23 @@ void TraceJsonWriter::onResume(WaveId wave, LaneId lane, std::uint64_t activeMas
                                const char *blockKind) {
     if (!os_)
         return;
-    writeEventPrefix("resume", wave, lane, activeMask, expectedMask, blockSeq,
+    writeEventPrefix("resume", wave, static_cast<int>(lane), activeMask,
+                     expectedMask, blockSeq, blockPtr, blockKind);
+    (*os_) << "}\n";
+}
+
+void TraceJsonWriter::onCollectiveComplete(WaveId wave, const std::string &opName,
+                                           std::uint64_t activeMask,
+                                           std::uint64_t expectedMask,
+                                           std::uint32_t blockSeq,
+                                           const void *blockPtr,
+                                           const char *blockKind) {
+    if (!os_)
+        return;
+    writeEventPrefix("collective", wave, -1, activeMask, expectedMask, blockSeq,
                      blockPtr, blockKind);
+    if (!opName.empty())
+        (*os_) << ",\"op\":\"" << opName << "\"";
     (*os_) << "}\n";
 }
 
@@ -108,7 +123,7 @@ void TraceJsonWriter::onReturn(WaveId wave, LaneId lane, bool hasValue,
                                const char *blockKind) {
     if (!os_)
         return;
-    writeEventPrefix("return", wave, lane, activeMask, expectedMask, blockSeq,
-                     blockPtr, blockKind);
+    writeEventPrefix("return", wave, static_cast<int>(lane), activeMask,
+                     expectedMask, blockSeq, blockPtr, blockKind);
     (*os_) << ",\"hasValue\":" << (hasValue ? "true" : "false") << "}\n";
 }
