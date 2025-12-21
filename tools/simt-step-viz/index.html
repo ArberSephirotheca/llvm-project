@@ -46,27 +46,8 @@
         </div>
         <div class="field">
           <label>Execution Mode</label>
-          <div class="mode-grid">
-            <div class="mode-head"></div>
-            <div class="mode-head">Control Flow</div>
-            <div class="mode-head">Memory</div>
-
-            <div class="mode-label">Synchronous</div>
-            <label class="mode-toggle" for="syncCfInput">
-              <input type="checkbox" id="syncCfInput" />
-            </label>
-            <label class="mode-toggle" for="syncMemInput">
-              <input type="checkbox" id="syncMemInput" />
-            </label>
-
-            <div class="mode-label">Collective</div>
-            <label class="mode-toggle" for="collectiveCfInput">
-              <input type="checkbox" id="collectiveCfInput" />
-            </label>
-            <label class="mode-toggle" for="collectiveMemInput">
-              <input type="checkbox" id="collectiveMemInput" />
-            </label>
-          </div>
+          <div class="summary-box" id="modeSummary">Synchronous: none&#10;Collective: none</div>
+          <button id="modeButton" class="btn ghost" type="button">Configure</button>
           <div class="hint">Select at most one mode per column.</div>
         </div>
         <div class="field">
@@ -79,8 +60,9 @@
           <div class="hint" id="speedLabel">24</div>
         </div>
         <div class="field">
-          <label for="programText">Program (MLIR)</label>
-          <textarea id="programText" rows="8" placeholder="MLIR appears here after running."></textarea>
+          <label>Program (MLIR)</label>
+          <div class="summary-box" id="programSummary">No program loaded.</div>
+          <button id="programButton" class="btn ghost" type="button">View</button>
         </div>
         <div class="stats">
           <div>
@@ -112,6 +94,55 @@
         <div id="eventLog" class="log"></div>
       </section>
     </main>
+
+    <div class="modal" id="modeModal" aria-hidden="true">
+      <div class="modal-backdrop" data-close="true"></div>
+      <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="modeTitle">
+        <div class="modal-head">
+          <h3 id="modeTitle">Execution Mode</h3>
+          <button class="btn ghost" id="modeClose" type="button">Close</button>
+        </div>
+        <div class="mode-grid">
+          <div class="mode-label">Synchronous</div>
+          <label class="mode-toggle" for="syncMemInput">
+            <input type="checkbox" id="syncMemInput" />
+            <span class="mode-item-label">Memory op</span>
+          </label>
+          <label class="mode-toggle" for="syncCfInput">
+            <input type="checkbox" id="syncCfInput" />
+            <span class="mode-item-label">Control flow</span>
+          </label>
+
+          <div class="mode-label">Collective</div>
+          <label class="mode-toggle" for="collectiveMemInput">
+            <input type="checkbox" id="collectiveMemInput" />
+            <span class="mode-item-label">Memory op</span>
+          </label>
+          <label class="mode-toggle" for="collectiveCfInput">
+            <input type="checkbox" id="collectiveCfInput" />
+            <span class="mode-item-label">Control flow</span>
+          </label>
+        </div>
+        <div class="hint">Select at most one mode per column.</div>
+        <div class="modal-actions">
+          <button class="btn" id="modeApply" type="button">Done</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal" id="programModal" aria-hidden="true">
+      <div class="modal-backdrop" data-close="true"></div>
+      <div class="modal-card modal-card-wide" role="dialog" aria-modal="true" aria-labelledby="programTitle">
+        <div class="modal-head">
+          <h3 id="programTitle">Program (MLIR)</h3>
+          <div class="modal-head-actions">
+            <button class="btn ghost" id="programCopy" type="button">Copy</button>
+            <button class="btn ghost" id="programClose" type="button">Close</button>
+          </div>
+        </div>
+        <textarea id="programText" class="program-text" rows="18" placeholder="MLIR appears here after running."></textarea>
+      </div>
+    </div>
 
     <footer class="footer">
       Trace format: JSONL events with <code>event</code>, <code>wave</code>,

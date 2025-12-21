@@ -26,6 +26,8 @@ public:
     static void clearMemory();
     static const llvm::DenseMap<mlir::Value, llvm::DenseMap<int64_t, ValueType>> &
     memory();
+    static llvm::DenseMap<mlir::Value, llvm::DenseMap<int64_t, ValueType>> &
+    memoryMutable();
 
 private:
     StepType handleConstant(mlir::arith::ConstantOp op);

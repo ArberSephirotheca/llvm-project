@@ -440,12 +440,69 @@ public:
                         if (waveCtx && executionModeForOp(&*it, ctx) ==
                                            ExecutionMode::Collective) {
                             if (isMemoryOp(&*it)) {
-                                if (auto *collective =
-                                        effect.template get_if<CollectiveEffect>()) {
-                                    std::uint32_t token =
-                                        collective->token.value_or(
-                                            collective->operation);
-                                    waveCtx->collectiveTokenToOp[token] = &*it;
+                                auto *collective =
+                                    effect.template get_if<CollectiveEffect>();
+                                if (!collective)
+                                    llvm::report_fatal_error(
+                                        "collective memory op: missing collective effect");
+                                std::uint32_t token =
+                                    collective->token.value_or(
+                                        collective->operation);
+                                waveCtx->collectiveTokenToOp[token] = &*it;
+                                auto &syncPoint = waveCtx->collectives[token];
+                                auto idxOrErr =
+                                    evaluateValue(*waveCtx, key, it->getOperand(1),
+                                                  lane, ctx.activeMask,
+                                                  ctx.expectedMask);
+                                if (!idxOrErr) {
+                                    llvm::consumeError(idxOrErr.takeError());
+                                    llvm::report_fatal_error(
+                                        "collective memory op: failed to evaluate index");
+                                }
+                                syncPoint.memoryIndices[lane] = std::move(*idxOrErr);
+
+                                if (isBufferStore(&*it)) {
+                                    auto valOrErr =
+                                        evaluateValue(*waveCtx, key,
+                                                      it->getOperand(2), lane,
+                                                      ctx.activeMask,
+                                                      ctx.expectedMask);
+                                    if (!valOrErr) {
+                                        llvm::consumeError(valOrErr.takeError());
+                                        llvm::report_fatal_error(
+                                            "collective memory op: failed to evaluate value");
+                                    }
+                                    syncPoint.memoryValues[lane] =
+                                        std::move(*valOrErr);
+                                    resume = []() mutable -> StepType {
+                                        return StepType::halt();
+                                    };
+                                } else {
+                                    resume = [this, wave, token, lane]()
+                                                 mutable -> StepType {
+                                        auto waveIt = state_.waves.find(wave);
+                                        if (waveIt == state_.waves.end())
+                                            llvm::report_fatal_error(
+                                                "collective memory resume: missing wave context");
+                                        auto &waveCtx = waveIt->second;
+                                        auto syncIt = waveCtx.collectives.find(token);
+                                        if (syncIt == waveCtx.collectives.end())
+                                            llvm::report_fatal_error(
+                                                "collective memory resume: missing sync point");
+                                        auto &syncPoint = syncIt->second;
+                                        auto resultIt = syncPoint.results.find(lane);
+                                        if (resultIt == syncPoint.results.end())
+                                            llvm::report_fatal_error(
+                                                "collective memory resume: missing lane result");
+                                        ValueType result = resultIt->second;
+                                        syncPoint.results.erase(resultIt);
+                                        syncPoint.continuations.erase(lane);
+                                        if (syncPoint.results.empty()) {
+                                            waveCtx.collectives.erase(syncIt);
+                                            waveCtx.collectiveTokenToOp.erase(token);
+                                        }
+                                        return StepType::produce(std::move(result));
+                                    };
                                 }
                             }
                         }
@@ -650,6 +707,14 @@ private:
         return name == "simt_step.buffer.load" || name == "simt_step.buffer.store";
     }
 
+    static bool isBufferLoad(mlir::Operation *op) {
+        return op->getName().getStringRef() == "simt_step.buffer.load";
+    }
+
+    static bool isBufferStore(mlir::Operation *op) {
+        return op->getName().getStringRef() == "simt_step.buffer.store";
+    }
+
     static bool isWaveOp(mlir::Operation *op) {
         return op->hasTrait<simt::dialect::SimtWave>();
     }
@@ -666,6 +731,15 @@ private:
             return SemValue::fromInt32(value);
         llvm::report_fatal_error("collective wave op: unsupported value type");
         return ValueType();
+    }
+
+    static auto &memoryMutable() {
+        if constexpr (requires { SemanticsT::memoryMutable(); }) {
+            return SemanticsT::memoryMutable();
+        } else {
+            llvm::report_fatal_error(
+                "collective memory op: semantics does not expose memory");
+        }
     }
 
     void computeWaveCollectiveResults(
@@ -698,6 +772,63 @@ private:
             syncPoint.results[lane] = makeInt32Value(count);
         }
         syncPoint.operands.clear();
+    }
+
+    bool computeMemoryCollectiveResults(
+        const mlir::Operation *op,
+        CollectiveSyncPoint<ValueType, StepType> &syncPoint) {
+        if (!isMemoryOp(const_cast<mlir::Operation *>(op)))
+            llvm::report_fatal_error(
+                "collective memory op: unsupported operation");
+        if (syncPoint.expectedMask == 0)
+            llvm::report_fatal_error(
+                "collective memory op: missing expected mask");
+
+        auto &mem = memoryMutable();
+        auto *mutableOp = const_cast<mlir::Operation *>(op);
+        mlir::Value res = mutableOp->getOperand(0);
+        if (isBufferLoad(const_cast<mlir::Operation *>(op))) {
+            std::uint64_t mask = syncPoint.expectedMask;
+            while (mask) {
+                unsigned lane = std::countr_zero(mask);
+                mask &= mask - 1;
+                auto idxIt = syncPoint.memoryIndices.find(lane);
+                if (idxIt == syncPoint.memoryIndices.end())
+                    llvm::report_fatal_error(
+                        "collective memory load: missing index");
+                int64_t idx = idxIt->second.asInt64();
+                auto resIt = mem.find(res);
+                if (resIt == mem.end())
+                    llvm::report_fatal_error("buffer.load: missing value at index");
+                auto valIt = resIt->second.find(idx);
+                if (valIt == resIt->second.end())
+                    llvm::report_fatal_error("buffer.load: missing value at index");
+                syncPoint.results[lane] = valIt->second;
+            }
+            return true;
+        }
+
+        if (isBufferStore(const_cast<mlir::Operation *>(op))) {
+            std::uint64_t mask = syncPoint.expectedMask;
+            // Apply stores in lane order to keep conflicts deterministic.
+            while (mask) {
+                unsigned lane = std::countr_zero(mask);
+                mask &= mask - 1;
+                auto idxIt = syncPoint.memoryIndices.find(lane);
+                if (idxIt == syncPoint.memoryIndices.end())
+                    llvm::report_fatal_error(
+                        "collective memory store: missing index");
+                auto valIt = syncPoint.memoryValues.find(lane);
+                if (valIt == syncPoint.memoryValues.end())
+                    llvm::report_fatal_error(
+                        "collective memory store: missing value");
+                int64_t idx = idxIt->second.asInt64();
+                mem[res][idx] = valIt->second;
+            }
+            return false;
+        }
+
+        llvm::report_fatal_error("collective memory op: unsupported operation");
     }
 
     ExecutionMode executionModeForOp(mlir::Operation *op,
@@ -2995,8 +3126,13 @@ private:
                         return llvm::Error::success();
                     }
                 }
+                bool memoryProducesResults =
+                    isMemoryCollective && !syncPoint.results.empty();
                 if (isWaveCollective && syncPoint.results.empty())
                     computeWaveCollectiveResults(waveOp, syncPoint);
+                if (isMemoryCollective && !memoryProducesResults)
+                    memoryProducesResults =
+                        computeMemoryCollectiveResults(waveOp, syncPoint);
                 if (isWaveCollective && traceSink_) {
                     std::string opName;
                     if (waveOp)
@@ -3039,9 +3175,9 @@ private:
                                                                    contIt->second});
                     }
                 }
-                if (!isWaveCollective)
+                if (!isWaveCollective && !memoryProducesResults)
                     waveCtx.collectives.erase(key);
-                if (isMemoryCollective)
+                if (isMemoryCollective && !memoryProducesResults)
                     waveCtx.collectiveTokenToOp.erase(key);
             }
             return llvm::Error::success();
@@ -3146,12 +3282,16 @@ private:
             it->second.continuations.erase(lane);
             it->second.operands.erase(lane);
             it->second.results.erase(lane);
+            it->second.memoryIndices.erase(lane);
+            it->second.memoryValues.erase(lane);
             const mlir::Operation *waveOp = nullptr;
             auto waveIt = waveCtx.collectiveTokenToOp.find(it->first);
             if (waveIt != waveCtx.collectiveTokenToOp.end())
                 waveOp = waveIt->second;
             bool isWaveCollective =
                 waveOp && isWaveOp(const_cast<mlir::Operation *>(waveOp));
+            bool isMemoryCollective =
+                waveOp && isMemoryOp(const_cast<mlir::Operation *>(waveOp));
             bool ready = it->second.expectedMask &&
                          it->second.arrivals.size() ==
                              static_cast<unsigned>(
@@ -3160,11 +3300,21 @@ private:
                 auto *blockCtx = getBlock(waveCtx, it->second.block);
                 bool scheduleNow = true;
                 bool emitCollective = false;
+                bool memoryHasResults = false;
                 if (isWaveCollective) {
                     if (it->second.results.empty()) {
                         computeWaveCollectiveResults(waveOp, it->second);
                         emitCollective = true;
                     } else {
+                        scheduleNow = false;
+                    }
+                } else if (isMemoryCollective) {
+                    if (it->second.results.empty()) {
+                        memoryHasResults =
+                            computeMemoryCollectiveResults(waveOp, it->second);
+                        emitCollective = true;
+                    } else {
+                        memoryHasResults = true;
                         scheduleNow = false;
                     }
                 }
@@ -3197,7 +3347,11 @@ private:
                         }
                     }
                 }
-                if (!isWaveCollective) {
+                bool keepCollective =
+                    isWaveCollective || (isMemoryCollective && memoryHasResults);
+                if (!keepCollective) {
+                    if (isMemoryCollective)
+                        waveCtx.collectiveTokenToOp.erase(it->first);
                     auto cur = it;
                     ++it;
                     waveCtx.collectives.erase(cur);

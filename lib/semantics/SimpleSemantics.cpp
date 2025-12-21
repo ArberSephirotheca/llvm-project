@@ -441,6 +441,11 @@ SimpleSemantics::memory() {
     return globalMemory();
 }
 
+llvm::DenseMap<mlir::Value, llvm::DenseMap<int64_t, SemValue>> &
+SimpleSemantics::memoryMutable() {
+    return globalMemory();
+}
+
 auto SimpleSemantics::handleBufferStore(mlir::Operation *op,
                                         SemanticsContext &context) -> StepType {
     // operands: resource, index, value

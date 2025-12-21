@@ -105,6 +105,8 @@ struct CollectiveSyncPoint {
     llvm::DenseSet<LaneId> arrivals;
     llvm::DenseMap<LaneId, ValueT> operands;
     llvm::DenseMap<LaneId, ValueT> results;
+    llvm::DenseMap<LaneId, ValueT> memoryIndices;
+    llvm::DenseMap<LaneId, ValueT> memoryValues;
     llvm::DenseMap<LaneId, StepT> continuations;
 };
 

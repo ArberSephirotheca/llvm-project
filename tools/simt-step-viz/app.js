@@ -6,6 +6,16 @@
   const collectiveCfInput = document.getElementById("collectiveCfInput");
   const syncMemInput = document.getElementById("syncMemInput");
   const collectiveMemInput = document.getElementById("collectiveMemInput");
+  const modeSummary = document.getElementById("modeSummary");
+  const modeButton = document.getElementById("modeButton");
+  const modeModal = document.getElementById("modeModal");
+  const modeClose = document.getElementById("modeClose");
+  const modeApply = document.getElementById("modeApply");
+  const programSummary = document.getElementById("programSummary");
+  const programButton = document.getElementById("programButton");
+  const programModal = document.getElementById("programModal");
+  const programCopy = document.getElementById("programCopy");
+  const programClose = document.getElementById("programClose");
   const generateBtn = document.getElementById("generateBtn");
   const runStatus = document.getElementById("runStatus");
   const speedInput = document.getElementById("speedInput");
@@ -55,6 +65,118 @@
 
   wireExclusive(syncCfInput, collectiveCfInput);
   wireExclusive(syncMemInput, collectiveMemInput);
+
+  function setModeModal(open) {
+    if (!modeModal)
+      return;
+    modeModal.classList.toggle("is-open", open);
+    modeModal.setAttribute("aria-hidden", open ? "false" : "true");
+  }
+
+  function rowSummary(title, memChecked, cfChecked) {
+    const items = [];
+    if (memChecked)
+      items.push("memory op");
+    if (cfChecked)
+      items.push("control flow");
+    if (items.length === 0)
+      return `${title}: none`;
+    return `${title}: ${items.join(", ")}`;
+  }
+
+  function updateModeSummary() {
+    if (!modeSummary)
+      return;
+    const syncText = rowSummary(
+      "Synchronous",
+      syncMemInput && syncMemInput.checked,
+      syncCfInput && syncCfInput.checked,
+    );
+    const collectiveText = rowSummary(
+      "Collective",
+      collectiveMemInput && collectiveMemInput.checked,
+      collectiveCfInput && collectiveCfInput.checked,
+    );
+    modeSummary.textContent = `${syncText}\n${collectiveText}`;
+  }
+
+  function setProgramModal(open) {
+    if (!programModal)
+      return;
+    programModal.classList.toggle("is-open", open);
+    programModal.setAttribute("aria-hidden", open ? "false" : "true");
+  }
+
+  function updateProgramSummary() {
+    if (!programSummary || !programText)
+      return;
+    const value = programText.value.trim();
+    if (!value) {
+      programSummary.textContent = "No program loaded.";
+      return;
+    }
+    const lines = value.split(/\r?\n/).length;
+    programSummary.textContent = `Loaded ${lines} lines.`;
+  }
+
+  [syncCfInput, collectiveCfInput, syncMemInput, collectiveMemInput].forEach(
+    (input) => {
+      if (!input)
+        return;
+      input.addEventListener("change", updateModeSummary);
+    },
+  );
+
+  if (modeButton)
+    modeButton.addEventListener("click", () => setModeModal(true));
+  if (modeSummary)
+    modeSummary.addEventListener("click", () => setModeModal(true));
+  if (modeClose)
+    modeClose.addEventListener("click", () => setModeModal(false));
+  if (modeApply)
+    modeApply.addEventListener("click", () => setModeModal(false));
+  if (modeModal)
+    modeModal.addEventListener("click", (event) => {
+      const target = event.target;
+      if (target && target.dataset && target.dataset.close)
+        setModeModal(false);
+    });
+
+  if (programButton)
+    programButton.addEventListener("click", () => setProgramModal(true));
+  if (programSummary)
+    programSummary.addEventListener("click", () => setProgramModal(true));
+  if (programCopy)
+    programCopy.addEventListener("click", async () => {
+      if (!programText)
+        return;
+      const value = programText.value;
+      if (!value)
+        return;
+      try {
+        await navigator.clipboard.writeText(value);
+        programCopy.textContent = "Copied";
+        setTimeout(() => {
+          programCopy.textContent = "Copy";
+        }, 1200);
+      } catch (err) {
+        programCopy.textContent = "Failed";
+        setTimeout(() => {
+          programCopy.textContent = "Copy";
+        }, 1200);
+      }
+    });
+  if (programClose)
+    programClose.addEventListener("click", () => setProgramModal(false));
+  if (programModal)
+    programModal.addEventListener("click", (event) => {
+      const target = event.target;
+      if (target && target.dataset && target.dataset.close)
+        setProgramModal(false);
+    });
+
+  updateModeSummary();
+  updateProgramSummary();
 
   function fixLegacyLine(line) {
     return line
@@ -559,8 +681,10 @@
       }
       if (payload.trace) {
         loadTraceFromText(payload.trace);
-        if (payload.ir)
+        if (payload.ir) {
           programText.value = payload.ir;
+          updateProgramSummary();
+        }
         runStatus.textContent = `Loaded ${events.length} events.`;
         runStatus.style.color = "var(--run)";
       } else {
