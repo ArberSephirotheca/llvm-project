@@ -11,6 +11,7 @@
   const laneTable = document.getElementById("laneTable");
   const eventLog = document.getElementById("eventLog");
   const resetBtn = document.getElementById("resetBtn");
+  const backBtn = document.getElementById("backBtn");
   const stepBtn = document.getElementById("stepBtn");
   const runBtn = document.getElementById("runBtn");
   const canvas = document.getElementById("timelineCanvas");
@@ -382,6 +383,14 @@
     return true;
   }
 
+  function stepBackward() {
+    if (currentIndex <= -1)
+      return false;
+    currentIndex -= 1;
+    updateView();
+    return true;
+  }
+
   function stopRun() {
     running = false;
     if (timer) {
@@ -425,6 +434,12 @@
 
   stepBtn.addEventListener("click", () => {
     stepForward();
+  });
+
+  backBtn.addEventListener("click", () => {
+    if (running)
+      stopRun();
+    stepBackward();
   });
 
   runBtn.addEventListener("click", () => {
