@@ -82,6 +82,16 @@ auto SimpleSemantics::evalOperation(mlir::Operation *op,
     if (llvm::isa<simt::dialect::DispatchThreadIdOp>(op))
         return handleDispatchThreadId(context);
 
+    if (auto callOp = llvm::dyn_cast<mlir::func::CallOp>(op)) {
+        if (callOp.getNumResults() == 1 && context.valueEnv) {
+            auto it = context.valueEnv->find(callOp.getResult(0));
+            if (it != context.valueEnv->end())
+                return StepType::produce(it->second);
+        }
+        llvm::errs() << "simple semantics: unsupported func.call evaluation\n";
+        return StepType::halt();
+    }
+
     if (llvm::isa<simt::dialect::LoopOp>(op))
         return StepType::halt();
 
@@ -451,6 +461,27 @@ auto SimpleSemantics::handleBufferStore(mlir::Operation *op,
     // operands: resource, index, value
     if (op->getNumOperands() != 3)
         return StepType::halt();
+    std::uint64_t expectedMask =
+        context.expectedMask ? context.expectedMask : context.activeMask;
+    if (expectedMask == 0)
+        expectedMask = 1ull << context.laneId;
+
+    ExecutionMode defaultMode =
+        context.policy ? context.policy->memoryOps : ExecutionMode::Independent;
+    ExecutionMode mode =
+        resolveExecutionMode(context, op->getName().getStringRef(), defaultMode);
+    constexpr std::uint32_t BufferStoreOp = 2;
+    std::uint32_t token = static_cast<std::uint32_t>(
+        reinterpret_cast<std::uintptr_t>(op) ^
+        (reinterpret_cast<std::uintptr_t>(op) >> 32));
+    if (mode == ExecutionMode::Collective) {
+        auto deferStore = []() -> StepType { return StepType::halt(); };
+        CollectiveEffect effect;
+        effect.operation = BufferStoreOp;
+        effect.activeMask = expectedMask;
+        effect.token = token;
+        return StepType::suspend(effect, std::move(deferStore));
+    }
     auto idxOrErr = evaluateValue(op->getOperand(1), context);
     if (!idxOrErr) {
         llvm::consumeError(idxOrErr.takeError());
@@ -464,26 +495,12 @@ auto SimpleSemantics::handleBufferStore(mlir::Operation *op,
     int64_t idx = idxOrErr->asInt64();
     mlir::Value res = op->getOperand(0);
     SemValue val = *valOrErr;
-    std::uint64_t expectedMask =
-        context.expectedMask ? context.expectedMask : context.activeMask;
-    if (expectedMask == 0)
-        expectedMask = 1ull << context.laneId;
-
-    ExecutionMode defaultMode =
-        context.policy ? context.policy->memoryOps : ExecutionMode::Independent;
-    ExecutionMode mode =
-        resolveExecutionMode(context, op->getName().getStringRef(), defaultMode);
     auto doStore = [res, idx, val]() -> StepType {
         globalMemory()[res][idx] = val;
         return StepType::halt();
     };
     if (mode == ExecutionMode::Independent)
         return doStore();
-
-    constexpr std::uint32_t BufferStoreOp = 2;
-    std::uint32_t token = static_cast<std::uint32_t>(
-        reinterpret_cast<std::uintptr_t>(op) ^
-        (reinterpret_cast<std::uintptr_t>(op) >> 32));
     if (mode == ExecutionMode::Synchronous) {
         SynchronizationEffect effect;
         effect.operation = BufferStoreOp;
@@ -491,24 +508,13 @@ auto SimpleSemantics::handleBufferStore(mlir::Operation *op,
         effect.token = token;
         return StepType::suspend(effect, std::move(doStore));
     }
-    CollectiveEffect effect;
-    effect.operation = BufferStoreOp;
-    effect.activeMask = expectedMask;
-    effect.token = token;
-    return StepType::suspend(effect, std::move(doStore));
+    return StepType::halt();
 }
 
 auto SimpleSemantics::handleBufferLoad(mlir::Operation *op,
                                        SemanticsContext &context) -> StepType {
     if (op->getNumOperands() != 2)
         return StepType::halt();
-    auto idxOrErr = evaluateValue(op->getOperand(1), context);
-    if (!idxOrErr) {
-        llvm::consumeError(idxOrErr.takeError());
-        return StepType::halt();
-    }
-    int64_t idx = idxOrErr->asInt64();
-    mlir::Value res = op->getOperand(0);
     std::uint64_t expectedMask =
         context.expectedMask ? context.expectedMask : context.activeMask;
     if (expectedMask == 0)
@@ -518,6 +524,25 @@ auto SimpleSemantics::handleBufferLoad(mlir::Operation *op,
         context.policy ? context.policy->memoryOps : ExecutionMode::Independent;
     ExecutionMode mode =
         resolveExecutionMode(context, op->getName().getStringRef(), defaultMode);
+    constexpr std::uint32_t BufferLoadOp = 3;
+    std::uint32_t token = static_cast<std::uint32_t>(
+        reinterpret_cast<std::uintptr_t>(op) ^
+        (reinterpret_cast<std::uintptr_t>(op) >> 32));
+    if (mode == ExecutionMode::Collective) {
+        auto deferLoad = []() -> StepType { return StepType::halt(); };
+        CollectiveEffect effect;
+        effect.operation = BufferLoadOp;
+        effect.activeMask = expectedMask;
+        effect.token = token;
+        return StepType::suspend(effect, std::move(deferLoad));
+    }
+    auto idxOrErr = evaluateValue(op->getOperand(1), context);
+    if (!idxOrErr) {
+        llvm::consumeError(idxOrErr.takeError());
+        return StepType::halt();
+    }
+    int64_t idx = idxOrErr->asInt64();
+    mlir::Value res = op->getOperand(0);
     auto doLoad = [res, idx]() -> StepType {
         auto resIt = globalMemory().find(res);
         if (resIt == globalMemory().end())
@@ -529,11 +554,6 @@ auto SimpleSemantics::handleBufferLoad(mlir::Operation *op,
     };
     if (mode == ExecutionMode::Independent)
         return doLoad();
-
-    constexpr std::uint32_t BufferLoadOp = 3;
-    std::uint32_t token = static_cast<std::uint32_t>(
-        reinterpret_cast<std::uintptr_t>(op) ^
-        (reinterpret_cast<std::uintptr_t>(op) >> 32));
     if (mode == ExecutionMode::Synchronous) {
         SynchronizationEffect effect;
         effect.operation = BufferLoadOp;
@@ -541,11 +561,7 @@ auto SimpleSemantics::handleBufferLoad(mlir::Operation *op,
         effect.token = token;
         return StepType::suspend(effect, std::move(doLoad));
     }
-    CollectiveEffect effect;
-    effect.operation = BufferLoadOp;
-    effect.activeMask = expectedMask;
-    effect.token = token;
-    return StepType::suspend(effect, std::move(doLoad));
+    return StepType::halt();
 }
 
 auto SimpleSemantics::handleWaveCountBits(mlir::Operation *op,

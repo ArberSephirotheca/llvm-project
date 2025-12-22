@@ -290,9 +290,13 @@ public:
                         ctx.expectedMask =
                             blk->expectedMask ? blk->expectedMask : blk->activeMask;
                         auto envIt = blk->valueEnvs.find(lane);
-                        if (envIt != blk->valueEnvs.end())
-                            ctx.valueEnv = &envIt->second;
+                        if (envIt != blk->valueEnvs.end()) {
+                            auto &laneCtx = waveCtx->lanes[lane];
+                            for (const auto &entry : envIt->second)
+                                laneCtx.values[entry.first] = entry.second;
+                        }
                     }
+                    ctx.valueEnv = &waveCtx->lanes[lane].values;
                 }
                 const std::uint32_t blockSeq = key.sequenceId;
                 const void *blockPtr = key.block;
@@ -368,6 +372,7 @@ public:
                                         "call return value evaluation failed");
                                 callerBlockCtx->valueEnvs[lane][frame.results[0]] =
                                     *valOrErr;
+                                laneCtx.values[frame.results[0]] = *valOrErr;
                             }
                             callerBlockCtx->activeMask |= (1ull << lane);
                             laneCtx.phase =
@@ -603,9 +608,12 @@ public:
                                 if (auto *prod =
                                         std::get_if<typename StepType::Produce>(
                                             &resumedState)) {
-                                    if (blockCtx && op->getNumResults() == 1)
+                                    if (blockCtx && op->getNumResults() == 1) {
                                         blockCtx->valueEnvs[lane][op->getResult(0)] =
                                             prod->value;
+                                        waveCtx->lanes[lane].values[op->getResult(0)] =
+                                            prod->value;
+                                    }
                                     if (!isTerminator && hasNext) {
                                         return StepType::continueWith(
                                             [this, wave, key, block, nextIt, ctx, lane]()
@@ -654,8 +662,10 @@ public:
 
                     if (auto *prod =
                             std::get_if<typename StepType::Produce>(&stateVariant)) {
-                        if (blockCtx && it->getNumResults() == 1)
+                        if (blockCtx && it->getNumResults() == 1) {
                             blockCtx->valueEnvs[lane][it->getResult(0)] = prod->value;
+                            waveCtx->lanes[lane].values[it->getResult(0)] = prod->value;
+                        }
                         if (!isTerminator && hasNext) {
                             return StepType::continueWith(
                                 [this, wave, key, block, nextIt, ctx, lane]() mutable
@@ -1058,8 +1068,12 @@ private:
             laneCtx.overrideMode = ExecutionMode::Independent;
             laneCtx.suppressStepTrace = true;
             auto envIt = blockCtx->valueEnvs.find(lane);
-            if (envIt != blockCtx->valueEnvs.end())
-                laneCtx.valueEnv = &envIt->second;
+            auto &laneState = waveCtx.lanes[lane];
+            if (envIt != blockCtx->valueEnvs.end()) {
+                for (const auto &entry : envIt->second)
+                    laneState.values[entry.first] = entry.second;
+            }
+            laneCtx.valueEnv = &laneState.values;
 
             if (traceSink_ && !laneCtx.suppressStepTrace) {
                 traceSink_->onResume(
@@ -2900,8 +2914,30 @@ private:
             if (envIt != blockCtx->valueEnvs.end())
                 ctx.valueEnv = &envIt->second;
         }
+        // Prefer cached values when available (avoid re-evaluating defs).
+        if (ctx.valueEnv) {
+            auto it = ctx.valueEnv->find(value);
+            if (it != ctx.valueEnv->end())
+                return it->second;
+        }
+        auto laneIt = waveCtx.lanes.find(lane);
+        if (laneIt != waveCtx.lanes.end()) {
+            auto it = laneIt->second.values.find(value);
+            if (it != laneIt->second.values.end())
+                return it->second;
+        }
         // If the value has a defining op, ask the semantics to evaluate it.
         if (auto *defOp = value.getDefiningOp()) {
+            if (llvm::isa<mlir::func::CallOp>(defOp)) {
+                for (auto &blockEntry : waveCtx.blocks) {
+                    auto envIt = blockEntry.second.valueEnvs.find(lane);
+                    if (envIt == blockEntry.second.valueEnvs.end())
+                        continue;
+                    auto valIt = envIt->second.find(value);
+                    if (valIt != envIt->second.end())
+                        return valIt->second;
+                }
+            }
             StepType step = adaptor_.eval(semantics_, defOp, ctx);
             if (!step.isProduce())
                 return llvm::make_error<llvm::StringError>(
@@ -2909,12 +2945,6 @@ private:
                     llvm::inconvertibleErrorCode());
             auto state = std::move(step).takeState();
             return std::get<typename StepType::Produce>(std::move(state)).value;
-        }
-        // Block arguments should be present in the value environment.
-        if (ctx.valueEnv) {
-            auto it = ctx.valueEnv->find(value);
-            if (it != ctx.valueEnv->end())
-                return it->second;
         }
         return llvm::make_error<llvm::StringError>(
             "unsupported SSA value in interpreter evaluateValue",
