@@ -1370,14 +1370,19 @@ private:
         parentBlock.continuations[lane] = parentCont;
 
         auto findEntry = [&](WaveContext<ValueType, StepType> &ctx,
-                             const DynamicBlockKey &parentKey) {
+                             const DynamicBlockKey &parentKey,
+                             mlir::Operation *op) {
             for (auto it = ctx.mergeStack.rbegin(); it != ctx.mergeStack.rend(); ++it) {
-                if (!it->loopFrame && it->parent == parentKey)
-                    return &*it;
+                if (it->loopFrame || it->parent != parentKey)
+                    continue;
+                if (it->switchFrame && it->switchFrame->switchOp != op)
+                    continue;
+                return &*it;
             }
             return static_cast<MergeStackEntry<ValueType, StepType> *>(nullptr);
         };
-        MergeStackEntry<ValueType, StepType> *entry = findEntry(waveCtx, key);
+        MergeStackEntry<ValueType, StepType> *entry =
+            findEntry(waveCtx, key, switchOp.getOperation());
         if (!entry) {
             MergeStackEntry<ValueType, StepType> newEntry;
             newEntry.parent = key;
@@ -2170,10 +2175,13 @@ private:
         if (!entry && blockCtx->parentKey) {
             for (auto it = waveCtx.mergeStack.rbegin();
                  it != waveCtx.mergeStack.rend(); ++it) {
-                if (!it->loopFrame && it->parent == *blockCtx->parentKey) {
-                    entry = &*it;
-                    break;
-                }
+                if (it->loopFrame || it->parent != *blockCtx->parentKey)
+                    continue;
+                if (it->switchFrame &&
+                    it->switchFrame->switchOp != blockCtx->switchOp)
+                    continue;
+                entry = &*it;
+                break;
             }
         }
         if (entry && !entry->switchFrame) {
@@ -2198,11 +2206,41 @@ private:
         if (!entry || !entry->switchFrame)
             llvm::report_fatal_error("handleSwitchYield: missing switch frame");
         auto &frame = *entry->switchFrame;
+        auto &caseRegion = switchOp.getCaseBody();
+        unsigned bodyBlocks = static_cast<unsigned>(
+            std::distance(caseRegion.begin(), caseRegion.end()));
+        if (frame.caseBlocks.size() != bodyBlocks) {
+            frame.caseBlocks.clear();
+            frame.caseBlocks.reserve(bodyBlocks);
+            for (mlir::Block &b : caseRegion)
+                frame.caseBlocks.push_back(&b);
+            if (entry->pendingChildren.size() != frame.caseBlocks.size()) {
+                entry->pendingChildren.clear();
+                entry->childMasks.clear();
+                for (unsigned idx = 0; idx < frame.caseBlocks.size(); ++idx) {
+                    entry->pendingChildren.push_back(DynamicBlockKey{
+                        frame.caseBlocks[idx],
+                        static_cast<std::uint32_t>(frame.baseSeq + idx)});
+                    entry->childMasks.push_back(0);
+                }
+            }
+        }
         unsigned numCases = static_cast<unsigned>(frame.caseBlocks.size());
         if (numCases == 0)
             llvm::report_fatal_error("handleSwitchYield: no switch cases");
-        if (static_cast<std::size_t>(defaultIndex) >= numCases)
+        if (static_cast<std::size_t>(defaultIndex) >= numCases) {
+            if (EnableCPSDebugLogs) {
+                llvm::errs() << "[CPS] handleSwitchYield invalid default_index"
+                             << " default=" << defaultIndex
+                             << " numCases=" << numCases
+                             << " bodyBlocks=" << bodyBlocks
+                             << " caseValues=" << switchOp.getCaseValues().size()
+                             << " baseSeq=" << frame.baseSeq
+                             << " keySeq=" << key.sequenceId
+                             << " switch=" << switchOp.getOperation() << "\n";
+            }
             llvm::report_fatal_error("handleSwitchYield: default_index out of range");
+        }
         if (key.sequenceId < frame.baseSeq)
             llvm::report_fatal_error("handleSwitchYield: invalid switch sequence");
         unsigned caseIdx = key.sequenceId - frame.baseSeq;
