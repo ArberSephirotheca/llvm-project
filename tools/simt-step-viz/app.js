@@ -16,6 +16,12 @@
   const programModal = document.getElementById("programModal");
   const programCopy = document.getElementById("programCopy");
   const programClose = document.getElementById("programClose");
+  const initSummary = document.getElementById("initSummary");
+  const initButton = document.getElementById("initButton");
+  const initModal = document.getElementById("initModal");
+  const initClose = document.getElementById("initClose");
+  const initCopy = document.getElementById("initCopy");
+  const initText = document.getElementById("initText");
   const raiseSelect = document.getElementById("raiseSelect");
   const raiseSummary = document.getElementById("raiseSummary");
   const raiseButton = document.getElementById("raiseButton");
@@ -114,6 +120,13 @@
     programModal.setAttribute("aria-hidden", open ? "false" : "true");
   }
 
+  function setInitModal(open) {
+    if (!initModal)
+      return;
+    initModal.classList.toggle("is-open", open);
+    initModal.setAttribute("aria-hidden", open ? "false" : "true");
+  }
+
   function updateProgramSummary() {
     if (!programSummary || !programText)
       return;
@@ -124,6 +137,18 @@
     }
     const lines = value.split(/\r?\n/).length;
     programSummary.textContent = `Loaded ${lines} lines.`;
+  }
+
+  function updateInitSummary() {
+    if (!initSummary || !initText)
+      return;
+    const value = initText.value.trim();
+    if (!value) {
+      initSummary.textContent = "No init data.";
+      return;
+    }
+    const lines = value.split(/\r?\n/).length;
+    initSummary.textContent = `Loaded ${lines} lines.`;
   }
 
   function setRaiseModal(open) {
@@ -206,6 +231,41 @@
         setProgramModal(false);
     });
 
+  if (initButton)
+    initButton.addEventListener("click", () => setInitModal(true));
+  if (initSummary)
+    initSummary.addEventListener("click", () => setInitModal(true));
+  if (initClose)
+    initClose.addEventListener("click", () => setInitModal(false));
+  if (initModal)
+    initModal.addEventListener("click", (event) => {
+      const target = event.target;
+      if (target && target.dataset && target.dataset.close)
+        setInitModal(false);
+    });
+  if (initCopy)
+    initCopy.addEventListener("click", async () => {
+      if (!initText)
+        return;
+      const value = initText.value;
+      if (!value)
+        return;
+      try {
+        await navigator.clipboard.writeText(value);
+        initCopy.textContent = "Copied";
+        setTimeout(() => {
+          initCopy.textContent = "Copy";
+        }, 1200);
+      } catch (err) {
+        initCopy.textContent = "Failed";
+        setTimeout(() => {
+          initCopy.textContent = "Copy";
+        }, 1200);
+      }
+    });
+  if (initText)
+    initText.addEventListener("input", updateInitSummary);
+
   if (raiseButton)
     raiseButton.addEventListener("click", () => setRaiseModal(true));
   if (raiseSummary)
@@ -247,6 +307,7 @@
 
   updateModeSummary();
   updateProgramSummary();
+  updateInitSummary();
   updateRaiseSummary();
 
   function fixLegacyLine(line) {
@@ -725,42 +786,48 @@
     const lanes = Math.max(1, Math.min(64, parseInt(threadsInput.value, 10) || 1));
     const seed = Math.max(0, parseInt(seedInput.value, 10) || 0);
     const program = programSelect.value || "richer";
-    const query = new URLSearchParams({
+    const payload = {
       lanes: String(lanes),
       seed: String(seed),
       program,
-    });
+    };
     if (raiseSelect && raiseSelect.value)
-      query.set("raise", raiseSelect.value);
+      payload.raise = raiseSelect.value;
     if (syncCfInput && syncCfInput.checked)
-      query.set("sync_cf", "1");
+      payload.sync_cf = true;
     if (collectiveCfInput && collectiveCfInput.checked)
-      query.set("collective_cf", "1");
+      payload.collective_cf = true;
     if (syncMemInput && syncMemInput.checked)
-      query.set("sync_mem", "1");
+      payload.sync_mem = true;
     if (collectiveMemInput && collectiveMemInput.checked)
-      query.set("collective_mem", "1");
+      payload.collective_mem = true;
+    if (initText && initText.value.trim())
+      payload.init_yaml = initText.value;
 
     generateBtn.disabled = true;
     runStatus.textContent = "Running interpreter...";
     runStatus.style.color = "var(--muted)";
 
     try {
-      const response = await fetch(`/run?${query.toString()}`);
-      const payload = await response.json();
-      if (!response.ok || payload.error) {
-        const message = payload.error || `Request failed (${response.status})`;
+      const response = await fetch("/run", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const responsePayload = await response.json();
+      if (!response.ok || responsePayload.error) {
+        const message = responsePayload.error || `Request failed (${response.status})`;
         throw new Error(message);
       }
-      if (payload.trace) {
-        loadTraceFromText(payload.trace);
-        if (payload.ir) {
-          programText.value = payload.ir;
+      if (responsePayload.trace) {
+        loadTraceFromText(responsePayload.trace);
+        if (responsePayload.ir) {
+          programText.value = responsePayload.ir;
           updateProgramSummary();
         }
         if (raiseText) {
-          raiseText.value = payload.raised || "";
-          const raiseError = payload.raise_error || "";
+          raiseText.value = responsePayload.raised || "";
+          const raiseError = responsePayload.raise_error || "";
           updateRaiseSummary(raiseError);
         }
         runStatus.textContent = `Loaded ${events.length} events.`;

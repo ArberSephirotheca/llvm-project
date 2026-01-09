@@ -65,6 +65,11 @@
           <button id="programButton" class="btn ghost" type="button">View</button>
         </div>
         <div class="field">
+          <label>Buffer Init (YAML)</label>
+          <div class="summary-box" id="initSummary">No init data.</div>
+          <button id="initButton" class="btn ghost" type="button">Edit</button>
+        </div>
+        <div class="field">
           <label for="raiseSelect">Raiser Output</label>
           <select id="raiseSelect">
             <option value="hlsl" selected>HLSL</option>
@@ -166,6 +171,25 @@
           </div>
         </div>
         <textarea id="raiseText" class="program-text" rows="18" placeholder="Raised output appears here after running."></textarea>
+      </div>
+    </div>
+
+    <div class="modal" id="initModal" aria-hidden="true">
+      <div class="modal-backdrop" data-close="true"></div>
+      <div class="modal-card modal-card-wide" role="dialog" aria-modal="true" aria-labelledby="initTitle">
+        <div class="modal-head">
+          <h3 id="initTitle">Buffer Init (YAML)</h3>
+          <div class="modal-head-actions">
+            <button class="btn ghost" id="initCopy" type="button">Copy</button>
+            <button class="btn ghost" id="initClose" type="button">Close</button>
+          </div>
+        </div>
+        <textarea id="initText" class="program-text" rows="14" placeholder="buffers:
+  - buffer: buf1
+    size: 8
+    fill: 0
+    entries:
+      - { index: 0, value: 7 }"></textarea>
       </div>
     </div>
 
