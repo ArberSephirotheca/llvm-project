@@ -25,7 +25,6 @@ target_link_libraries(simt-hlsl-import
         MLIRMathDialect
         MLIRVectorDialect
         LLVMCore
-        clangTooling
 )
 
 target_include_directories(simt-hlsl-import
@@ -35,6 +34,14 @@ target_include_directories(simt-hlsl-import
         ${LLVM_INCLUDE_DIRS}
         ${MLIR_INCLUDE_DIRS}
 )
+
+if (TARGET clangTooling)
+  target_link_libraries(simt-hlsl-import PRIVATE clangTooling)
+elseif(TARGET Clang::clangTooling)
+  target_link_libraries(simt-hlsl-import PRIVATE Clang::clangTooling)
+else()
+  message(STATUS "clangTooling target not found; relying on clang-cpp")
+endif()
 
 target_compile_definitions(simt-hlsl-import
     PRIVATE
