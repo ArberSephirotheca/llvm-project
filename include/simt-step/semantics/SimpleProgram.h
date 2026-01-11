@@ -7,6 +7,17 @@
 #include "simt-step/semantics/Trace.h"
 
 #include <mlir/IR/Block.h>
+#include <mlir/Support/LogicalResult.h>
+
+#include <cstdint>
+#include <vector>
+
+#include <llvm/ADT/ArrayRef.h>
+#include <llvm/ADT/StringRef.h>
+
+namespace mlir {
+class Operation;
+} // namespace mlir
 
 namespace simt::semantics {
 
@@ -38,5 +49,29 @@ private:
     CPSInterpreter<SimpleSemantics> interpreter_;
     [[maybe_unused]] bool enableLoopDispatch_ = false;
 };
+
+struct BufferInitEntry {
+    unsigned argIndex = 0;
+    int64_t index = 0;
+    int64_t value = 0;
+};
+
+struct RunOperationOptions {
+    llvm::StringRef entry = "main";
+    unsigned lanes = 4;
+    unsigned subgroupWidth = 8;
+    int64_t bufferSize = 0;  // 0 = infer from written entries
+    int64_t fillValue = 0;
+    const ExecutionPolicy *policy = nullptr;
+    TraceSink *trace = nullptr;
+};
+
+/// Run a module or function and extract a resource buffer by argument index.
+mlir::LogicalResult runOperationToBuffer(
+    mlir::Operation &op,
+    unsigned bufferArgIndex,
+    std::vector<int64_t> &buffer,
+    const RunOperationOptions &options = {},
+    llvm::ArrayRef<BufferInitEntry> initEntries = {});
 
 } // namespace simt::semantics
