@@ -11,6 +11,7 @@ namespace simt::fuzz {
 
 struct GeneratorConfig {
     std::array<std::int64_t, 3> numThreads{1, 1, 1};
+    std::uint32_t subgroupWidth = 8;
     std::uint64_t seed = 0; // 0 = deterministic default
     std::uint32_t maxTripCount = 4;
 };

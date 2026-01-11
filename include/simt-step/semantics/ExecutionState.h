@@ -159,6 +159,8 @@ struct MergeStackEntry {
 
 template <typename ValueT, typename StepT>
 struct WaveContext {
+    std::uint32_t waveId = 0;
+    std::uint32_t subgroupWidth = 0;
     std::uint64_t currentMask = 0;
     llvm::DenseMap<DynamicBlockKey, DynamicBlock<ValueT, StepT>> blocks;
     llvm::SmallVector<MergeStackEntry<ValueT, StepT>, 8> mergeStack;

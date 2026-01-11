@@ -65,6 +65,7 @@ class TraceHandler(http.server.SimpleHTTPRequestHandler):
 
     def handle_run(self, params):
         lanes = parse_int(params.get("lanes"), 4)
+        subgroup_width = parse_int(params.get("subgroup_width"), 8)
         seed = parse_int(params.get("seed"), 0)
         program = params.get("program", "richer")
         raise_target = params.get("raise", "none")
@@ -76,6 +77,9 @@ class TraceHandler(http.server.SimpleHTTPRequestHandler):
 
         if lanes < 1 or lanes > 64:
             self.send_json(400, {"error": "lanes must be between 1 and 64"})
+            return
+        if subgroup_width < 1 or subgroup_width > 64:
+            self.send_json(400, {"error": "subgroup width must be between 1 and 64"})
             return
         if seed < 0:
             self.send_json(400, {"error": "seed must be non-negative"})
@@ -142,6 +146,7 @@ class TraceHandler(http.server.SimpleHTTPRequestHandler):
                 gen_cmd = [
                     str(FUZZ_BIN),
                     f"--lanes={lanes}",
+                    f"--subgroup-width={subgroup_width}",
                     f"--seed={seed}",
                     f"--program={program_map[program]}",
                     "--print-ir",
@@ -180,6 +185,7 @@ class TraceHandler(http.server.SimpleHTTPRequestHandler):
                     str(RUNNER_BIN),
                     ir_path,
                     f"--lanes={lanes}",
+                    f"--subgroup-width={subgroup_width}",
                     f"--trace-file={trace_path}",
                     f"--init-file={init_path}",
                 ]
@@ -211,6 +217,7 @@ class TraceHandler(http.server.SimpleHTTPRequestHandler):
                 cmd = [
                     str(FUZZ_BIN),
                     f"--lanes={lanes}",
+                    f"--subgroup-width={subgroup_width}",
                     f"--seed={seed}",
                     f"--program={program_map[program]}",
                     "--print-ir",
@@ -276,6 +283,7 @@ class TraceHandler(http.server.SimpleHTTPRequestHandler):
                     raise_cmd = [
                         str(FUZZ_BIN),
                         f"--lanes={lanes}",
+                        f"--subgroup-width={subgroup_width}",
                         f"--seed={seed}",
                         f"--program={program_map[program]}",
                         "--raise-hlsl",

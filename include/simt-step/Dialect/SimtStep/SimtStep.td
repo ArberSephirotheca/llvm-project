@@ -600,6 +600,18 @@ def SimtStep_LaneIdOp : Op<SimtStep_Dialect, "lane_id"> {
   let assemblyFormat = "attr-dict";
 }
 
+def SimtStep_SubgroupIdOp : Op<SimtStep_Dialect, "subgroup_id", [Pure]> {
+  let summary = "Query the current subgroup identifier";
+  let description = [{
+    Returns the subgroup id within the dispatch, derived from the linearized
+    dispatch thread id and the configured subgroup width.
+  }];
+
+  let results = (outs Index:$id);
+
+  let assemblyFormat = "attr-dict";
+}
+
 // def SimtStep_ActiveMaskOp : Op<SimtStep_Dialect, "active_mask"> {
 //   let summary = "Expose the current active lane mask";
 //   let description = [{

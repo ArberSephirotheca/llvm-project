@@ -32,10 +32,13 @@ public:
 private:
     StepType handleConstant(mlir::arith::ConstantOp op);
     StepType handleLaneId(SemanticsContext &context);
+    StepType handleSubgroupId(SemanticsContext &context);
     StepType handleAddIOp(mlir::arith::AddIOp op,
                           SemanticsContext &context);
     StepType handleRemSIOp(mlir::arith::RemSIOp op,
                            SemanticsContext &context);
+    StepType handleIndexCastOp(mlir::arith::IndexCastOp op,
+                               SemanticsContext &context);
     StepType handleAndIOp(mlir::arith::AndIOp op,
                           SemanticsContext &context);
     StepType handleOrIOp(mlir::arith::OrIOp op,

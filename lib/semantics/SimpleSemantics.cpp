@@ -45,6 +45,20 @@ ExecutionMode resolveExecutionMode(const SemanticsContext &context,
     return defaultMode;
 }
 
+SemValue castIndexValue(const SemValue &value, mlir::Type dstType) {
+    if (auto intTy = mlir::dyn_cast<mlir::IntegerType>(dstType)) {
+        unsigned width = intTy.getWidth();
+        if (width == 1)
+            return SemValue::fromBool(value.asBool());
+        if (width <= 32)
+            return SemValue::fromInt32(static_cast<int32_t>(value.asInt64()));
+        return SemValue::fromInt64(value.asInt64());
+    }
+    if (mlir::isa<mlir::IndexType>(dstType))
+        return SemValue::fromInt64(value.asInt64());
+    llvm::report_fatal_error("index_cast: unsupported result type");
+}
+
 } // namespace
 
 auto SimpleSemantics::evalOperation(mlir::Operation *op,
@@ -67,6 +81,9 @@ auto SimpleSemantics::evalOperation(mlir::Operation *op,
     if (auto remOp = llvm::dyn_cast<mlir::arith::RemSIOp>(op))
         return handleRemSIOp(remOp, context);
 
+    if (auto castOp = llvm::dyn_cast<mlir::arith::IndexCastOp>(op))
+        return handleIndexCastOp(castOp, context);
+
     if (auto andOp = llvm::dyn_cast<mlir::arith::AndIOp>(op))
         return handleAndIOp(andOp, context);
 
@@ -78,6 +95,9 @@ auto SimpleSemantics::evalOperation(mlir::Operation *op,
 
     if (llvm::isa<simt::dialect::LaneIdOp>(op))
         return handleLaneId(context);
+
+    if (llvm::isa<simt::dialect::SubgroupIdOp>(op))
+        return handleSubgroupId(context);
 
     if (llvm::isa<simt::dialect::DispatchThreadIdOp>(op))
         return handleDispatchThreadId(context);
@@ -111,6 +131,11 @@ auto SimpleSemantics::handleConstant(mlir::arith::ConstantOp op) -> StepType {
 
 auto SimpleSemantics::handleLaneId(SemanticsContext &context) -> StepType {
     auto value = SemValue::fromInt32(static_cast<int32_t>(context.laneId));
+    return StepType::produce(std::move(value));
+}
+
+auto SimpleSemantics::handleSubgroupId(SemanticsContext &context) -> StepType {
+    auto value = SemValue::fromInt32(static_cast<int32_t>(context.waveId));
     return StepType::produce(std::move(value));
 }
 
@@ -165,6 +190,17 @@ auto SimpleSemantics::handleAndIOp(mlir::arith::AndIOp op,
     }
     auto result = lhsOrErr->bitAnd(*rhsOrErr);
     return StepType::produce(std::move(result));
+}
+
+auto SimpleSemantics::handleIndexCastOp(mlir::arith::IndexCastOp op,
+                                        SemanticsContext &context) -> StepType {
+    auto inputOrErr = evaluateValue(op.getIn(), context);
+    if (!inputOrErr) {
+        llvm::consumeError(inputOrErr.takeError());
+        return StepType::halt();
+    }
+    SemValue casted = castIndexValue(*inputOrErr, op.getType());
+    return StepType::produce(std::move(casted));
 }
 
 auto SimpleSemantics::handleOrIOp(mlir::arith::OrIOp op,
@@ -247,8 +283,26 @@ SimpleSemantics::evaluateValue(mlir::Value value,
         return v;
     }
 
+    if (auto castOp = value.getDefiningOp<mlir::arith::IndexCastOp>()) {
+        auto step = handleIndexCastOp(castOp, context);
+        if (!step.isProduce())
+            return llvm::make_error<llvm::StringError>(
+                "index_cast did not produce a value",
+                llvm::inconvertibleErrorCode());
+        auto state = std::move(step).takeState();
+        auto v = std::get<typename StepType::Produce>(std::move(state)).value;
+        logVal(v);
+        return v;
+    }
+
     if (auto laneOp = value.getDefiningOp<simt::dialect::LaneIdOp>()) {
         auto v = SemValue::fromInt32(static_cast<int32_t>(context.laneId));
+        logVal(v);
+        return v;
+    }
+
+    if (auto subOp = value.getDefiningOp<simt::dialect::SubgroupIdOp>()) {
+        auto v = SemValue::fromInt32(static_cast<int32_t>(context.waveId));
         logVal(v);
         return v;
     }
@@ -257,7 +311,12 @@ SimpleSemantics::evaluateValue(mlir::Value value,
         mlir::Type type = didOp.getType();
         if (mlir::isa<mlir::IndexType>(type) ||
             mlir::isa<mlir::IntegerType>(type)) {
-            auto v = SemValue::fromInt32(static_cast<int32_t>(context.laneId));
+            std::uint64_t globalId = context.laneId;
+            if (context.subgroupWidth != 0)
+                globalId = static_cast<std::uint64_t>(context.waveId) *
+                               context.subgroupWidth +
+                           context.laneId;
+            auto v = SemValue::fromInt32(static_cast<int32_t>(globalId));
             logVal(v);
             return v;
         }
@@ -410,8 +469,13 @@ auto SimpleSemantics::handleCmpIOp(mlir::arith::CmpIOp op,
 
 auto SimpleSemantics::handleDispatchThreadId(SemanticsContext &context)
     -> StepType {
+    std::uint64_t globalId = context.laneId;
+    if (context.subgroupWidth != 0)
+        globalId = static_cast<std::uint64_t>(context.waveId) *
+                       context.subgroupWidth +
+                   context.laneId;
     return StepType::produce(
-        SemValue::fromInt32(static_cast<int32_t>(context.laneId)));
+        SemValue::fromInt32(static_cast<int32_t>(globalId)));
 }
 
 auto SimpleSemantics::handleYieldOp(simt::dialect::YieldOp op,

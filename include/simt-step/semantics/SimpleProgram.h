@@ -27,7 +27,8 @@ public:
     const StateType &state() const { return interpreter_.state(); }
 
 private:
-    StepType buildStepForIterator(const DynamicBlockKey &key,
+    StepType buildStepForIterator(WaveId wave,
+                                  const DynamicBlockKey &key,
                                   mlir::Block *block,
                                   mlir::Block::iterator it,
                                   SemanticsContext context,

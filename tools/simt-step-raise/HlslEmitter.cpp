@@ -37,6 +37,7 @@ struct HlslEmitter {
     llvm::DenseMap<Value, std::string> names;
     unsigned tmpId = 0;
     llvm::raw_ostream &os;
+    std::uint32_t subgroupWidth = 8;
 
     explicit HlslEmitter(llvm::raw_ostream &os) : os(os) {}
 
@@ -115,6 +116,12 @@ struct HlslEmitter {
         }
         if (isa<simt::dialect::DispatchThreadIdOp>(op)) {
             return "tid.x";
+        }
+        if (isa<simt::dialect::LaneIdOp>(op)) {
+            return "(tid.x % " + std::to_string(subgroupWidth) + ")";
+        }
+        if (isa<simt::dialect::SubgroupIdOp>(op)) {
+            return "(tid.x / " + std::to_string(subgroupWidth) + ")";
         }
         if (auto wave = dyn_cast<simt::dialect::WaveCountBitsOp>(op)) {
             return "WaveActiveCountBits(" + emitValue(wave.getPredicate()) + ")";
@@ -482,12 +489,14 @@ struct HlslEmitter {
 } // namespace
 
 static LogicalResult emitHelperFunction(func::FuncOp func,
-                                        llvm::raw_ostream &os) {
+                                        llvm::raw_ostream &os,
+                                        std::uint32_t subgroupWidth) {
     auto results = func.getFunctionType().getResults();
     if (results.size() > 1)
         llvm::report_fatal_error("HlslEmitter: helper multiple results");
 
     HlslEmitter emitter(os);
+    emitter.subgroupWidth = subgroupWidth;
     std::string retType = results.empty() ? "void" : emitter.emitType(results[0]);
 
     os << retType << " " << func.getName() << "(";
@@ -530,6 +539,7 @@ LogicalResult emitModuleAsHlsl(ModuleOp module, llvm::raw_ostream &os) {
     }
 
     int64_t ntx = 1, nty = 1, ntz = 1;
+    std::uint32_t subgroupWidth = 8;
     if (auto attr = func->getAttr("simt.num_threads")) {
         if (auto denseAttr = mlir::dyn_cast<DenseI64ArrayAttr>(attr)) {
             auto vals = denseAttr.asArrayRef();
@@ -551,6 +561,17 @@ LogicalResult emitModuleAsHlsl(ModuleOp module, llvm::raw_ostream &os) {
             }
         }
     }
+    if (auto attr = func->getAttr("simt.subgroup_width")) {
+        if (auto intAttr = mlir::dyn_cast<IntegerAttr>(attr)) {
+            if (intAttr.getInt() > 0)
+                subgroupWidth = static_cast<std::uint32_t>(intAttr.getInt());
+        }
+    } else if (auto attr = module->getAttr("simt.subgroup_width")) {
+        if (auto intAttr = mlir::dyn_cast<IntegerAttr>(attr)) {
+            if (intAttr.getInt() > 0)
+                subgroupWidth = static_cast<std::uint32_t>(intAttr.getInt());
+        }
+    }
 
     SmallVector<BlockArgument> resources;
     for (auto arg : func.getArguments()) {
@@ -567,7 +588,7 @@ LogicalResult emitModuleAsHlsl(ModuleOp module, llvm::raw_ostream &os) {
     for (auto op : module.getOps<func::FuncOp>()) {
         if (op == func)
             continue;
-        if (failed(emitHelperFunction(op, os)))
+        if (failed(emitHelperFunction(op, os, subgroupWidth)))
             return failure();
     }
 
@@ -600,6 +621,7 @@ LogicalResult emitModuleAsHlsl(ModuleOp module, llvm::raw_ostream &os) {
     os << "uint3 tid : SV_DispatchThreadID) {\n";
 
     HlslEmitter emitter(os);
+    emitter.subgroupWidth = subgroupWidth;
     emitter.indent = "  ";
     for (unsigned i = 0; i < resources.size(); ++i)
         emitter.names[resources[i]] = "buf" + std::to_string(i);

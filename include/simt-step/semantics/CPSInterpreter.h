@@ -276,6 +276,7 @@ public:
 
                 SemanticsContext ctx = context;
                 ctx.laneId = lane;
+                ctx.waveId = wave;
                 WaveContext<ValueType, StepType> *waveCtx = nullptr;
                 DynamicBlock<ValueType, StepType> *blockCtx = nullptr;
                 if (auto waveIt = state_.waves.find(wave); waveIt != state_.waves.end()) {
@@ -284,6 +285,8 @@ public:
                         waveCtx->policy = ctx.policy;
                     if (!ctx.policy && waveCtx->policy)
                         ctx.policy = waveCtx->policy;
+                    if (ctx.subgroupWidth == 0 && waveCtx->subgroupWidth != 0)
+                        ctx.subgroupWidth = waveCtx->subgroupWidth;
                     if (auto *blk = getBlock(*waveCtx, key)) {
                         blockCtx = blk;
                         ctx.activeMask = blk->activeMask;
@@ -382,6 +385,8 @@ public:
                             laneCtx.currentBlock = frame.callerKey;
                             SemanticsContext resumeCtx;
                             resumeCtx.laneId = lane;
+                            resumeCtx.waveId = wave;
+                            resumeCtx.subgroupWidth = ctx.subgroupWidth;
                             resumeCtx.policy = ctx.policy;
                             resumeCtx.overrideMode.reset();
                             return StepType::continueWith(
@@ -934,6 +939,8 @@ private:
             [this, wave, key, block, it, lane, context]() mutable -> StepType {
                 SemanticsContext resumeCtx;
                 resumeCtx.laneId = lane;
+                resumeCtx.waveId = wave;
+                resumeCtx.subgroupWidth = context.subgroupWidth;
                 resumeCtx.policy = context.policy;
                 return makeNextOp(wave, key, block, it, resumeCtx, lane);
             });
@@ -997,6 +1004,8 @@ private:
             [this, wave, key, block, it, lane, context]() mutable -> StepType {
                 SemanticsContext resumeCtx;
                 resumeCtx.laneId = lane;
+                resumeCtx.waveId = wave;
+                resumeCtx.subgroupWidth = context.subgroupWidth;
                 resumeCtx.policy = context.policy;
                 return makeNextOp(wave, key, block, it, resumeCtx, lane);
             });
@@ -1064,6 +1073,8 @@ private:
             laneCtx.activeMask = evalActive;
             laneCtx.expectedMask = evalExpected;
             laneCtx.laneId = lane;
+            laneCtx.waveId = wave;
+            laneCtx.subgroupWidth = waveCtx.subgroupWidth;
             laneCtx.policy = waveCtx.policy;
             laneCtx.overrideMode = ExecutionMode::Independent;
             laneCtx.suppressStepTrace = true;
@@ -1753,14 +1764,25 @@ private:
                 laneCtx.currentBlock = entry->parent;
             }
         }
+        shrinkExpectedForLoopLane(wave, waveCtx, blockCtx->loopOp, lane);
         handleReconvergence(wave, waveCtx, key, lane);
-        if (entry && entry->loopFrame) {
+        auto *finalEntry = findLoopEntry(waveCtx, blockCtx->loopOp);
+        if (finalEntry && finalEntry->loopFrame) {
             bool loopDone =
-                entry->expectedMask != 0
-                    ? (entry->completedMask == entry->expectedMask)
-                    : entry->pendingChildren.empty();
-            if (loopDone)
-                waveCtx.mergeStack.pop_back();
+                finalEntry->expectedMask != 0
+                    ? (finalEntry->completedMask == finalEntry->expectedMask)
+                    : finalEntry->pendingChildren.empty();
+            if (loopDone) {
+                for (auto it = waveCtx.mergeStack.rbegin();
+                     it != waveCtx.mergeStack.rend(); ++it) {
+                    if (it->loopFrame &&
+                        it->loopFrame->loopOp == blockCtx->loopOp) {
+                        auto base = it.base();
+                        waveCtx.mergeStack.erase(--base);
+                        break;
+                    }
+                }
+            }
         }
         return StepType::halt();
     }
@@ -2481,7 +2503,7 @@ private:
                          << " expected=" << fmt(blockCtx->expectedMask)
                          << "\n";
         }
-        shrinkExpectedForLane(wave, waveCtx, lane);
+        shrinkExpectedForLoopLane(wave, waveCtx, blockCtx->loopOp, lane);
         handleReconvergence(wave, waveCtx, key, lane);
         return StepType::halt();
     }
@@ -2945,6 +2967,8 @@ private:
                                             std::uint64_t expectedMask) {
         SemanticsContext ctx;
         ctx.laneId = lane;
+        ctx.waveId = waveCtx.waveId;
+        ctx.subgroupWidth = waveCtx.subgroupWidth;
         ctx.activeMask = activeMask;
         ctx.expectedMask = expectedMask;
         if (auto *blockCtx = getBlock(waveCtx, blockKey)) {
@@ -3458,6 +3482,162 @@ private:
                 ++it;
                 waveCtx.syncPoints.erase(cur);
                 continue;
+            }
+            ++it;
+        }
+    }
+
+    bool isUnderLoop(WaveContext<ValueType, StepType> &waveCtx,
+                     DynamicBlockKey key,
+                     const mlir::Operation *loopOp) {
+        while (true) {
+            auto it = waveCtx.blocks.find(key);
+            if (it == waveCtx.blocks.end())
+                return false;
+            if (it->second.loopOp == loopOp)
+                return true;
+            if (!it->second.parentKey)
+                return false;
+            key = *it->second.parentKey;
+        }
+    }
+
+    void shrinkExpectedForLoopLane(WaveId waveId,
+                                   WaveContext<ValueType, StepType> &waveCtx,
+                                   const mlir::Operation *loopOp,
+                                   LaneId lane) {
+        if (!loopOp)
+            return;
+        std::uint64_t laneBit = 1ull << lane;
+        for (auto &entry : waveCtx.mergeStack) {
+            if (entry.loopFrame && entry.loopFrame->loopOp == loopOp)
+                entry.expectedMask &= ~laneBit;
+        }
+        for (auto &entry : waveCtx.blocks) {
+            if (isUnderLoop(waveCtx, entry.first, loopOp))
+                entry.second.expectedMask &= ~laneBit;
+        }
+        for (auto it = waveCtx.collectives.begin();
+             it != waveCtx.collectives.end();) {
+            if (!isUnderLoop(waveCtx, it->second.block, loopOp)) {
+                ++it;
+                continue;
+            }
+            it->second.expectedMask &= ~laneBit;
+            it->second.arrivals.erase(lane);
+            it->second.continuations.erase(lane);
+            it->second.operands.erase(lane);
+            it->second.results.erase(lane);
+            it->second.memoryIndices.erase(lane);
+            it->second.memoryValues.erase(lane);
+
+            std::uint32_t key = it->first;
+            const mlir::Operation *waveOp = nullptr;
+            auto waveIt = waveCtx.collectiveTokenToOp.find(key);
+            if (waveIt != waveCtx.collectiveTokenToOp.end())
+                waveOp = waveIt->second;
+            bool isWaveCollective =
+                waveOp && isWaveOp(const_cast<mlir::Operation *>(waveOp));
+            bool isMemoryCollective =
+                waveOp && isMemoryOp(const_cast<mlir::Operation *>(waveOp));
+            bool isControlFlow =
+                waveCtx.controlTokenToOp.find(key) != waveCtx.controlTokenToOp.end();
+
+            if (it->second.expectedMask == 0) {
+                if (isControlFlow)
+                    waveCtx.controlTokenToOp.erase(key);
+                if (waveOp)
+                    waveCtx.collectiveTokenToOp.erase(key);
+                auto cur = it;
+                ++it;
+                waveCtx.collectives.erase(cur);
+                continue;
+            }
+
+            bool ready =
+                it->second.arrivals.size() ==
+                static_cast<unsigned>(std::popcount(it->second.expectedMask));
+            if (ready) {
+                auto *blockCtx = getBlock(waveCtx, it->second.block);
+                bool scheduleNow = true;
+                bool emitCollective = false;
+                bool memoryHasResults = false;
+                if (isControlFlow) {
+                    auto controlIt = waveCtx.controlTokenToOp.find(key);
+                    if (controlIt != waveCtx.controlTokenToOp.end()) {
+                        mlir::Operation *controlOp =
+                            const_cast<mlir::Operation *>(controlIt->second);
+                        if (traceSink_ && blockCtx) {
+                            std::string opName =
+                                controlOp->getName().getStringRef().str();
+                            traceSink_->onCollectiveComplete(
+                                waveId, opName, it->second.expectedMask,
+                                it->second.expectedMask, it->second.block.sequenceId,
+                                it->second.block.block, blockKindLabel(blockCtx->kind),
+                                blockCtx->loopIteration);
+                        }
+                        std::uint64_t expectedMask = it->second.expectedMask;
+                        DynamicBlockKey controlBlock = it->second.block;
+                        waveCtx.controlTokenToOp.erase(controlIt);
+                        waveCtx.collectives.erase(it++);
+                        handleControlFlowCollective(waveId, controlBlock, controlOp,
+                                                    expectedMask);
+                        continue;
+                    }
+                } else if (isWaveCollective) {
+                    if (it->second.results.empty()) {
+                        computeWaveCollectiveResults(waveOp, it->second);
+                        emitCollective = true;
+                    } else {
+                        scheduleNow = false;
+                    }
+                } else if (isMemoryCollective) {
+                    if (it->second.results.empty()) {
+                        memoryHasResults =
+                            computeMemoryCollectiveResults(waveOp, it->second);
+                        emitCollective = true;
+                    } else {
+                        memoryHasResults = true;
+                        scheduleNow = false;
+                    }
+                }
+                if (emitCollective && traceSink_ && blockCtx) {
+                    std::string opName;
+                    if (waveOp)
+                        opName = const_cast<mlir::Operation *>(waveOp)
+                                     ->getName()
+                                     .getStringRef()
+                                     .str();
+                    traceSink_->onCollectiveComplete(
+                        waveId, opName, it->second.expectedMask,
+                        it->second.expectedMask, it->second.block.sequenceId,
+                        it->second.block.block, blockKindLabel(blockCtx->kind),
+                        blockCtx->loopIteration);
+                }
+                if (blockCtx && scheduleNow) {
+                    std::uint64_t mask = it->second.expectedMask;
+                    while (mask) {
+                        unsigned l = std::countr_zero(mask);
+                        mask &= mask - 1;
+                        auto contIt = it->second.continuations.find(l);
+                        if (contIt != it->second.continuations.end()) {
+                            blockCtx->activeMask |= (1ull << l);
+                            state_.readyQueue.push(
+                                ReadyContinuation<ValueType, StepType>{
+                                    waveId, it->second.block, l, contIt->second});
+                        }
+                    }
+                }
+                bool keepCollective =
+                    isWaveCollective || (isMemoryCollective && memoryHasResults);
+                if (!keepCollective) {
+                    if (isMemoryCollective)
+                        waveCtx.collectiveTokenToOp.erase(key);
+                    auto cur = it;
+                    ++it;
+                    waveCtx.collectives.erase(cur);
+                    continue;
+                }
             }
             ++it;
         }

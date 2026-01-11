@@ -26,6 +26,7 @@ struct ExecutionPolicy {
 
 struct SemanticsContext {
     std::uint32_t subgroupWidth = 0;
+    std::uint32_t waveId = 0;
     std::uint64_t activeMask = 0;
     std::uint64_t expectedMask = 0;
     std::uint32_t laneId = 0;

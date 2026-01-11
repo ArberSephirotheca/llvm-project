@@ -42,6 +42,16 @@ static Value makeBool(OpBuilder &b, Location loc, bool v) {
     return b.create<arith::ConstantIntOp>(loc, v ? 1 : 0, 1);
 }
 
+static Value makeLaneIdI32(OpBuilder &b, Location loc) {
+    Value lane = b.create<simt::dialect::LaneIdOp>(loc, b.getIndexType());
+    return b.create<arith::IndexCastOp>(loc, b.getI32Type(), lane);
+}
+
+static Value makeSubgroupIdI32(OpBuilder &b, Location loc) {
+    Value subgroup = b.create<simt::dialect::SubgroupIdOp>(loc, b.getIndexType());
+    return b.create<arith::IndexCastOp>(loc, b.getI32Type(), subgroup);
+}
+
 static func::FuncOp buildScalarHelper(OpBuilder &b, Location loc,
                                       llvm::StringRef name, RNG *rng) {
     auto i32 = b.getI32Type();
@@ -112,7 +122,7 @@ static void emitWaveCount(OpBuilder &b, Location loc, BuildState &st,
 }
 
 static Value buildValue(OpBuilder &b, Location loc, BuildState &st) {
-    int choice = st.rng.pick(0, 2); // 0 const, 1 tid, 2 tid + const
+    int choice = st.rng.pick(0, 4); // 0 const, 1 tid, 2 tid + const, 3 lane, 4 subgroup
     if (choice == 0)
         return makeI32(b, loc, st.rng.pick(0, 4));
     if (choice == 1)
@@ -121,6 +131,10 @@ static Value buildValue(OpBuilder &b, Location loc, BuildState &st) {
         Value c = makeI32(b, loc, st.rng.pick(0, 4));
         return b.create<arith::AddIOp>(loc, st.tid, c);
     }
+    if (choice == 3)
+        return makeLaneIdI32(b, loc);
+    if (choice == 4)
+        return makeSubgroupIdI32(b, loc);
     // Fallback
     return st.tid;
 }
@@ -323,6 +337,8 @@ createDeterministicIfLoopModule(mlir::MLIRContext &context,
     func->setAttr("simt.num_threads",
                   builder.getI64ArrayAttr(
                       {cfg.numThreads[0], cfg.numThreads[1], cfg.numThreads[2]}));
+    func->setAttr("simt.subgroup_width",
+                  builder.getI64IntegerAttr(cfg.subgroupWidth));
 
     auto *entry = func.addEntryBlock();
     builder.setInsertionPointToStart(entry);
@@ -460,6 +476,8 @@ createRandomizedModule(mlir::MLIRContext &context,
     func->setAttr("simt.num_threads",
                   builder.getI64ArrayAttr(
                       {cfg.numThreads[0], cfg.numThreads[1], cfg.numThreads[2]}));
+    func->setAttr("simt.subgroup_width",
+                  builder.getI64IntegerAttr(cfg.subgroupWidth));
 
     auto *entry = func.addEntryBlock();
     builder.setInsertionPointToStart(entry);
@@ -571,6 +589,8 @@ createRicherRandomModule(mlir::MLIRContext &context,
     func->setAttr("simt.num_threads",
                   builder.getI64ArrayAttr(
                       {cfg.numThreads[0], cfg.numThreads[1], cfg.numThreads[2]}));
+    func->setAttr("simt.subgroup_width",
+                  builder.getI64IntegerAttr(cfg.subgroupWidth));
 
     auto *entry = func.addEntryBlock();
     builder.setInsertionPointToStart(entry);

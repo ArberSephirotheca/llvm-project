@@ -177,6 +177,9 @@ int main(int argc, char **argv) {
     llvm::cl::opt<unsigned> numLanes(
         "lanes", llvm::cl::desc("Number of lanes to execute"),
         llvm::cl::init(4));
+    llvm::cl::opt<unsigned> subgroupWidth(
+        "subgroup-width", llvm::cl::desc("Subgroup width"),
+        llvm::cl::init(8));
     llvm::cl::opt<bool> dumpIR(
         "print-ir", llvm::cl::desc("Print parsed IR before running"),
         llvm::cl::init(false));
@@ -258,6 +261,7 @@ int main(int argc, char **argv) {
     unsigned width = std::min<unsigned>(64, std::max<unsigned>(1, numLanes));
     semaCtx.activeMask =
         width >= 64 ? ~0ull : ((1ull << static_cast<std::uint64_t>(width)) - 1ull);
+    semaCtx.subgroupWidth = std::max<unsigned>(1, subgroupWidth);
     semaCtx.policy = &execPolicy;
 
     simt::semantics::SimpleSemantics::clearMemory();

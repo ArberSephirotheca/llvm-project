@@ -21,6 +21,7 @@ simt-step-runner <input.mlir> [options]
 Options:
 - `--func=<name>`: entry function to run (default: `main`)
 - `--lanes=<n>`: number of lanes to execute (default: `4`)
+- `--subgroup-width=<n>`: subgroup width (default: `8`)
 - `--print-ir`: print parsed IR before running
 - `--trace-file=<path>`: write trace JSONL for the visualizer
 - `--init=bufN:idx:value`: initialize buffer entry before running (repeatable)
