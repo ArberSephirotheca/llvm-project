@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <cstdlib>
 #include <cstdint>
 #include <functional>
 #include <optional>
@@ -28,7 +29,16 @@ class Operation;
 
 namespace simt::semantics {
 
-inline bool EnableCPSDebugLogs = false;
+inline bool EnableCPSDebugLogs = []() {
+    const char *env = std::getenv("SIMT_STEP_CPS_DEBUG");
+    if (!env || !*env)
+        return false;
+    return std::string(env) != "0";
+}();
+
+inline llvm::raw_ostream &cpsDebugStream() {
+    return EnableCPSDebugLogs ? cpsDebugStream() : llvm::nulls();
+}
 
 inline std::string formatMaskBits(std::uint64_t mask, unsigned width) {
     std::string s;
@@ -63,17 +73,17 @@ inline const char *blockKindLabel(DynamicBlockKind kind) {
 template <typename ValueT, typename StepT>
 inline void logMergeStackState(const WaveContext<ValueT, StepT> &waveCtx) {
     auto fmt = [&](std::uint64_t m) { return formatMaskBits(m, 32); };
-    llvm::errs() << "[CPS] MergeStack size=" << waveCtx.mergeStack.size() << "\n";
+    cpsDebugStream() << "[CPS] MergeStack size=" << waveCtx.mergeStack.size() << "\n";
     for (std::size_t idx = 0; idx < waveCtx.mergeStack.size(); ++idx) {
         const auto &entry = waveCtx.mergeStack[idx];
-        llvm::errs() << "  [" << idx << "] parent=" << entry.parent.block
+        cpsDebugStream() << "  [" << idx << "] parent=" << entry.parent.block
                      << " seq=" << entry.parent.sequenceId
                      << " expected=0b" << fmt(entry.expectedMask)
                      << " completed=0b" << fmt(entry.completedMask)
                      << " children=" << entry.pendingChildren.size()
                      << (entry.loopFrame ? " (loop)" : "") << "\n";
         for (std::size_t ci = 0; ci < entry.pendingChildren.size(); ++ci) {
-            llvm::errs() << "      child[" << ci << "]=" << entry.pendingChildren[ci].block
+            cpsDebugStream() << "      child[" << ci << "]=" << entry.pendingChildren[ci].block
                          << " seq=" << entry.pendingChildren[ci].sequenceId
                          << " mask=0b" << fmt(entry.childMasks[ci]) << "\n";
         }
@@ -194,7 +204,7 @@ public:
                  StepType step) {
         ensureWaveBlock(wave, block, lane);
         if (EnableCPSDebugLogs) {
-            llvm::errs() << "[CPS] enqueue lane=" << lane
+            cpsDebugStream() << "[CPS] enqueue lane=" << lane
                          << " block=" << block.block
                          << " seq=" << block.sequenceId << "\n";
             dumpReadyQueue();
@@ -207,12 +217,12 @@ public:
     void dumpReadyQueue() const {
         if (!EnableCPSDebugLogs)
             return;
-        llvm::errs() << "[CPS] ReadyQueue size=" << state_.readyQueue.size() << "\n";
+        cpsDebugStream() << "[CPS] ReadyQueue size=" << state_.readyQueue.size() << "\n";
         std::queue<ReadyContinuation<ValueType, StepType>> tmp = state_.readyQueue;
         std::size_t idx = 0;
         while (!tmp.empty()) {
             const auto &item = tmp.front();
-            llvm::errs() << "  [" << idx++ << "] wave=" << item.wave
+            cpsDebugStream() << "  [" << idx++ << "] wave=" << item.wave
                          << " block=" << item.block.block
                          << " seq=" << item.block.sequenceId
                          << " lane=" << item.lane << "\n";
@@ -226,18 +236,18 @@ public:
         for (const auto &wavePair : state_.waves) {
             WaveId w = wavePair.first;
             const auto &waveCtx = wavePair.second;
-            llvm::errs() << "[CPS] Continuations for wave " << w << "\n";
+            cpsDebugStream() << "[CPS] Continuations for wave " << w << "\n";
             for (const auto &blockPair : waveCtx.blocks) {
                 const auto &key = blockPair.first;
                 const auto &blk = blockPair.second;
                 if (blk.continuations.empty())
                     continue;
-                llvm::errs() << "  block=" << key.block
+                cpsDebugStream() << "  block=" << key.block
                              << " seq=" << key.sequenceId
                              << " lanes:";
                 for (const auto &c : blk.continuations)
-                    llvm::errs() << " " << c.first;
-                llvm::errs() << "\n";
+                    cpsDebugStream() << " " << c.first;
+                cpsDebugStream() << "\n";
             }
         }
     }
@@ -413,7 +423,7 @@ public:
                 }
 
                 if (EnableCPSDebugLogs) {
-                    llvm::errs() << "[CPS] eval lane=" << lane
+                    cpsDebugStream() << "[CPS] eval lane=" << lane
                                  << " block=" << block
                                  << " seq=" << key.sequenceId
                                  << " op=" << it->getName().getStringRef() << "\n";
@@ -1160,7 +1170,7 @@ private:
 
         if (EnableCPSDebugLogs) {
             auto fmt = [&](std::uint64_t m) { return formatMaskBits(m, 32); };
-            llvm::errs() << "[CPS] handleLoopSplit lane=" << lane
+            cpsDebugStream() << "[CPS] handleLoopSplit lane=" << lane
                          << " parent=" << key.block << " seq=" << key.sequenceId
                          << " active=" << fmt(parentBlock.activeMask)
                          << " expected=" << fmt(parentBlock.expectedMask)
@@ -1243,7 +1253,7 @@ private:
             waveCtx.mergeStack.push_back(std::move(newEntry));
             entry = &waveCtx.mergeStack.back();
             if (EnableCPSDebugLogs) {
-                llvm::errs() << "[CPS] push merge (loop) parent=" << key.block
+                cpsDebugStream() << "[CPS] push merge (loop) parent=" << key.block
                              << " seq=" << key.sequenceId << "\n";
                 logMergeStackState<ValueType, StepType>(waveCtx);
             }
@@ -1400,7 +1410,7 @@ private:
             waveCtx.mergeStack.push_back(std::move(newEntry));
             entry = &waveCtx.mergeStack.back();
             if (EnableCPSDebugLogs) {
-                llvm::errs() << "[CPS] push merge (switch) parent=" << key.block
+                cpsDebugStream() << "[CPS] push merge (switch) parent=" << key.block
                              << " seq=" << key.sequenceId << "\n";
                 logMergeStackState<ValueType, StepType>(waveCtx);
             }
@@ -1586,7 +1596,7 @@ private:
 
         if (EnableCPSDebugLogs) {
             auto fmt = [&](std::uint64_t m) { return formatMaskBits(m, 32); };
-            llvm::errs() << "[CPS] handleSwitchSplit lane=" << lane
+            cpsDebugStream() << "[CPS] handleSwitchSplit lane=" << lane
                          << " parent=" << key.block << " seq=" << key.sequenceId
                          << " -> caseIdx=" << caseIdx
                          << " childSeq=" << seq
@@ -1642,7 +1652,7 @@ private:
 
         auto *entry = findLoopEntry(waveCtx, blockCtx->loopOp);
         if (!entry || !entry->loopFrame) {
-            llvm::errs() << "[CPS] handleLoopPrepareTerminator missing loop frame "
+            cpsDebugStream() << "[CPS] handleLoopPrepareTerminator missing loop frame "
                          << "lane=" << lane << " key=" << key.block
                          << " seq=" << key.sequenceId << "\n";
             logMergeStackState<ValueType, StepType>(waveCtx);
@@ -1678,7 +1688,7 @@ private:
 
         if (EnableCPSDebugLogs) {
             auto fmt = [&](std::uint64_t m) { return formatMaskBits(m, 32); };
-            llvm::errs() << "[CPS] handleLoopPrepareTerminator lane=" << lane
+            cpsDebugStream() << "[CPS] handleLoopPrepareTerminator lane=" << lane
                          << " block=" << key.block << " seq=" << key.sequenceId
                          << " cond=" << (takeBody ? "true" : "false")
                          << " takeBody=" << takeBody
@@ -1813,7 +1823,7 @@ private:
 
         if (EnableCPSDebugLogs) {
             auto fmt = [&](std::uint64_t m) { return formatMaskBits(m, 32); };
-            llvm::errs() << "[CPS] handleLoopYield lane=" << lane
+            cpsDebugStream() << "[CPS] handleLoopYield lane=" << lane
                          << " block=" << key.block << " seq=" << key.sequenceId
                          << " active=" << fmt(blockCtx->activeMask)
                          << " expected=" << fmt(blockCtx->expectedMask)
@@ -1830,7 +1840,7 @@ private:
         nextCarried.reserve(yieldOp.getNumOperands());
         auto envIt = blockCtx->valueEnvs.find(lane);
         if (envIt == blockCtx->valueEnvs.end()) {
-            llvm::errs() << "[CPS] handleLoopYield missing value env for lane=" << lane
+            cpsDebugStream() << "[CPS] handleLoopYield missing value env for lane=" << lane
                          << " seq=" << key.sequenceId << " block=" << key.block << "\n";
         }
         for (mlir::Value v : yieldOp.getOperands()) {
@@ -1839,19 +1849,19 @@ private:
                               blockCtx->expectedMask ? blockCtx->expectedMask
                                                      : blockCtx->activeMask);
             if (!valOrErr) {
-                llvm::errs() << "[CPS] handleLoopYield eval failure lane=" << lane
+                cpsDebugStream() << "[CPS] handleLoopYield eval failure lane=" << lane
                              << " seq=" << key.sequenceId << " block=" << key.block
                              << " operand=" << nextCarried.size() << "\n";
                 if (envIt != blockCtx->valueEnvs.end()) {
-                    llvm::errs() << "  env entries: " << envIt->second.size() << "\n";
+                    cpsDebugStream() << "  env entries: " << envIt->second.size() << "\n";
                     for (auto &kv : envIt->second) {
-                        llvm::errs() << "    - ";
-                        kv.first.print(llvm::errs());
-                        llvm::errs() << "\n";
+                        cpsDebugStream() << "    - ";
+                        kv.first.print(cpsDebugStream());
+                        cpsDebugStream() << "\n";
                     }
                 }
-                v.print(llvm::errs());
-                llvm::errs() << "\n";
+                v.print(cpsDebugStream());
+                cpsDebugStream() << "\n";
                 llvm::consumeError(valOrErr.takeError());
                 llvm::report_fatal_error("handleLoopYield: failed to evaluate yield operand");
             }
@@ -1864,7 +1874,7 @@ private:
 
         if (EnableCPSDebugLogs) {
             auto fmt = [&](std::uint64_t m) { return formatMaskBits(m, 32); };
-            llvm::errs() << "[CPS] handleLoopContinue lane=" << lane
+            cpsDebugStream() << "[CPS] handleLoopContinue lane=" << lane
                          << " block=" << key.block << " seq=" << key.sequenceId
                          << " active=" << fmt(blockCtx->activeMask)
                          << " expected=" << fmt(blockCtx->expectedMask)
@@ -1971,7 +1981,7 @@ private:
 
         if (EnableCPSDebugLogs) {
             auto fmt = [&](std::uint64_t m) { return formatMaskBits(m, 32); };
-            llvm::errs() << "[CPS] handleLoopContinue lane=" << lane
+            cpsDebugStream() << "[CPS] handleLoopContinue lane=" << lane
                          << " block=" << key.block << " seq=" << key.sequenceId
                          << " active=" << fmt(blockCtx->activeMask)
                          << " expected=" << fmt(blockCtx->expectedMask)
@@ -2252,7 +2262,7 @@ private:
             llvm::report_fatal_error("handleSwitchYield: no switch cases");
         if (static_cast<std::size_t>(defaultIndex) >= numCases) {
             if (EnableCPSDebugLogs) {
-                llvm::errs() << "[CPS] handleSwitchYield invalid default_index"
+                cpsDebugStream() << "[CPS] handleSwitchYield invalid default_index"
                              << " default=" << defaultIndex
                              << " numCases=" << numCases
                              << " bodyBlocks=" << bodyBlocks
@@ -2274,7 +2284,7 @@ private:
         bool fallthrough = fallthroughAttr.getValue();
         bool lastCase = (caseIdx + 1 >= numCases);
         if (EnableCPSDebugLogs) {
-            llvm::errs() << "[CPS] handleSwitchYield lane=" << lane
+            cpsDebugStream() << "[CPS] handleSwitchYield lane=" << lane
                          << " caseIdx=" << caseIdx
                          << " fallthrough=" << fallthrough
                          << " lastCase=" << lastCase << "\n";
@@ -2435,7 +2445,7 @@ private:
 
         if (EnableCPSDebugLogs) {
             auto fmt = [&](std::uint64_t m) { return formatMaskBits(m, 32); };
-            llvm::errs() << "[CPS] handleIfYield lane=" << lane
+            cpsDebugStream() << "[CPS] handleIfYield lane=" << lane
                          << " block=" << key.block << " seq=" << key.sequenceId
                          << " parent=" << blockCtx->parentKey->block
                          << " ifOp=" << blockCtx->ifOp
@@ -2497,7 +2507,7 @@ private:
         blockCtx->completedMask |= laneBit;
         if (EnableCPSDebugLogs) {
             auto fmt = [&](std::uint64_t m) { return formatMaskBits(m, 32); };
-            llvm::errs() << "[CPS] handleLoopBreak lane=" << lane
+            cpsDebugStream() << "[CPS] handleLoopBreak lane=" << lane
                          << " block=" << key.block << " seq=" << key.sequenceId
                          << " active=" << fmt(blockCtx->activeMask)
                          << " expected=" << fmt(blockCtx->expectedMask)
@@ -2555,7 +2565,7 @@ private:
         blockCtx->completedMask |= laneBit;
         if (EnableCPSDebugLogs) {
             auto fmt = [&](std::uint64_t m) { return formatMaskBits(m, 32); };
-            llvm::errs() << "[CPS] handleSwitchBreak lane=" << lane
+            cpsDebugStream() << "[CPS] handleSwitchBreak lane=" << lane
                          << " block=" << key.block << " seq=" << key.sequenceId
                          << " active=" << fmt(blockCtx->activeMask)
                          << " expected=" << fmt(blockCtx->expectedMask)
@@ -2660,7 +2670,7 @@ private:
 
         if (EnableCPSDebugLogs) {
             auto fmt = [&](std::uint64_t m) { return formatMaskBits(m, 32); };
-            llvm::errs() << "[CPS] handleIfSplit lane=" << lane
+            cpsDebugStream() << "[CPS] handleIfSplit lane=" << lane
                          << " parent=" << key.block << " seq=" << key.sequenceId
                          << " takeThen=" << takeThen << " takeElse=" << takeElse
                          << " active=0b" << fmt(parentBlock.activeMask)
@@ -2693,7 +2703,7 @@ private:
             entry = &waveCtx.mergeStack.back();
             entry->expectedMask = parentExpected;
             if (EnableCPSDebugLogs) {
-                llvm::errs() << "[CPS] push merge (if) parent=" << key.block
+                cpsDebugStream() << "[CPS] push merge (if) parent=" << key.block
                              << " seq=" << key.sequenceId << "\n";
                 logMergeStackState<ValueType, StepType>(waveCtx);
             }
@@ -2749,7 +2759,7 @@ private:
             // entry->expectedMask |= laneMask;
 
             if (EnableCPSDebugLogs) {
-                llvm::errs() << "[CPS] handleIfSplit lane=" << lane
+                cpsDebugStream() << "[CPS] handleIfSplit lane=" << lane
                              << " -> then block=" << thenKey.block
                              << " seq=" << thenKey.sequenceId
                              << " parent=" << key.block
@@ -2818,7 +2828,7 @@ private:
             // entry->expectedMask |= laneMask;
 
             if (EnableCPSDebugLogs) {
-                llvm::errs() << "[CPS] handleIfSplit lane=" << lane
+                cpsDebugStream() << "[CPS] handleIfSplit lane=" << lane
                              << " -> else block=" << elseKey.block
                              << " seq=" << elseKey.sequenceId
                              << " parent=" << key.block
@@ -3036,7 +3046,7 @@ private:
             waveCtx.currentMask = blockCtx->activeMask;
         }
         if (EnableCPSDebugLogs) {
-            llvm::errs() << "[CPS] run lane=" << item.lane
+            cpsDebugStream() << "[CPS] run lane=" << item.lane
                          << " block=" << item.block.block
                          << " seq=" << item.block.sequenceId << "\n";
         }
@@ -3046,7 +3056,7 @@ private:
 
             if (std::holds_alternative<typename StepType::Continue>(stateVariant)) {
                 if (EnableCPSDebugLogs) {
-                    llvm::errs() << "[CPS] state=Continue lane=" << item.lane
+                    cpsDebugStream() << "[CPS] state=Continue lane=" << item.lane
                                  << " block=" << item.block.block
                                  << " seq=" << item.block.sequenceId << "\n";
                 }
@@ -3065,7 +3075,7 @@ private:
                 auto prod =
                     std::get<typename StepType::Produce>(std::move(stateVariant));
                 if (EnableCPSDebugLogs) {
-                    llvm::errs() << "[CPS] state=Produce lane=" << item.lane
+                    cpsDebugStream() << "[CPS] state=Produce lane=" << item.lane
                                  << " block=" << item.block.block
                                  << " seq=" << item.block.sequenceId << "\n";
                 }
@@ -3089,7 +3099,7 @@ private:
 
             if (std::holds_alternative<typename StepType::Halt>(stateVariant)) {
                 if (EnableCPSDebugLogs) {
-                    llvm::errs() << "[CPS] state=Halt lane=" << item.lane
+                    cpsDebugStream() << "[CPS] state=Halt lane=" << item.lane
                                  << " block=" << item.block.block
                                  << " seq=" << item.block.sequenceId
                                  << " (continuation exhausted)\n";
@@ -3683,7 +3693,7 @@ private:
 
             if (EnableCPSDebugLogs) {
                 auto fmt = [&](std::uint64_t m) { return formatMaskBits(m, 32); };
-                llvm::errs() << "[CPS] handleReconvergence lane=" << lane
+                cpsDebugStream() << "[CPS] handleReconvergence lane=" << lane
                              << " child=" << childKey.block
                              << " seq=" << childKey.sequenceId
                              << " parent=" << it->parent.block
@@ -3704,7 +3714,7 @@ private:
                 auto contIt = parentBlock.continuations.find(lane);
                 if (contIt != parentBlock.continuations.end()) {
                     if (EnableCPSDebugLogs) {
-                        llvm::errs() << "[CPS] enqueue from reconverge lane=" << lane
+                        cpsDebugStream() << "[CPS] enqueue from reconverge lane=" << lane
                                      << " parent=" << parentKey.block
                                      << " seq=" << parentKey.sequenceId << "\n";
                     }
@@ -3714,7 +3724,7 @@ private:
                     dumpReadyQueue();
                     parentBlock.continuations.erase(contIt);
                 } else if (EnableCPSDebugLogs) {
-                    llvm::errs() << "[CPS] no parent continuation for lane=" << lane
+                    cpsDebugStream() << "[CPS] no parent continuation for lane=" << lane
                                  << " parent=" << parentKey.block
                                  << " seq=" << parentKey.sequenceId << "\n";
                 }
@@ -3727,21 +3737,21 @@ private:
             if (shouldPop) {
                 if (EnableCPSDebugLogs) {
                     auto fmt = [&](std::uint64_t m) { return formatMaskBits(m, 32); };
-                    llvm::errs() << "[CPS] pop merge parent=" << parentKey.block
+                    cpsDebugStream() << "[CPS] pop merge parent=" << parentKey.block
                                  << " seq=" << parentKey.sequenceId
                                  << " expected=0b" << fmt(it->expectedMask)
                                  << " completed=0b" << fmt(it->completedMask)
                                  << "\n";
-                    llvm::errs() << "[CPS] resume parent continuations parent="
+                    cpsDebugStream() << "[CPS] resume parent continuations parent="
                                  << parentKey.block << " seq=" << parentKey.sequenceId
                                  << " mask=0b" << fmt(it->expectedMask) << " lanes:";
                     std::uint64_t dbgMask = it->expectedMask;
                     while (dbgMask) {
                         unsigned l = std::countr_zero(dbgMask);
                         dbgMask &= dbgMask - 1;
-                        llvm::errs() << " " << l;
+                        cpsDebugStream() << " " << l;
                     }
-                    llvm::errs() << "\n";
+                    cpsDebugStream() << "\n";
                     // logMergeStackState<ValueType, StepType>(waveCtx);
                 }
                 // Enqueue any remaining parent continuations for lanes that have
@@ -3761,7 +3771,7 @@ private:
                 //                 ReadyContinuation<ValueType, StepType>{waveId, parentKey, l,
                 //                                                        contIt->second});
                 //             if (EnableCPSDebugLogs) {
-                //                 llvm::errs() << "[CPS] enqueue parent cont lane=" << l
+                //                 cpsDebugStream() << "[CPS] enqueue parent cont lane=" << l
                 //                              << " parent=" << parentKey.block
                 //                              << " seq=" << parentKey.sequenceId << "\n";
                 //                 dumpReadyQueue();
