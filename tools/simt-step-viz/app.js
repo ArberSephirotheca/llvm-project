@@ -64,6 +64,36 @@
   let timer = null;
   let eventPoints = [];
 
+  function getSubgroupWidth() {
+    const raw = parseInt(subgroupInput?.value || "0", 10);
+    if (!Number.isFinite(raw) || raw < 1)
+      return 1;
+    return Math.min(64, raw);
+  }
+
+  function toGlobalLane(ev, subgroupWidth) {
+    if (!Number.isFinite(ev.wave) || ev.lane < 0)
+      return -1;
+    const width = subgroupWidth || getSubgroupWidth();
+    return ev.wave * width + ev.lane;
+  }
+
+  function ensureLaneCountForEvents() {
+    if (!events.length)
+      return;
+    const subgroupWidth = getSubgroupWidth();
+    let maxLane = -1;
+    for (const ev of events) {
+      const laneIndex = toGlobalLane(ev, subgroupWidth);
+      if (laneIndex > maxLane)
+        maxLane = laneIndex;
+    }
+    if (maxLane >= 0 && maxLane + 1 > laneCount) {
+      laneCount = Math.min(64, maxLane + 1);
+      threadsInput.value = String(laneCount);
+    }
+  }
+
   function wireExclusive(primary, secondary) {
     if (!primary || !secondary)
       return;
@@ -413,6 +443,7 @@
         parsed.push(entry);
     }
     events = parsed.map((entry, index) => normalizeEvent(entry, index));
+    ensureLaneCountForEvents();
     currentIndex = -1;
     stopRun();
     updateView();
@@ -446,6 +477,7 @@
   }
 
   function buildLaneState() {
+    const subgroupWidth = getSubgroupWidth();
     const state = Array.from({ length: laneCount }, () => ({
       status: "idle",
       lastOp: "-",
@@ -457,9 +489,10 @@
 
     for (let i = 0; i <= currentIndex && i < events.length; i++) {
       const ev = events[i];
-      if (ev.lane < 0 || ev.lane >= laneCount)
+      const laneIndex = toGlobalLane(ev, subgroupWidth);
+      if (laneIndex < 0 || laneIndex >= laneCount)
         continue;
-      const laneState = state[ev.lane];
+      const laneState = state[laneIndex];
       laneState.lastEvent = ev;
       laneState.active = ev.active;
       laneState.expected = ev.expected;
@@ -483,13 +516,20 @@
       return;
     }
 
+    const subgroupWidth = getSubgroupWidth();
     const state = buildLaneState();
     for (let lane = 0; lane < laneCount; lane++) {
       const row = document.createElement("div");
       row.className = "lane-row";
 
       const laneLabel = document.createElement("div");
-      laneLabel.textContent = `lane ${lane}`;
+      if (laneCount > subgroupWidth && subgroupWidth > 0) {
+        const wave = Math.floor(lane / subgroupWidth);
+        const localLane = lane % subgroupWidth;
+        laneLabel.textContent = `lane ${lane} (wave ${wave}, lane ${localLane})`;
+      } else {
+        laneLabel.textContent = `lane ${lane}`;
+      }
 
       const status = document.createElement("div");
       const laneState = state[lane];
@@ -501,10 +541,10 @@
       status.textContent = statusText;
 
       const active = document.createElement("div");
-      active.textContent = trimMask(laneState.active, laneCount);
+      active.textContent = trimMask(laneState.active, subgroupWidth);
 
       const expected = document.createElement("div");
-      expected.textContent = trimMask(laneState.expected, laneCount);
+      expected.textContent = trimMask(laneState.expected, subgroupWidth);
 
       row.append(laneLabel, status, active, expected);
       laneTable.appendChild(row);
@@ -589,6 +629,7 @@
     const width = rect.width;
     const height = rect.height;
     const pad = 24;
+    const subgroupWidth = getSubgroupWidth();
 
     ctx.clearRect(0, 0, width, height);
     ctx.fillStyle = "rgba(9, 12, 16, 0.75)";
@@ -610,19 +651,25 @@
 
     const count = events.length;
     const xScale = count > 1 ? (width - pad * 2) / (count - 1) : 0;
-    const midY = pad + (height - pad * 2) / 2;
 
     for (const ev of events) {
       const isWaveWide = ev.event === "collective" && ev.lane < 0;
       if (isWaveWide) {
         const x = pad + ev.index * xScale;
         const active = ev.index <= currentIndex;
+        const waveStart = ev.wave * subgroupWidth;
+        const waveEnd = Math.min(laneCount - 1, waveStart + subgroupWidth - 1);
+        const y1 = pad +
+          (waveStart / Math.max(1, laneCount - 1)) * (height - pad * 2);
+        const y2 = pad +
+          (waveEnd / Math.max(1, laneCount - 1)) * (height - pad * 2);
+        const midY = (y1 + y2) / 2;
         ctx.globalAlpha = active ? 0.9 : 0.25;
         ctx.strokeStyle = palette.collective;
         ctx.lineWidth = 2;
         ctx.beginPath();
-        ctx.moveTo(x, pad);
-        ctx.lineTo(x, height - pad);
+        ctx.moveTo(x, y1);
+        ctx.lineTo(x, y2);
         ctx.stroke();
         ctx.fillStyle = palette.collective;
         drawDiamond(ctx, x, midY, 6);
@@ -630,10 +677,11 @@
         eventPoints.push({ x, y: midY, ev });
         continue;
       }
-      if (ev.lane < 0 || ev.lane >= laneCount)
+      const laneIndex = toGlobalLane(ev, subgroupWidth);
+      if (laneIndex < 0 || laneIndex >= laneCount)
         continue;
       const x = pad + ev.index * xScale;
-      const y = pad + (ev.lane / Math.max(1, laneCount - 1)) * (height - pad * 2);
+      const y = pad + (laneIndex / Math.max(1, laneCount - 1)) * (height - pad * 2);
       const isControl = ev.event === "step" && isControlFlowOp(ev.op);
       const color = isControl
         ? palette.control
@@ -689,9 +737,9 @@
     if (typeof ev.hasValue === "boolean")
       parts.push(`hasValue=${ev.hasValue}`);
     if (ev.active)
-      parts.push(`active=${trimMask(ev.active, laneCount)}`);
+      parts.push(`active=${trimMask(ev.active, getSubgroupWidth())}`);
     if (ev.expected)
-      parts.push(`expected=${trimMask(ev.expected, laneCount)}`);
+      parts.push(`expected=${trimMask(ev.expected, getSubgroupWidth())}`);
     tooltip.textContent = parts.join("\n");
     tooltip.style.left = `${point.x}px`;
     tooltip.style.top = `${point.y}px`;
@@ -748,6 +796,9 @@
 
   threadsInput.addEventListener("change", () => {
     laneCount = Math.max(1, Math.min(64, parseInt(threadsInput.value, 10) || 1));
+    updateView();
+  });
+  subgroupInput?.addEventListener("change", () => {
     updateView();
   });
 
