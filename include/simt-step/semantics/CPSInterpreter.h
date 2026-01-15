@@ -1686,23 +1686,6 @@ private:
         blockCtx->activeMask &= ~laneBit;
         blockCtx->completedMask |= laneBit;
 
-        if (EnableCPSDebugLogs) {
-            auto fmt = [&](std::uint64_t m) { return formatMaskBits(m, 32); };
-            cpsDebugStream() << "[CPS] handleLoopPrepareTerminator lane=" << lane
-                         << " block=" << key.block << " seq=" << key.sequenceId
-                         << " cond=" << (takeBody ? "true" : "false")
-                         << " takeBody=" << takeBody
-                         << " active=" << fmt(blockCtx->activeMask)
-                         << " expected=" << fmt(blockCtx->expectedMask)
-                         << "\n";
-        }
-
-        LLVM_DEBUG(llvm::dbgs() << "[CPS] handleLoopPrepareTerminator lane=" << lane
-                                << " block=" << key.block << " seq=" << key.sequenceId
-                                << " takeBody=" << takeBody
-                                << " active=0x" << llvm::format_hex(blockCtx->activeMask, 10)
-                                << " expected=0x" << llvm::format_hex(blockCtx->expectedMask, 10)
-                                << "\n");
 
         if (takeBody) {
             DynamicBlockKey bodyKey{loopFrame.bodyKey.block,

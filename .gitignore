@@ -9,3 +9,5 @@
 Agent.md
 /*.log
 *.jsonl
+/ref
+/skills
