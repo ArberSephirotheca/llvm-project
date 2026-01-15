@@ -588,7 +588,7 @@ public:
 
                         std::function<StepType(StepType)> handleResumed;
                         handleResumed = [this, wave, key, block, nextIt, ctx, lane,
-                                         isTerminator, hasNext, waveCtx, blockCtx,
+                                         isTerminator, hasNext,
                                          blockSeq, blockPtr, blockKind, blockIter,
                                          op = &*it, &handleResumed](StepType current)
                                          mutable -> StepType {
@@ -623,11 +623,21 @@ public:
                                 if (auto *prod =
                                         std::get_if<typename StepType::Produce>(
                                             &resumedState)) {
-                                    if (blockCtx && op->getNumResults() == 1) {
-                                        blockCtx->valueEnvs[lane][op->getResult(0)] =
-                                            prod->value;
-                                        waveCtx->lanes[lane].values[op->getResult(0)] =
-                                            prod->value;
+                                    auto waveIt = state_.waves.find(wave);
+                                    if (waveIt == state_.waves.end())
+                                        llvm::report_fatal_error(
+                                            "resume: missing wave context");
+                                    auto &resumeWaveCtx = waveIt->second;
+                                    if (auto *resumeBlockCtx =
+                                            getBlock(resumeWaveCtx, key)) {
+                                        if (op->getNumResults() == 1) {
+                                            resumeBlockCtx
+                                                ->valueEnvs[lane][op->getResult(0)] =
+                                                    prod->value;
+                                            resumeWaveCtx
+                                                .lanes[lane]
+                                                .values[op->getResult(0)] = prod->value;
+                                        }
                                     }
                                     if (!isTerminator && hasNext) {
                                         return StepType::continueWith(
@@ -637,8 +647,8 @@ public:
                                                                   ctx, lane);
                                             });
                                     }
-                                    if (isTerminator && waveCtx)
-                                        handleReconvergence(wave, *waveCtx, key, lane);
+                                    if (isTerminator)
+                                        handleReconvergence(wave, resumeWaveCtx, key, lane);
                                     return StepType::produce(std::move(prod->value));
                                 }
                                 if (std::holds_alternative<typename StepType::Halt>(
@@ -651,8 +661,14 @@ public:
                                                                   ctx, lane);
                                             });
                                     }
-                                    if (isTerminator && waveCtx)
-                                        handleReconvergence(wave, *waveCtx, key, lane);
+                                    if (isTerminator) {
+                                        auto waveIt = state_.waves.find(wave);
+                                        if (waveIt == state_.waves.end())
+                                            llvm::report_fatal_error(
+                                                "resume: missing wave context");
+                                        handleReconvergence(
+                                            wave, waveIt->second, key, lane);
+                                    }
                                     return StepType::halt();
                                 }
                                 if (!isTerminator && hasNext) {
