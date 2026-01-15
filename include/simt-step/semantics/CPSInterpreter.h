@@ -1537,19 +1537,6 @@ private:
             pathCtx.expectedMask |= laneBit;
         }
 
-        auto isDynamicDescendant = [&](const DynamicBlockKey &desc,
-                                       const DynamicBlockKey &ancestor) {
-            DynamicBlockKey cur = desc;
-            while (true) {
-                if (cur == ancestor)
-                    return true;
-                auto it = waveCtx.blocks.find(cur);
-                if (it == waveCtx.blocks.end() || !it->second.parentKey)
-                    return false;
-                cur = *it->second.parentKey;
-            }
-        };
-
         for (unsigned otherIdx = 0; otherIdx < numBlocks; ++otherIdx) {
             if (otherIdx >= caseIdx && otherIdx <= lastIdx)
                 continue;
@@ -1571,9 +1558,10 @@ private:
             for (auto &kv : waveCtx.blocks) {
                 const auto &descKey = kv.first;
                 auto &desc = kv.second;
-                if (isDynamicDescendant(descKey, otherKey))
+                if (isDynamicDescendant(waveCtx, descKey, otherKey))
                     desc.expectedMask &= ~laneMask;
             }
+            shrinkExpectedForSubtree(wave, waveCtx, otherKey, lane);
         }
 
         auto &env = childCtx.valueEnvs[lane];
@@ -2638,19 +2626,6 @@ private:
         if (!takeThen && !ifOp.getElseRegion().empty())
             takeElse = true;
 
-        auto isDynamicDescendant = [&](const DynamicBlockKey &desc,
-                                       const DynamicBlockKey &ancestor) {
-            DynamicBlockKey cur = desc;
-            while (true) {
-                if (cur == ancestor)
-                    return true;
-                auto it = waveCtx.blocks.find(cur);
-                if (it == waveCtx.blocks.end() || !it->second.parentKey)
-                    return false;
-                cur = *it->second.parentKey;
-            }
-        };
-
         if (EnableCPSDebugLogs) {
             auto fmt = [&](std::uint64_t m) { return formatMaskBits(m, 32); };
             cpsDebugStream() << "[CPS] handleIfSplit lane=" << lane
@@ -2723,17 +2698,18 @@ private:
         elseCtx.loopOp = parentBlock.loopOp;
         elseCtx.switchOp = parentBlock.switchOp;
         elseCtx.kind = DynamicBlockKind::IfElse;
-        if (elseCtx.expectedMask == 0)
-            elseCtx.expectedMask = parentExpected ? parentExpected : laneMask;
+            if (elseCtx.expectedMask == 0)
+                elseCtx.expectedMask = parentExpected ? parentExpected : laneMask;
         elseCtx.expectedMask &= ~laneMask;
             // Propagate the exclusion into any existing descendant dynamic blocks of the
             // else branch, including other sequenceIds (e.g., loop iterations).
             for (auto &kv : waveCtx.blocks) {
                 const auto &descKey = kv.first;
                 auto &desc = kv.second;
-                if (isDynamicDescendant(descKey, elseKey))
+                if (isDynamicDescendant(waveCtx, descKey, elseKey))
                     desc.expectedMask &= ~laneMask;
             }
+            shrinkExpectedForSubtree(wave, waveCtx, elseKey, lane);
 
             if (!llvm::is_contained(entry->pendingChildren, thenKey)) {
                 entry->pendingChildren.push_back(thenKey);
@@ -2800,9 +2776,10 @@ private:
             for (auto &kv : waveCtx.blocks) {
                 const auto &descKey = kv.first;
                 auto &desc = kv.second;
-                if (isDynamicDescendant(descKey, thenKey))
+                if (isDynamicDescendant(waveCtx, descKey, thenKey))
                     desc.expectedMask &= ~laneMask;
             }
+            shrinkExpectedForSubtree(wave, waveCtx, thenKey, lane);
 
             if (!llvm::is_contained(entry->pendingChildren, elseKey)) {
                 entry->pendingChildren.push_back(elseKey);
@@ -3352,6 +3329,20 @@ private:
         return it == waveCtx.blocks.end() ? nullptr : &it->second;
     }
 
+    static bool isDynamicDescendant(WaveContext<ValueType, StepType> &waveCtx,
+                                    const DynamicBlockKey &desc,
+                                    const DynamicBlockKey &ancestor) {
+        DynamicBlockKey cur = desc;
+        while (true) {
+            if (cur == ancestor)
+                return true;
+            auto it = waveCtx.blocks.find(cur);
+            if (it == waveCtx.blocks.end() || !it->second.parentKey)
+                return false;
+            cur = *it->second.parentKey;
+        }
+    }
+
     void shrinkExpectedForLane(WaveId waveId,
                                WaveContext<ValueType, StepType> &waveCtx,
                                LaneId lane) {
@@ -3455,6 +3446,184 @@ private:
                          it->second.arrivals.size() ==
                              static_cast<unsigned>(
                                  std::popcount(it->second.expectedMask));
+            if (ready) {
+                auto *blockCtx = getBlock(waveCtx, it->second.block);
+                if (blockCtx) {
+                    std::uint64_t mask = it->second.expectedMask;
+                    while (mask) {
+                        unsigned l = std::countr_zero(mask);
+                        mask &= mask - 1;
+                        auto contIt = it->second.continuations.find(l);
+                        if (contIt != it->second.continuations.end()) {
+                            blockCtx->activeMask |= (1ull << l);
+                            state_.readyQueue.push(
+                                ReadyContinuation<ValueType, StepType>{
+                                    waveId, it->second.block, l, contIt->second});
+                        }
+                    }
+                }
+                auto cur = it;
+                ++it;
+                waveCtx.syncPoints.erase(cur);
+                continue;
+            }
+            ++it;
+        }
+    }
+
+    void shrinkExpectedForSubtree(WaveId waveId,
+                                  WaveContext<ValueType, StepType> &waveCtx,
+                                  const DynamicBlockKey &root,
+                                  LaneId lane) {
+        std::uint64_t laneBit = 1ull << lane;
+        auto inSubtree = [&](const DynamicBlockKey &key) {
+            return isDynamicDescendant(waveCtx, key, root);
+        };
+
+        for (auto &entry : waveCtx.blocks) {
+            if (inSubtree(entry.first))
+                entry.second.expectedMask &= ~laneBit;
+        }
+
+        for (auto it = waveCtx.collectives.begin();
+             it != waveCtx.collectives.end();) {
+            if (!inSubtree(it->second.block)) {
+                ++it;
+                continue;
+            }
+            it->second.expectedMask &= ~laneBit;
+            it->second.arrivals.erase(lane);
+            it->second.continuations.erase(lane);
+            it->second.operands.erase(lane);
+            it->second.results.erase(lane);
+            it->second.memoryIndices.erase(lane);
+            it->second.memoryValues.erase(lane);
+
+            std::uint32_t key = it->first;
+            const mlir::Operation *waveOp = nullptr;
+            auto waveIt = waveCtx.collectiveTokenToOp.find(key);
+            if (waveIt != waveCtx.collectiveTokenToOp.end())
+                waveOp = waveIt->second;
+            bool isWaveCollective =
+                waveOp && isWaveOp(const_cast<mlir::Operation *>(waveOp));
+            bool isMemoryCollective =
+                waveOp && isMemoryOp(const_cast<mlir::Operation *>(waveOp));
+            bool isControlFlow =
+                waveCtx.controlTokenToOp.find(key) != waveCtx.controlTokenToOp.end();
+
+            if (it->second.expectedMask == 0) {
+                if (isControlFlow)
+                    waveCtx.controlTokenToOp.erase(key);
+                if (waveOp)
+                    waveCtx.collectiveTokenToOp.erase(key);
+                auto cur = it;
+                ++it;
+                waveCtx.collectives.erase(cur);
+                continue;
+            }
+
+            bool ready =
+                it->second.arrivals.size() ==
+                static_cast<unsigned>(std::popcount(it->second.expectedMask));
+            if (ready) {
+                auto *blockCtx = getBlock(waveCtx, it->second.block);
+                bool scheduleNow = true;
+                bool emitCollective = false;
+                bool memoryHasResults = false;
+                if (isControlFlow) {
+                    auto controlIt = waveCtx.controlTokenToOp.find(key);
+                    if (controlIt != waveCtx.controlTokenToOp.end()) {
+                        mlir::Operation *controlOp =
+                            const_cast<mlir::Operation *>(controlIt->second);
+                        if (traceSink_ && blockCtx) {
+                            std::string opName =
+                                controlOp->getName().getStringRef().str();
+                            traceSink_->onCollectiveComplete(
+                                waveId, opName, it->second.expectedMask,
+                                it->second.expectedMask, it->second.block.sequenceId,
+                                it->second.block.block, blockKindLabel(blockCtx->kind),
+                                blockCtx->loopIteration);
+                        }
+                        std::uint64_t expectedMask = it->second.expectedMask;
+                        DynamicBlockKey controlBlock = it->second.block;
+                        waveCtx.controlTokenToOp.erase(controlIt);
+                        waveCtx.collectives.erase(it++);
+                        handleControlFlowCollective(waveId, controlBlock, controlOp,
+                                                    expectedMask);
+                        continue;
+                    }
+                } else if (isWaveCollective) {
+                    if (it->second.results.empty()) {
+                        computeWaveCollectiveResults(waveOp, it->second);
+                        emitCollective = true;
+                    } else {
+                        scheduleNow = false;
+                    }
+                } else if (isMemoryCollective) {
+                    if (it->second.results.empty()) {
+                        memoryHasResults =
+                            computeMemoryCollectiveResults(waveOp, it->second);
+                        emitCollective = true;
+                    } else {
+                        memoryHasResults = true;
+                        scheduleNow = false;
+                    }
+                }
+                if (emitCollective && traceSink_ && blockCtx) {
+                    std::string opName;
+                    if (waveOp)
+                        opName = const_cast<mlir::Operation *>(waveOp)
+                                     ->getName()
+                                     .getStringRef()
+                                     .str();
+                    traceSink_->onCollectiveComplete(
+                        waveId, opName, it->second.expectedMask,
+                        it->second.expectedMask, it->second.block.sequenceId,
+                        it->second.block.block, blockKindLabel(blockCtx->kind),
+                        blockCtx->loopIteration);
+                }
+                if (blockCtx && scheduleNow) {
+                    std::uint64_t mask = it->second.expectedMask;
+                    while (mask) {
+                        unsigned l = std::countr_zero(mask);
+                        mask &= mask - 1;
+                        auto contIt = it->second.continuations.find(l);
+                        if (contIt != it->second.continuations.end()) {
+                            blockCtx->activeMask |= (1ull << l);
+                            state_.readyQueue.push(
+                                ReadyContinuation<ValueType, StepType>{
+                                    waveId, it->second.block, l, contIt->second});
+                        }
+                    }
+                }
+                bool keepCollective =
+                    isWaveCollective || (isMemoryCollective && memoryHasResults);
+                if (!keepCollective) {
+                    if (isMemoryCollective)
+                        waveCtx.collectiveTokenToOp.erase(key);
+                    auto cur = it;
+                    ++it;
+                    waveCtx.collectives.erase(cur);
+                    continue;
+                }
+            }
+            ++it;
+        }
+
+        for (auto it = waveCtx.syncPoints.begin();
+             it != waveCtx.syncPoints.end();) {
+            if (!inSubtree(it->second.block)) {
+                ++it;
+                continue;
+            }
+            it->second.expectedMask &= ~laneBit;
+            it->second.arrivals.erase(lane);
+            it->second.continuations.erase(lane);
+            bool ready =
+                it->second.expectedMask &&
+                it->second.arrivals.size() ==
+                    static_cast<unsigned>(
+                        std::popcount(it->second.expectedMask));
             if (ready) {
                 auto *blockCtx = getBlock(waveCtx, it->second.block);
                 if (blockCtx) {

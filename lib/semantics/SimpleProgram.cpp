@@ -135,6 +135,23 @@ llvm::Error SimpleProgramRunner::runBlock(mlir::Block *block,
     if (llvm::Error err = interpreter_.run())
         return err;
 
+    // Guard against unfinished lanes or pending synchronization.
+    for (const auto &waveIt : state.waves) {
+        const auto &waveCtx = waveIt.second;
+        if (!waveCtx.collectives.empty() || !waveCtx.syncPoints.empty()) {
+            return llvm::make_error<llvm::StringError>(
+                "runBlock: wave left pending collectives or sync points",
+                llvm::inconvertibleErrorCode());
+        }
+        for (const auto &laneIt : waveCtx.lanes) {
+            if (!laneIt.second.hasReturned) {
+                return llvm::make_error<llvm::StringError>(
+                    "runBlock: lane did not return",
+                    llvm::inconvertibleErrorCode());
+            }
+        }
+    }
+
     return llvm::Error::success();
 }
 
