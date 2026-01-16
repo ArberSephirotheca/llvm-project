@@ -19,6 +19,7 @@
 #include <string>
 
 #include <mlir/Dialect/Func/IR/FuncOps.h>
+#include <llvm/ADT/Hashing.h>
 #include <llvm/Support/Error.h>
 #include <llvm/Support/ErrorHandling.h>
 #include <llvm/Support/raw_ostream.h>
@@ -485,11 +486,10 @@ public:
                                 if (!collective)
                                     llvm::report_fatal_error(
                                         "collective memory op: missing collective effect");
-                                std::uint32_t token =
-                                    collective->token.value_or(
-                                        collective->operation);
-                                waveCtx->collectiveTokenToOp[token] = &*it;
-                                auto &syncPoint = waveCtx->collectives[token];
+                                CollectiveKey collectKey =
+                                    makeCollectiveKey(*collective, key);
+                                waveCtx->collectiveTokenToOp[collectKey] = &*it;
+                                auto &syncPoint = waveCtx->collectives[collectKey];
                                 auto idxOrErr =
                                     evaluateValue(*waveCtx, key, it->getOperand(1),
                                                   lane, ctx.activeMask,
@@ -518,14 +518,14 @@ public:
                                         return StepType::halt();
                                     };
                                 } else {
-                                    resume = [this, wave, token, lane]()
+                                    resume = [this, wave, collectKey, lane]()
                                                  mutable -> StepType {
                                         auto waveIt = state_.waves.find(wave);
                                         if (waveIt == state_.waves.end())
                                             llvm::report_fatal_error(
                                                 "collective memory resume: missing wave context");
                                         auto &waveCtx = waveIt->second;
-                                        auto syncIt = waveCtx.collectives.find(token);
+                                        auto syncIt = waveCtx.collectives.find(collectKey);
                                         if (syncIt == waveCtx.collectives.end())
                                             llvm::report_fatal_error(
                                                 "collective memory resume: missing sync point");
@@ -539,7 +539,7 @@ public:
                                         syncPoint.continuations.erase(lane);
                                         if (syncPoint.results.empty()) {
                                             waveCtx.collectives.erase(syncIt);
-                                            waveCtx.collectiveTokenToOp.erase(token);
+                                            waveCtx.collectiveTokenToOp.erase(collectKey);
                                         }
                                         return StepType::produce(std::move(result));
                                     };
@@ -568,18 +568,18 @@ public:
                                 llvm::report_fatal_error(
                                     "collective wave op: failed to evaluate operand");
                             }
-                            std::uint32_t token =
-                                collective->token.value_or(collective->operation);
-                            waveCtx->collectiveTokenToOp[token] = &*it;
-                            auto &syncPoint = waveCtx->collectives[token];
+                            CollectiveKey collectKey =
+                                makeCollectiveKey(*collective, key);
+                            waveCtx->collectiveTokenToOp[collectKey] = &*it;
+                            auto &syncPoint = waveCtx->collectives[collectKey];
                             syncPoint.operands[lane] = std::move(*predOrErr);
-                            resume = [this, wave, token, lane]() mutable -> StepType {
+                            resume = [this, wave, collectKey, lane]() mutable -> StepType {
                                 auto waveIt = state_.waves.find(wave);
                                 if (waveIt == state_.waves.end())
                                     llvm::report_fatal_error(
                                         "collective wave resume: missing wave context");
                                 auto &waveCtx = waveIt->second;
-                                auto syncIt = waveCtx.collectives.find(token);
+                                auto syncIt = waveCtx.collectives.find(collectKey);
                                 if (syncIt == waveCtx.collectives.end())
                                     llvm::report_fatal_error(
                                         "collective wave resume: missing sync point");
@@ -593,7 +593,7 @@ public:
                                 syncPoint.continuations.erase(lane);
                                 if (syncPoint.results.empty()) {
                                     waveCtx.collectives.erase(syncIt);
-                                    waveCtx.collectiveTokenToOp.erase(token);
+                                    waveCtx.collectiveTokenToOp.erase(collectKey);
                                 }
                                 return StepType::produce(std::move(result));
                             };
@@ -761,6 +761,17 @@ private:
     static bool isControlFlowOp(mlir::Operation *op) {
         return llvm::isa<simt::dialect::IfOp, simt::dialect::LoopOp,
                          simt::dialect::SwitchOp>(op);
+    }
+
+    static CollectiveKey makeCollectiveKey(const CollectiveEffect &effect,
+                                           const DynamicBlockKey &block) {
+        std::uint64_t token =
+            effect.token ? *effect.token : effect.operation;
+        std::uintptr_t blockPtr =
+            reinterpret_cast<std::uintptr_t>(block.block);
+        return static_cast<CollectiveKey>(
+            static_cast<std::size_t>(
+                llvm::hash_combine(token, block.sequenceId, blockPtr)));
     }
 
     static bool isMemoryOp(mlir::Operation *op) {
@@ -966,12 +977,12 @@ private:
         } else {
             token = tokenIt->second;
         }
-        waveCtx.controlTokenToOp[token] = op;
-
         CollectiveEffect effect;
         effect.operation = 0;
         effect.activeMask = expected;
         effect.token = token;
+        CollectiveKey collectKey = makeCollectiveKey(effect, key);
+        waveCtx.controlTokenToOp[collectKey] = op;
 
         if (traceSink_) {
             traceSink_->onSuspend(
@@ -3167,19 +3178,20 @@ private:
                     "collective effect missing dynamic block context",
                     llvm::inconvertibleErrorCode());
             }
-            std::uint32_t key =
-                collective->token.value_or(collective->operation);
+            CollectiveKey collectKey =
+                makeCollectiveKey(*collective, block);
             bool isControlFlow =
-                waveCtx.controlTokenToOp.find(key) != waveCtx.controlTokenToOp.end();
+                waveCtx.controlTokenToOp.find(collectKey) !=
+                waveCtx.controlTokenToOp.end();
             const mlir::Operation *waveOp = nullptr;
-            auto waveIt = waveCtx.collectiveTokenToOp.find(key);
+            auto waveIt = waveCtx.collectiveTokenToOp.find(collectKey);
             if (waveIt != waveCtx.collectiveTokenToOp.end())
                 waveOp = waveIt->second;
             bool isWaveCollective =
                 waveOp && isWaveOp(const_cast<mlir::Operation *>(waveOp));
             bool isMemoryCollective =
                 waveOp && isMemoryOp(const_cast<mlir::Operation *>(waveOp));
-            auto &syncPoint = waveCtx.collectives[key];
+            auto &syncPoint = waveCtx.collectives[collectKey];
             syncPoint.effect = *collective;
             syncPoint.block = block;
             if (syncPoint.expectedMask == 0) {
@@ -3202,7 +3214,7 @@ private:
                 static_cast<unsigned>(std::popcount(syncPoint.expectedMask));
             if (syncPoint.arrivals.size() == expectedCount) {
                 if (isControlFlow) {
-                    auto controlIt = waveCtx.controlTokenToOp.find(key);
+                    auto controlIt = waveCtx.controlTokenToOp.find(collectKey);
                     if (controlIt != waveCtx.controlTokenToOp.end()) {
                         mlir::Operation *controlOp =
                             const_cast<mlir::Operation *>(controlIt->second);
@@ -3218,7 +3230,7 @@ private:
                                 blockCtx->loopIteration);
                         }
                         waveCtx.controlTokenToOp.erase(controlIt);
-                        waveCtx.collectives.erase(key);
+                        waveCtx.collectives.erase(collectKey);
                         handleControlFlowCollective(wave, controlBlock, controlOp,
                                                     expectedMask);
                         return llvm::Error::success();
@@ -3274,9 +3286,9 @@ private:
                     }
                 }
                 if (!isWaveCollective && !memoryProducesResults)
-                    waveCtx.collectives.erase(key);
+                    waveCtx.collectives.erase(collectKey);
                 if (isMemoryCollective && !memoryProducesResults)
-                    waveCtx.collectiveTokenToOp.erase(key);
+                    waveCtx.collectiveTokenToOp.erase(collectKey);
             }
             return llvm::Error::success();
         }
@@ -3535,7 +3547,7 @@ private:
             it->second.memoryIndices.erase(lane);
             it->second.memoryValues.erase(lane);
 
-            std::uint32_t key = it->first;
+            CollectiveKey key = it->first;
             const mlir::Operation *waveOp = nullptr;
             auto waveIt = waveCtx.collectiveTokenToOp.find(key);
             if (waveIt != waveCtx.collectiveTokenToOp.end())
@@ -3729,7 +3741,7 @@ private:
             it->second.memoryIndices.erase(lane);
             it->second.memoryValues.erase(lane);
 
-            std::uint32_t key = it->first;
+            CollectiveKey key = it->first;
             const mlir::Operation *waveOp = nullptr;
             auto waveIt = waveCtx.collectiveTokenToOp.find(key);
             if (waveIt != waveCtx.collectiveTokenToOp.end())
