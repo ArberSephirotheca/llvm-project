@@ -186,23 +186,53 @@ mlir::LogicalResult runOperationToBuffer(
     std::vector<int64_t> &buffer,
     const RunOperationOptions &options,
     llvm::ArrayRef<BufferInitEntry> initEntries) {
+    std::vector<BufferResult> buffers;
+    if (mlir::failed(runOperationToBuffers(op, {bufferArgIndex}, buffers,
+                                           options, initEntries)))
+        return mlir::failure();
+    buffer.clear();
+    if (!buffers.empty())
+        buffer = std::move(buffers.front().values);
+    return mlir::success();
+}
+
+mlir::LogicalResult runOperationToBuffers(
+    mlir::Operation &op,
+    llvm::ArrayRef<unsigned> bufferArgIndices,
+    std::vector<BufferResult> &buffers,
+    const RunOperationOptions &options,
+    llvm::ArrayRef<BufferInitEntry> initEntries) {
     mlir::func::FuncOp func = resolveEntryFunction(op, options.entry);
     if (!func) {
-        llvm::errs() << "runOperationToBuffer: missing entry @"
+        llvm::errs() << "runOperationToBuffers: missing entry @"
                      << options.entry << "\n";
         return mlir::failure();
     }
-    if (bufferArgIndex >= func.getNumArguments()) {
-        llvm::errs() << "runOperationToBuffer: buffer arg out of range\n";
-        return mlir::failure();
+
+    llvm::SmallVector<unsigned, 8> selected;
+    if (bufferArgIndices.empty()) {
+        for (auto arg : func.getArguments()) {
+            if (mlir::isa<simt::dialect::ResourceType>(arg.getType()))
+                selected.push_back(arg.getArgNumber());
+        }
+    } else {
+        for (unsigned idx : bufferArgIndices)
+            selected.push_back(idx);
     }
-    mlir::Value bufferArg = func.getArgument(bufferArgIndex);
-    auto bufferType =
-        mlir::dyn_cast<simt::dialect::ResourceType>(bufferArg.getType());
-    if (!bufferType) {
-        llvm::errs() << "runOperationToBuffer: arg " << bufferArgIndex
-                     << " is not a resource\n";
-        return mlir::failure();
+    std::sort(selected.begin(), selected.end());
+    selected.erase(std::unique(selected.begin(), selected.end()), selected.end());
+
+    for (unsigned idx : selected) {
+        if (idx >= func.getNumArguments()) {
+            llvm::errs() << "runOperationToBuffers: buffer arg out of range\n";
+            return mlir::failure();
+        }
+        mlir::Value arg = func.getArgument(idx);
+        if (!mlir::isa<simt::dialect::ResourceType>(arg.getType())) {
+            llvm::errs() << "runOperationToBuffers: arg " << idx
+                         << " is not a resource\n";
+            return mlir::failure();
+        }
     }
 
     SimpleSemantics::clearMemory();
@@ -222,14 +252,14 @@ mlir::LogicalResult runOperationToBuffer(
 
     for (const auto &entry : initEntries) {
         if (entry.argIndex >= func.getNumArguments()) {
-            llvm::errs() << "runOperationToBuffer: init arg out of range\n";
+            llvm::errs() << "runOperationToBuffers: init arg out of range\n";
             return mlir::failure();
         }
         mlir::Value arg = func.getArgument(entry.argIndex);
         auto resTy =
             mlir::dyn_cast<simt::dialect::ResourceType>(arg.getType());
         if (!resTy) {
-            llvm::errs() << "runOperationToBuffer: init arg is not a resource\n";
+            llvm::errs() << "runOperationToBuffers: init arg is not a resource\n";
             return mlir::failure();
         }
         memMutable[arg][entry.index] =
@@ -251,35 +281,43 @@ mlir::LogicalResult runOperationToBuffer(
 
     auto &entry = func.getBody().front();
     if (llvm::Error err = runner.runBlock(&entry, semaCtx)) {
-        llvm::errs() << "runOperationToBuffer: run failed: "
+        llvm::errs() << "runOperationToBuffers: run failed: "
                      << llvm::toString(std::move(err)) << "\n";
         return mlir::failure();
     }
 
-    buffer.clear();
-    int64_t outSize = options.bufferSize;
+    buffers.clear();
+    buffers.reserve(selected.size());
     const auto &mem = SimpleSemantics::memory();
-    auto memIt = mem.find(bufferArg);
-    if (outSize <= 0) {
-        int64_t maxIndex = -1;
-        if (memIt != mem.end()) {
-            for (const auto &kv : memIt->second) {
-                if (kv.first > maxIndex)
-                    maxIndex = kv.first;
+    for (unsigned idx : selected) {
+        mlir::Value arg = func.getArgument(idx);
+        auto memIt = mem.find(arg);
+        int64_t outSize = options.bufferSize;
+        if (outSize <= 0) {
+            int64_t maxIndex = -1;
+            if (memIt != mem.end()) {
+                for (const auto &kv : memIt->second) {
+                    if (kv.first > maxIndex)
+                        maxIndex = kv.first;
+                }
+            }
+            outSize = maxIndex + 1;
+        }
+        BufferResult result;
+        result.argIndex = idx;
+        if (outSize > 0) {
+            result.values.assign(static_cast<size_t>(outSize),
+                                 options.fillValue);
+            if (memIt != mem.end()) {
+                for (const auto &kv : memIt->second) {
+                    if (kv.first < 0 || kv.first >= outSize)
+                        continue;
+                    result.values[static_cast<size_t>(kv.first)] =
+                        kv.second.asInt64();
+                }
             }
         }
-        outSize = maxIndex + 1;
-    }
-    if (outSize <= 0)
-        return mlir::success();
-
-    buffer.assign(static_cast<size_t>(outSize), options.fillValue);
-    if (memIt != mem.end()) {
-        for (const auto &kv : memIt->second) {
-            if (kv.first < 0 || kv.first >= outSize)
-                continue;
-            buffer[static_cast<size_t>(kv.first)] = kv.second.asInt64();
-        }
+        buffers.push_back(std::move(result));
     }
 
     return mlir::success();

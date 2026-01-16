@@ -59,6 +59,11 @@ struct BufferInitEntry {
     int64_t value = 0;
 };
 
+struct BufferResult {
+    unsigned argIndex = 0;
+    std::vector<int64_t> values;
+};
+
 struct RunOperationOptions {
     llvm::StringRef entry = "main";
     unsigned lanes = 4;
@@ -74,6 +79,15 @@ mlir::LogicalResult runOperationToBuffer(
     mlir::Operation &op,
     unsigned bufferArgIndex,
     std::vector<int64_t> &buffer,
+    const RunOperationOptions &options = {},
+    llvm::ArrayRef<BufferInitEntry> initEntries = {});
+
+/// Run a module or function and extract resource buffers by argument index.
+/// When bufferArgIndices is empty, all resource arguments are captured.
+mlir::LogicalResult runOperationToBuffers(
+    mlir::Operation &op,
+    llvm::ArrayRef<unsigned> bufferArgIndices,
+    std::vector<BufferResult> &buffers,
     const RunOperationOptions &options = {},
     llvm::ArrayRef<BufferInitEntry> initEntries = {});
 
