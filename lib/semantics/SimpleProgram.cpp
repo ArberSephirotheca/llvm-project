@@ -234,20 +234,48 @@ mlir::LogicalResult runOperationToBuffers(
             return mlir::failure();
         }
     }
+    for (const auto &entry : options.perBuffer) {
+        if (entry.argIndex >= func.getNumArguments()) {
+            llvm::errs() << "runOperationToBuffers: perBuffer arg out of range\n";
+            return mlir::failure();
+        }
+        mlir::Value arg = func.getArgument(entry.argIndex);
+        if (!mlir::isa<simt::dialect::ResourceType>(arg.getType())) {
+            llvm::errs() << "runOperationToBuffers: perBuffer arg "
+                         << entry.argIndex << " is not a resource\n";
+            return mlir::failure();
+        }
+    }
+
+    llvm::DenseMap<unsigned, BufferOptions> overrides;
+    for (const auto &entry : options.perBuffer)
+        overrides[entry.argIndex] = entry;
+    auto resolveSizeFill = [&](unsigned argIndex) -> std::pair<int64_t, int64_t> {
+        int64_t size = options.bufferSize;
+        int64_t fill = options.fillValue;
+        auto it = overrides.find(argIndex);
+        if (it != overrides.end()) {
+            if (it->second.size)
+                size = *it->second.size;
+            if (it->second.fill)
+                fill = *it->second.fill;
+        }
+        return {size, fill};
+    };
 
     SimpleSemantics::clearMemory();
     auto &memMutable = SimpleSemantics::memoryMutable();
-    if (options.bufferSize > 0) {
-        for (auto arg : func.getArguments()) {
-            auto resTy =
-                mlir::dyn_cast<simt::dialect::ResourceType>(arg.getType());
-            if (!resTy)
-                continue;
-            auto fillValue = castInitValue(resTy.getElementType(),
-                                           options.fillValue);
-            for (int64_t i = 0; i < options.bufferSize; ++i)
-                memMutable[arg][i] = fillValue;
-        }
+    for (auto arg : func.getArguments()) {
+        auto resTy =
+            mlir::dyn_cast<simt::dialect::ResourceType>(arg.getType());
+        if (!resTy)
+            continue;
+        auto [size, fill] = resolveSizeFill(arg.getArgNumber());
+        if (size <= 0)
+            continue;
+        auto fillValue = castInitValue(resTy.getElementType(), fill);
+        for (int64_t i = 0; i < size; ++i)
+            memMutable[arg][i] = fillValue;
     }
 
     for (const auto &entry : initEntries) {
@@ -292,7 +320,7 @@ mlir::LogicalResult runOperationToBuffers(
     for (unsigned idx : selected) {
         mlir::Value arg = func.getArgument(idx);
         auto memIt = mem.find(arg);
-        int64_t outSize = options.bufferSize;
+        auto [outSize, fill] = resolveSizeFill(idx);
         if (outSize <= 0) {
             int64_t maxIndex = -1;
             if (memIt != mem.end()) {
@@ -306,8 +334,7 @@ mlir::LogicalResult runOperationToBuffers(
         BufferResult result;
         result.argIndex = idx;
         if (outSize > 0) {
-            result.values.assign(static_cast<size_t>(outSize),
-                                 options.fillValue);
+            result.values.assign(static_cast<size_t>(outSize), fill);
             if (memIt != mem.end()) {
                 for (const auto &kv : memIt->second) {
                     if (kv.first < 0 || kv.first >= outSize)

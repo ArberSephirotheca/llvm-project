@@ -10,6 +10,7 @@
 #include <mlir/Support/LogicalResult.h>
 
 #include <cstdint>
+#include <optional>
 #include <vector>
 
 #include <llvm/ADT/ArrayRef.h>
@@ -64,12 +65,19 @@ struct BufferResult {
     std::vector<int64_t> values;
 };
 
+struct BufferOptions {
+    unsigned argIndex = 0;
+    std::optional<int64_t> size;
+    std::optional<int64_t> fill;
+};
+
 struct RunOperationOptions {
     llvm::StringRef entry = "main";
     unsigned lanes = 4;
     unsigned subgroupWidth = 8;
     int64_t bufferSize = 0;  // 0 = infer from written entries
-    int64_t fillValue = 0;
+    int64_t fillValue = 0;   // default fill when size is specified
+    std::vector<BufferOptions> perBuffer;
     const ExecutionPolicy *policy = nullptr;
     TraceSink *trace = nullptr;
 };

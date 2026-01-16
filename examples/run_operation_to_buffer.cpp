@@ -36,23 +36,29 @@ int main(int argc, char **argv) {
     options.entry = "main";
     options.lanes = 8;
     options.subgroupWidth = 4;
-    options.bufferSize = 16;
-    options.fillValue = 0;
+    simt::semantics::BufferOptions buf0;
+    buf0.argIndex = 0;
+    buf0.size = 16;
+    buf0.fill = 0;
+    options.perBuffer.push_back(buf0);
 
     std::vector<simt::semantics::BufferInitEntry> initEntries = {
         {0, 0, 7},
         {0, 3, 42},
     };
 
-    std::vector<int64_t> buffer;
+    std::vector<simt::semantics::BufferResult> buffers;
     mlir::Operation &op = *module->getOperation();
-    if (mlir::failed(simt::semantics::runOperationToBuffer(
-            op, /*bufferArgIndex=*/0, buffer, options, initEntries))) {
+    if (mlir::failed(simt::semantics::runOperationToBuffers(
+            op, /*bufferArgIndices=*/{}, buffers, options, initEntries))) {
         return 1;
     }
 
-    for (size_t i = 0; i < buffer.size(); ++i)
-        llvm::outs() << "buf0[" << i << "] = " << buffer[i] << "\n";
+    for (const auto &buffer : buffers) {
+        for (size_t i = 0; i < buffer.values.size(); ++i)
+            llvm::outs() << "buf" << buffer.argIndex << "[" << i
+                         << "] = " << buffer.values[i] << "\n";
+    }
 
     return 0;
 }
