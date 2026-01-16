@@ -22,6 +22,7 @@
 #include <string>
 #include <vector>
 #include <llvm/Support/CommandLine.h>
+#include <llvm/Support/FileSystem.h>
 #include <llvm/Support/InitLLVM.h>
 #include <llvm/Support/raw_ostream.h>
 
@@ -135,6 +136,51 @@ bool compareSnapshots(const RunSnapshot &a,
     }
     return true;
 }
+
+static void initPredicateBuffer(mlir::Value predArg,
+                                llvm::ArrayRef<int64_t> values) {
+    auto &mem = simt::semantics::SimpleSemantics::memoryMutable();
+    auto &buffer = mem[predArg];
+    buffer.clear();
+    for (size_t i = 0; i < values.size(); ++i) {
+        buffer[static_cast<int64_t>(i)] =
+            simt::semantics::SemValue::fromInt32(static_cast<int32_t>(values[i]));
+    }
+}
+
+static bool writePredicateYaml(llvm::StringRef path,
+                               unsigned argIndex,
+                               llvm::ArrayRef<int64_t> values) {
+    std::error_code ec;
+    llvm::raw_fd_ostream os(path, ec, llvm::sys::fs::OF_Text);
+    if (ec) {
+        llvm::errs() << "failed to write predicate YAML: " << ec.message() << "\n";
+        return false;
+    }
+
+    os << "buffers:\n";
+    os << "  - buffer: arg" << argIndex << "\n";
+    os << "    size: " << values.size() << "\n";
+    os << "    fill: 0\n";
+    bool hasEntries = false;
+    for (auto value : values) {
+        if (value != 0) {
+            hasEntries = true;
+            break;
+        }
+    }
+    if (!hasEntries) {
+        os << "    entries: []\n";
+        return true;
+    }
+    os << "    entries:\n";
+    for (size_t i = 0; i < values.size(); ++i) {
+        if (values[i] == 0)
+            continue;
+        os << "      - { index: " << i << ", value: " << values[i] << " }\n";
+    }
+    return true;
+}
 } // namespace
 
 int main(int argc, char **argv) {
@@ -182,6 +228,14 @@ int main(int argc, char **argv) {
         "collective-mem",
         llvm::cl::desc("Make buffer load/store collective"),
         llvm::cl::init(false));
+    llvm::cl::opt<bool> predicateBuffer(
+        "predicate-buffer",
+        llvm::cl::desc("Use a read-only predicate buffer for control flow"),
+        llvm::cl::init(false));
+    llvm::cl::opt<std::string> predicateYaml(
+        "predicate-yaml",
+        llvm::cl::desc("Write predicate buffer values to YAML"),
+        llvm::cl::init(""));
     llvm::cl::opt<std::string> traceFile(
         "trace-file", llvm::cl::desc("Write interpreter trace to JSONL file"),
         llvm::cl::init(""));
@@ -200,6 +254,12 @@ int main(int argc, char **argv) {
     cfg.numThreads = {static_cast<std::int64_t>(numLanes), 1, 1};
     cfg.subgroupWidth = std::max<unsigned>(1, subgroupWidth);
     cfg.seed = seedOpt;
+    bool usePredicateBuffer = predicateBuffer || !predicateYaml.empty();
+    cfg.predicateBuffer = usePredicateBuffer;
+    cfg.predicateBufferArgIndex = 1;
+    std::vector<int64_t> predicateValues;
+    if (usePredicateBuffer)
+        cfg.predicateValues = &predicateValues;
     llvm::errs() << "[fuzz] generating module...\n";
     llvm::errs().flush();
     mlir::OwningOpRef<mlir::ModuleOp> module =
@@ -215,6 +275,22 @@ int main(int argc, char **argv) {
     if (!func) {
         llvm::errs() << "generated module missing @main\n";
         return 1;
+    }
+    mlir::Value predicateArg;
+    if (usePredicateBuffer) {
+        if (func.getNumArguments() <= cfg.predicateBufferArgIndex) {
+            llvm::errs() << "predicate buffer arg index out of range\n";
+            return 1;
+        }
+        predicateArg = func.getArgument(cfg.predicateBufferArgIndex);
+        if (!mlir::isa<simt::dialect::ResourceType>(predicateArg.getType())) {
+            llvm::errs() << "predicate buffer arg is not a resource\n";
+            return 1;
+        }
+        if (!predicateYaml.empty() &&
+            !writePredicateYaml(predicateYaml, cfg.predicateBufferArgIndex,
+                                predicateValues))
+            return 1;
     }
     if (dumpIR) {
         module->print(llvm::outs());
@@ -278,6 +354,8 @@ int main(int argc, char **argv) {
             runner.setScheduleSeed(seed);
         }
         simt::semantics::SimpleSemantics::clearMemory();
+        if (usePredicateBuffer)
+            initPredicateBuffer(predicateArg, predicateValues);
         if (llvm::Error err = runner.runBlock(&entry, semaCtx)) {
             llvm::errs() << "run failed: " << llvm::toString(std::move(err)) << "\n";
             return std::nullopt;

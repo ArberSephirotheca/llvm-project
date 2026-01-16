@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <random>
+#include <vector>
 
 #include "simt-step/Dialect/SimtStep/SimtStepDialect.h"
 
@@ -31,6 +32,10 @@ struct BuildState {
     RNG &rng;
     int waveId = 0;
     unsigned controlOps = 0;
+    bool usePredicateBuffer = false;
+    Value predBuffer;
+    int predNextIndex = 0;
+    std::vector<int64_t> *predValues = nullptr;
     Value tid;
     Value outWave;
 };
@@ -51,6 +56,36 @@ static Value makeLaneIdI32(OpBuilder &b, Location loc) {
 static Value makeSubgroupIdI32(OpBuilder &b, Location loc) {
     Value subgroup = b.create<simt::dialect::SubgroupIdOp>(loc, b.getIndexType());
     return b.create<arith::IndexCastOp>(loc, b.getI32Type(), subgroup);
+}
+
+static int allocPredicateSlots(BuildState &st, int count) {
+    int base = st.predNextIndex;
+    st.predNextIndex += count;
+    if (st.predValues)
+        st.predValues->resize(st.predNextIndex, 0);
+    return base;
+}
+
+static Value loadPredicateI32(OpBuilder &b, Location loc, BuildState &st,
+                              int base, Value offset) {
+    Value idx = makeI32(b, loc, base);
+    if (offset)
+        idx = b.create<arith::AddIOp>(loc, idx, offset);
+    return b.create<simt::dialect::BufferLoadOp>(loc, st.predBuffer, idx);
+}
+
+static Value loadPredicateBool(OpBuilder &b, Location loc, BuildState &st,
+                               int base, Value offset) {
+    Value raw = loadPredicateI32(b, loc, st, base, offset);
+    Value zero = makeI32(b, loc, 0);
+    return b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ne, raw, zero);
+}
+
+static Value scaleIndexByLanes(OpBuilder &b, Location loc, Value idx, int lanes) {
+    Value scaled = idx;
+    for (int i = 1; i < lanes; ++i)
+        scaled = b.create<arith::AddIOp>(loc, scaled, idx);
+    return scaled;
 }
 
 static func::FuncOp buildScalarHelper(OpBuilder &b, Location loc,
@@ -85,6 +120,32 @@ static Value makeNonUniformCond(OpBuilder &b, Location loc, RNG &rng,
     int k = rng.pick(1, lanes - 1);
     Value ck = makeI32(b, loc, k);
     return b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt, tid, ck);
+}
+
+static Value buildNonUniformCond(OpBuilder &b, Location loc, BuildState &st) {
+    if (!st.usePredicateBuffer)
+        return makeNonUniformCond(b, loc, st.rng, st.cfg, st.tid);
+
+    int lanes = std::max(1, static_cast<int>(st.cfg.numThreads[0]));
+    int base = allocPredicateSlots(st, lanes);
+    if (lanes < 2) {
+        for (int lane = 0; lane < lanes; ++lane) {
+            if (st.predValues)
+                (*st.predValues)[base + lane] = 1;
+        }
+    } else if (st.rng.coin()) {
+        for (int lane = 0; lane < lanes; ++lane) {
+            if (st.predValues)
+                (*st.predValues)[base + lane] = ((lane % 2) == 0) ? 1 : 0;
+        }
+    } else {
+        int k = st.rng.pick(1, lanes - 1);
+        for (int lane = 0; lane < lanes; ++lane) {
+            if (st.predValues)
+                (*st.predValues)[base + lane] = (lane < k) ? 1 : 0;
+        }
+    }
+    return loadPredicateBool(b, loc, st, base, st.tid);
 }
 
 static Value makeNonUniformBound(OpBuilder &b, Location loc, RNG &rng,
@@ -173,10 +234,25 @@ static Value buildSwitch(OpBuilder &b, Location loc, BuildState &st,
     }
 
     int selectorMod = includeDefault ? numCases : (numCases - 1);
-    Value selector = st.tid;
-    if (selectorMod > 1) {
-        Value mod = makeI32(b, loc, selectorMod);
-        selector = b.create<arith::RemSIOp>(loc, selector, mod);
+    Value selector;
+    if (st.usePredicateBuffer) {
+        int lanes = std::max(1, static_cast<int>(st.cfg.numThreads[0]));
+        int base = allocPredicateSlots(st, lanes);
+        if (st.predValues) {
+            for (int lane = 0; lane < lanes; ++lane) {
+                int sel = lane;
+                if (selectorMod > 1)
+                    sel = lane % selectorMod;
+                (*st.predValues)[base + lane] = sel;
+            }
+        }
+        selector = loadPredicateI32(b, loc, st, base, st.tid);
+    } else {
+        selector = st.tid;
+        if (selectorMod > 1) {
+            Value mod = makeI32(b, loc, selectorMod);
+            selector = b.create<arith::RemSIOp>(loc, selector, mod);
+        }
     }
 
     Value initVal = buildValue(b, loc, st);
@@ -222,7 +298,7 @@ static Value buildSwitch(OpBuilder &b, Location loc, BuildState &st,
 static Value buildIf(OpBuilder &b, Location loc, BuildState &st, unsigned depth,
                      unsigned maxDepth) {
     st.controlOps++;
-    Value cond = makeNonUniformCond(b, loc, st.rng, st.cfg, st.tid);
+    Value cond = buildNonUniformCond(b, loc, st);
     auto ifOp = b.create<simt::dialect::IfOp>(loc, TypeRange{b.getI32Type()},
                                               cond, /*withElseRegion=*/true);
     if (ifOp.getThenRegion().empty())
@@ -249,6 +325,24 @@ static Value buildLoop(OpBuilder &b, Location loc, BuildState &st, unsigned dept
                        unsigned maxDepth) {
     st.controlOps++;
     int trip = std::max(1, st.rng.pick(1, static_cast<int>(st.cfg.maxTripCount)));
+    int lanes = std::max(1, static_cast<int>(st.cfg.numThreads[0]));
+    int predicateBase = -1;
+    if (st.usePredicateBuffer) {
+        int slotsPerLane = static_cast<int>(st.cfg.maxTripCount) + 1;
+        predicateBase = allocPredicateSlots(st, lanes * slotsPerLane);
+        int maxTrip = static_cast<int>(st.cfg.maxTripCount);
+        bool useMod = lanes >= 2 && maxTrip >= 2;
+        int k = useMod ? st.rng.pick(2, maxTrip) : 0;
+        if (st.predValues) {
+            for (int lane = 0; lane < lanes; ++lane) {
+                int bound = useMod ? ((lane % k) + 1) : trip;
+                for (int iter = 0; iter < slotsPerLane; ++iter) {
+                    (*st.predValues)[predicateBase + iter * lanes + lane] =
+                        (iter < bound) ? 1 : 0;
+                }
+            }
+        }
+    }
     Value acc0 = makeI32(b, loc, 0);
     Value idx0 = makeI32(b, loc, 0);
     auto loop = b.create<simt::dialect::LoopOp>(
@@ -270,11 +364,18 @@ static Value buildLoop(OpBuilder &b, Location loc, BuildState &st, unsigned dept
         OpBuilder pb(&prep, prep.begin());
         Value acc = prep.getArgument(0);
         Value idx = prep.getArgument(1);
-        // Non-uniform loop bounds derived from tid while keeping within maxTripCount.
-        Value bound =
-            makeNonUniformBound(pb, loc, st.rng, st.cfg, st.tid, trip);
-        Value lt = pb.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt, idx, bound);
-        pb.create<simt::dialect::ConditionOp>(loc, lt, ValueRange{acc, idx});
+        Value cond;
+        if (st.usePredicateBuffer) {
+            Value scaled = scaleIndexByLanes(pb, loc, idx, lanes);
+            Value offset = pb.create<arith::AddIOp>(loc, scaled, st.tid);
+            cond = loadPredicateBool(pb, loc, st, predicateBase, offset);
+        } else {
+            // Non-uniform loop bounds derived from tid while keeping within maxTripCount.
+            Value bound =
+                makeNonUniformBound(pb, loc, st.rng, st.cfg, st.tid, trip);
+            cond = pb.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt, idx, bound);
+        }
+        pb.create<simt::dialect::ConditionOp>(loc, cond, ValueRange{acc, idx});
     }
     {
         auto &body = loop.getBodyRegion().front();
@@ -485,7 +586,11 @@ createRandomizedModule(mlir::MLIRContext &context,
     auto resTy = simt::dialect::ResourceType::get(
         &context, simt::dialect::MemorySpace::Global, builder.getI32Type());
     auto helper = buildScalarHelper(builder, loc, "helper0", &rng);
-    auto funcType = builder.getFunctionType({resTy}, {});
+    llvm::SmallVector<Type, 2> argTypes;
+    argTypes.push_back(resTy);
+    if (cfg.predicateBuffer)
+        argTypes.push_back(resTy);
+    auto funcType = builder.getFunctionType(argTypes, {});
     auto func = builder.create<func::FuncOp>(loc, "main", funcType);
     func->setAttr("simt.num_threads",
                   builder.getI64ArrayAttr(
@@ -497,6 +602,9 @@ createRandomizedModule(mlir::MLIRContext &context,
     builder.setInsertionPointToStart(entry);
 
     Value outWave = entry->getArgument(0);
+    Value predBuffer;
+    if (cfg.predicateBuffer && cfg.predicateBufferArgIndex < argTypes.size())
+        predBuffer = entry->getArgument(cfg.predicateBufferArgIndex);
     Value tid =
         builder.create<simt::dialect::DispatchThreadIdOp>(loc, builder.getI32Type());
     auto call = builder.create<func::CallOp>(loc, helper, ValueRange{tid});
@@ -618,7 +726,20 @@ createRicherRandomModule(mlir::MLIRContext &context,
     Value callIdx = builder.create<arith::AddIOp>(loc, callBase, tid);
     builder.create<simt::dialect::BufferStoreOp>(loc, outWave, callIdx, callRes);
 
-    BuildState st{cfg, rng, /*waveId=*/0, /*controlOps=*/0, tid, outWave};
+    std::vector<int64_t> localPredicates;
+    std::vector<int64_t> *predValues = cfg.predicateValues;
+    if (cfg.predicateBuffer && !predValues)
+        predValues = &localPredicates;
+    BuildState st{cfg,
+                  rng,
+                  /*waveId=*/0,
+                  /*controlOps=*/0,
+                  cfg.predicateBuffer,
+                  predBuffer,
+                  /*predNextIndex=*/0,
+                  predValues,
+                  tid,
+                  outWave};
 
     int roots = rng.pick(1, 3);
     for (int r = 0; r < roots; ++r) {

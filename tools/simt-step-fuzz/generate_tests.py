@@ -42,6 +42,11 @@ def main():
         help="Base schedule seed for randomized scheduling",
     )
     parser.add_argument(
+        "--predicate-buffer",
+        action="store_true",
+        help="Emit predicate buffer and YAML per test",
+    )
+    parser.add_argument(
         "--seed-start", type=int, default=0, help="First program seed"
     )
     parser.add_argument(
@@ -83,6 +88,8 @@ def main():
                 f"--schedule-seed={args.schedule_seed}",
                 "--random-schedule",
             ]
+            if args.predicate_buffer:
+                validate_cmd.append("--predicate-buffer")
             validate = run(validate_cmd)
             if validate.returncode != 0:
                 seed += args.seed_step
@@ -95,6 +102,11 @@ def main():
                 f"--subgroup-width={args.subgroup_width}",
                 "--print-ir",
             ]
+            predicate_yaml = ""
+            if args.predicate_buffer:
+                predicate_yaml = f"{out_dir}/test_{count:03d}_seed_{seed}.yaml"
+                gen_cmd.append("--predicate-buffer")
+                gen_cmd.append(f"--predicate-yaml={predicate_yaml}")
             generated = run(gen_cmd)
             if generated.returncode != 0 or not generated.stdout.strip():
                 seed += args.seed_step
@@ -111,6 +123,8 @@ def main():
                 "trials": args.trials,
                 "schedule_seed": args.schedule_seed,
             }
+            if predicate_yaml:
+                record["predicate_yaml"] = Path(predicate_yaml).name
             manifest.write(json.dumps(record) + "\n")
             manifest.flush()
             count += 1

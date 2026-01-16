@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <array>
+#include <vector>
 #include <mlir/IR/BuiltinOps.h>
 
 namespace simt::fuzz {
@@ -15,6 +16,9 @@ struct GeneratorConfig {
     std::uint64_t seed = 0; // 0 = deterministic default
     std::uint32_t maxTripCount = 4;
     std::uint32_t minControlOps = 4;
+    bool predicateBuffer = false;
+    unsigned predicateBufferArgIndex = 1;
+    std::vector<int64_t> *predicateValues = nullptr;
 };
 
 /// Build a simple, deterministic SIMT-Step module:
