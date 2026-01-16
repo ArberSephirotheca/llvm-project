@@ -27,10 +27,13 @@ public:
     using ValueType = SemValue;
     using StepType = Step<ValueType>;
     using StateType = DefaultInterpreterState;
+    using ScheduleMode = CPSInterpreter<SimpleSemantics>::ScheduleMode;
 
     SimpleProgramRunner() : semantics_(), interpreter_(semantics_) {}
 
     void setTraceSink(TraceSink *sink) { interpreter_.setTraceSink(sink); }
+    void setScheduleMode(ScheduleMode mode) { interpreter_.setScheduleMode(mode); }
+    void setScheduleSeed(std::uint64_t seed) { interpreter_.setScheduleSeed(seed); }
 
     llvm::Error runBlock(mlir::Block *block,
                          SemanticsContext context = SemanticsContext{});

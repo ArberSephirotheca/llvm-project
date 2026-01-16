@@ -2,7 +2,6 @@
   const threadsInput = document.getElementById("threadsInput");
   const subgroupInput = document.getElementById("subgroupInput");
   const seedInput = document.getElementById("seedInput");
-  const programSelect = document.getElementById("programSelect");
   const syncCfInput = document.getElementById("syncCfInput");
   const collectiveCfInput = document.getElementById("collectiveCfInput");
   const syncMemInput = document.getElementById("syncMemInput");
@@ -841,12 +840,11 @@
       Math.min(64, parseInt(subgroupInput?.value || "8", 10) || 8),
     );
     const seed = Math.max(0, parseInt(seedInput.value, 10) || 0);
-    const program = programSelect.value || "richer";
     const payload = {
       lanes: String(lanes),
       subgroup_width: String(subgroupWidth),
       seed: String(seed),
-      program,
+      program: "richer",
     };
     if (raiseSelect && raiseSelect.value)
       payload.raise = raiseSelect.value;

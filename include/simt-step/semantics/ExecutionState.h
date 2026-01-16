@@ -6,7 +6,7 @@
 #include <cstdint>
 #include <limits>
 #include <optional>
-#include <queue>
+#include <deque>
 #include <string>
 #include <utility>
 
@@ -186,7 +186,7 @@ struct ReadyContinuation {
 template <typename ValueT, typename StepT>
 struct InterpreterState {
     llvm::DenseMap<WaveId, WaveContext<ValueT, StepT>> waves;
-    std::queue<ReadyContinuation<ValueT, StepT>> readyQueue;
+    std::deque<ReadyContinuation<ValueT, StepT>> readyQueue;
     StepT pendingStep;
 };
 

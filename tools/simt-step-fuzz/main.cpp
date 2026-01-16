@@ -17,12 +17,125 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <limits>
+#include <optional>
+#include <string>
 #include <vector>
 #include <llvm/Support/CommandLine.h>
 #include <llvm/Support/InitLLVM.h>
 #include <llvm/Support/raw_ostream.h>
 
 using namespace mlir;
+
+namespace {
+struct LaneSnapshot {
+    simt::semantics::WaveId wave = 0;
+    simt::semantics::LaneId lane = 0;
+    bool hasReturned = false;
+    std::optional<int64_t> returnValue;
+    const mlir::Block *block = nullptr;
+    std::uint32_t sequenceId = 0;
+};
+
+struct BufferSnapshot {
+    unsigned argIndex = 0;
+    std::vector<std::pair<int64_t, int64_t>> entries;
+};
+
+struct RunSnapshot {
+    std::vector<LaneSnapshot> lanes;
+    std::vector<BufferSnapshot> buffers;
+};
+
+RunSnapshot captureSnapshot(const simt::semantics::SimpleProgramRunner &runner) {
+    RunSnapshot snapshot;
+    const auto &state = runner.state();
+    snapshot.lanes.reserve(state.waves.size() * 8);
+    for (const auto &waveIt : state.waves) {
+        simt::semantics::WaveId waveId = waveIt.first;
+        const auto &waveCtx = waveIt.second;
+        for (const auto &laneIt : waveCtx.lanes) {
+            LaneSnapshot laneSnap;
+            laneSnap.wave = waveId;
+            laneSnap.lane = laneIt.first;
+            laneSnap.hasReturned = laneIt.second.hasReturned;
+            if (laneIt.second.returnValue)
+                laneSnap.returnValue = laneIt.second.returnValue->asInt64();
+            if (laneIt.second.currentBlock) {
+                laneSnap.block = laneIt.second.currentBlock->block;
+                laneSnap.sequenceId = laneIt.second.currentBlock->sequenceId;
+            }
+            snapshot.lanes.push_back(laneSnap);
+        }
+    }
+    std::sort(snapshot.lanes.begin(), snapshot.lanes.end(),
+              [](const LaneSnapshot &a, const LaneSnapshot &b) {
+                  if (a.wave != b.wave)
+                      return a.wave < b.wave;
+                  return a.lane < b.lane;
+              });
+
+    const auto &mem = simt::semantics::SimpleSemantics::memory();
+    for (const auto &resIt : mem) {
+        auto barg = mlir::dyn_cast<BlockArgument>(resIt.first);
+        if (!barg)
+            continue;
+        BufferSnapshot buf;
+        buf.argIndex = barg.getArgNumber();
+        buf.entries.reserve(resIt.second.size());
+        for (const auto &kv : resIt.second)
+            buf.entries.emplace_back(kv.first, kv.second.asInt64());
+        std::sort(buf.entries.begin(), buf.entries.end(),
+                  [](const auto &a, const auto &b) { return a.first < b.first; });
+        snapshot.buffers.push_back(std::move(buf));
+    }
+    std::sort(snapshot.buffers.begin(), snapshot.buffers.end(),
+              [](const BufferSnapshot &a, const BufferSnapshot &b) {
+                  return a.argIndex < b.argIndex;
+              });
+
+    return snapshot;
+}
+
+bool compareSnapshots(const RunSnapshot &a,
+                      const RunSnapshot &b,
+                      std::string &reason) {
+    if (a.lanes.size() != b.lanes.size()) {
+        reason = "lane snapshot size mismatch";
+        return false;
+    }
+    for (std::size_t i = 0; i < a.lanes.size(); ++i) {
+        const auto &lhs = a.lanes[i];
+        const auto &rhs = b.lanes[i];
+        if (lhs.wave != rhs.wave || lhs.lane != rhs.lane) {
+            reason = "lane order mismatch";
+            return false;
+        }
+        if (lhs.hasReturned != rhs.hasReturned ||
+            lhs.returnValue != rhs.returnValue) {
+            reason = "lane return mismatch";
+            return false;
+        }
+    }
+    if (a.buffers.size() != b.buffers.size()) {
+        reason = "buffer count mismatch";
+        return false;
+    }
+    for (std::size_t i = 0; i < a.buffers.size(); ++i) {
+        const auto &lhs = a.buffers[i];
+        const auto &rhs = b.buffers[i];
+        if (lhs.argIndex != rhs.argIndex) {
+            reason = "buffer arg mismatch";
+            return false;
+        }
+        if (lhs.entries != rhs.entries) {
+            reason = "buffer contents mismatch";
+            return false;
+        }
+    }
+    return true;
+}
+} // namespace
 
 int main(int argc, char **argv) {
 
@@ -41,10 +154,18 @@ int main(int argc, char **argv) {
                                   llvm::cl::init(false));
     llvm::cl::opt<std::uint64_t> seedOpt("seed", llvm::cl::desc("Seed for RNG (0=deterministic)"),
                                          llvm::cl::init(0));
-    llvm::cl::opt<std::string> programOpt(
-        "program",
-        llvm::cl::desc("Program generator (deterministic|randomized|richer)"),
-        llvm::cl::init("richer"));
+    llvm::cl::opt<unsigned> trials(
+        "trials",
+        llvm::cl::desc("Number of randomized scheduling trials"),
+        llvm::cl::init(1));
+    llvm::cl::opt<std::uint64_t> scheduleSeed(
+        "schedule-seed",
+        llvm::cl::desc("Seed for randomized scheduler (0 = deterministic order)"),
+        llvm::cl::init(0));
+    llvm::cl::opt<bool> randomSchedule(
+        "random-schedule",
+        llvm::cl::desc("Randomize scheduler order"),
+        llvm::cl::init(false));
     llvm::cl::opt<bool> collectiveControlFlow(
         "collective-cf",
         llvm::cl::desc("Make control-flow ops collective before split"),
@@ -81,17 +202,8 @@ int main(int argc, char **argv) {
     cfg.seed = seedOpt;
     llvm::errs() << "[fuzz] generating module...\n";
     llvm::errs().flush();
-    mlir::OwningOpRef<mlir::ModuleOp> module;
-    if (programOpt == "deterministic") {
-        module = simt::fuzz::createDeterministicIfLoopModule(context, cfg);
-    } else if (programOpt == "randomized" || programOpt == "random") {
-        module = simt::fuzz::createRandomizedModule(context, cfg);
-    } else if (programOpt == "richer") {
-        module = simt::fuzz::createRicherRandomModule(context, cfg);
-    } else {
-        llvm::errs() << "unknown --program=" << programOpt << "\n";
-        return 1;
-    }
+    mlir::OwningOpRef<mlir::ModuleOp> module =
+        simt::fuzz::createRicherRandomModule(context, cfg);
     if (!module) {
         llvm::errs() << "failed to build module\n";
         return 1;
@@ -121,11 +233,14 @@ int main(int argc, char **argv) {
         simt::semantics::EnableCPSDebugLogs = true;
 
     auto &entry = func.getBody().front();
-    simt::semantics::SimpleProgramRunner runner;
-    std::unique_ptr<simt::semantics::TraceJsonWriter> traceWriter;
-    if (!traceFile.empty()) {
-        traceWriter = std::make_unique<simt::semantics::TraceJsonWriter>(traceFile);
-        runner.setTraceSink(traceWriter.get());
+    bool useRandomSchedule = randomSchedule || trials > 1;
+    if (trials < 1) {
+        llvm::errs() << "error: --trials must be >= 1\n";
+        return 1;
+    }
+    if (trials > 1 && traceFile.empty() == false) {
+        llvm::errs() << "error: --trace-file is only supported with --trials=1\n";
+        return 1;
     }
     if (collectiveControlFlow && syncControlFlow) {
         llvm::errs() << "error: --collective-cf conflicts with --sync-cf\n";
@@ -151,46 +266,77 @@ int main(int argc, char **argv) {
         width >= 64 ? ~0ull : ((1ull << static_cast<std::uint64_t>(width)) - 1ull);
     semaCtx.subgroupWidth = std::max<unsigned>(1, subgroupWidth);
     semaCtx.policy = &execPolicy;
-    simt::semantics::SimpleSemantics::clearMemory();
+    auto runTrial = [&](std::uint64_t seed,
+                        simt::semantics::TraceJsonWriter *traceWriter)
+        -> std::optional<RunSnapshot> {
+        simt::semantics::SimpleProgramRunner runner;
+        if (traceWriter)
+            runner.setTraceSink(traceWriter);
+        if (useRandomSchedule) {
+            runner.setScheduleMode(
+                simt::semantics::SimpleProgramRunner::ScheduleMode::Randomized);
+            runner.setScheduleSeed(seed);
+        }
+        simt::semantics::SimpleSemantics::clearMemory();
+        if (llvm::Error err = runner.runBlock(&entry, semaCtx)) {
+            llvm::errs() << "run failed: " << llvm::toString(std::move(err)) << "\n";
+            return std::nullopt;
+        }
+        return captureSnapshot(runner);
+    };
 
-    if (llvm::Error err = runner.runBlock(&entry, semaCtx)) {
-        llvm::errs() << "run failed: " << llvm::toString(std::move(err)) << "\n";
-        return 1;
+    std::unique_ptr<simt::semantics::TraceJsonWriter> traceWriter;
+    if (!traceFile.empty()) {
+        traceWriter = std::make_unique<simt::semantics::TraceJsonWriter>(traceFile);
     }
 
-    const auto &state = runner.state();
-    for (const auto &waveIt : state.waves) {
-        llvm::outs() << "Wave " << waveIt.first << "\n";
-        const auto &waveCtx = waveIt.second;
-        for (const auto &laneIt : waveCtx.lanes) {
-            const auto &laneCtx = laneIt.second;
-            llvm::outs() << "  Lane " << laneIt.first
-                         << " returned=" << laneCtx.hasReturned;
-            if (laneCtx.returnValue)
-                llvm::outs() << " value=" << laneCtx.returnValue->asInt64();
-            if (laneCtx.currentBlock)
-                llvm::outs() << " block=" << laneCtx.currentBlock->block
-                             << " seq=" << laneCtx.currentBlock->sequenceId;
-            llvm::outs() << "\n";
+    std::uint64_t baseSeed = scheduleSeed;
+    if (useRandomSchedule && baseSeed == 0) {
+        llvm::errs() << "note: randomized scheduling enabled; using "
+                        "--schedule-seed=1\n";
+        baseSeed = 1;
+    }
+    auto baseline = runTrial(baseSeed, traceWriter.get());
+    if (!baseline)
+        return 1;
+    for (unsigned trial = 1; trial < trials; ++trial) {
+        auto snap = runTrial(baseSeed + trial, nullptr);
+        if (!snap)
+            return 1;
+        std::string reason;
+        if (!compareSnapshots(*baseline, *snap, reason)) {
+            llvm::errs() << "determinism oracle failed: " << reason
+                         << " (trial " << trial << ")\n";
+            return 2;
         }
     }
+    if (trials > 1)
+        llvm::errs() << "[oracle] " << trials
+                     << " trials consistent\n";
 
-    const auto &mem = simt::semantics::SimpleSemantics::memory();
-    if (!mem.empty()) {
+    simt::semantics::WaveId currentWave = std::numeric_limits<std::uint32_t>::max();
+    for (const auto &lane : baseline->lanes) {
+        if (lane.wave != currentWave) {
+            currentWave = lane.wave;
+            llvm::outs() << "Wave " << lane.wave << "\n";
+        }
+        llvm::outs() << "  Lane " << lane.lane
+                     << " returned=" << lane.hasReturned;
+        if (lane.returnValue)
+            llvm::outs() << " value=" << *lane.returnValue;
+        if (lane.block)
+            llvm::outs() << " block=" << lane.block
+                         << " seq=" << lane.sequenceId;
+        llvm::outs() << "\n";
+    }
+
+    if (!baseline->buffers.empty()) {
         llvm::outs() << "Memory:\n";
-        for (const auto &resIt : mem) {
-            std::string bufName = "res";
-            if (auto barg = mlir::dyn_cast<BlockArgument>(resIt.first))
-                bufName = "buf" + std::to_string(barg.getArgNumber());
-            std::vector<std::pair<int64_t, simt::semantics::SemValue>> entries;
-            entries.reserve(resIt.second.size());
-            for (const auto &kv : resIt.second)
-                entries.push_back(kv);
-            std::sort(entries.begin(), entries.end(),
-                      [](const auto &a, const auto &b) { return a.first < b.first; });
-            for (const auto &kv : entries)
+        for (const auto &buf : baseline->buffers) {
+            std::string bufName = "buf" + std::to_string(buf.argIndex);
+            for (const auto &kv : buf.entries)
                 llvm::outs() << "  " << bufName << "[" << kv.first << "] = "
-                             << kv.second.asInt64() << "\n";
+                             << kv.second << "\n";
         }
     }
 

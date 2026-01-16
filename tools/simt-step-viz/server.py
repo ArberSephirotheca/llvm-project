@@ -67,7 +67,6 @@ class TraceHandler(http.server.SimpleHTTPRequestHandler):
         lanes = parse_int(params.get("lanes"), 4)
         subgroup_width = parse_int(params.get("subgroup_width"), 8)
         seed = parse_int(params.get("seed"), 0)
-        program = params.get("program", "richer")
         raise_target = params.get("raise", "none")
         init_yaml = params.get("init_yaml") or ""
         collective_cf = parse_bool(params.get("collective_cf"), False)
@@ -85,18 +84,6 @@ class TraceHandler(http.server.SimpleHTTPRequestHandler):
             self.send_json(400, {"error": "seed must be non-negative"})
             return
 
-        program_map = {
-            "richer": "richer",
-            "randomized": "randomized",
-            "random": "randomized",
-            "deterministic": "deterministic",
-        }
-        if program not in program_map:
-            self.send_json(
-                400,
-                {"error": "program must be one of: richer, randomized, deterministic"},
-            )
-            return
         if raise_target not in ("none", "hlsl", "glsl", "cuda"):
             self.send_json(
                 400,
@@ -148,7 +135,6 @@ class TraceHandler(http.server.SimpleHTTPRequestHandler):
                     f"--lanes={lanes}",
                     f"--subgroup-width={subgroup_width}",
                     f"--seed={seed}",
-                    f"--program={program_map[program]}",
                     "--print-ir",
                 ]
                 gen_result = subprocess.run(
@@ -219,7 +205,6 @@ class TraceHandler(http.server.SimpleHTTPRequestHandler):
                     f"--lanes={lanes}",
                     f"--subgroup-width={subgroup_width}",
                     f"--seed={seed}",
-                    f"--program={program_map[program]}",
                     "--print-ir",
                     "--run",
                     f"--trace-file={trace_path}",
@@ -285,7 +270,6 @@ class TraceHandler(http.server.SimpleHTTPRequestHandler):
                         f"--lanes={lanes}",
                         f"--subgroup-width={subgroup_width}",
                         f"--seed={seed}",
-                        f"--program={program_map[program]}",
                         "--raise-hlsl",
                     ]
                     raise_result = subprocess.run(

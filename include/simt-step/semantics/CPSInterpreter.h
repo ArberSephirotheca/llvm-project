@@ -14,7 +14,8 @@
 #include <type_traits>
 #include <utility>
 #include <variant>
-#include <queue>
+#include <deque>
+#include <random>
 #include <string>
 
 #include <mlir/Dialect/Func/IR/FuncOps.h>
@@ -190,11 +191,17 @@ public:
     using ValueType = typename SemanticsT::ValueType;
     using StepType = Step<ValueType>;
     using StateType = InterpreterState<ValueType, StepType>;
+    enum class ScheduleMode { Deterministic, Randomized };
 
     explicit CPSInterpreter(SemanticsT semantics)
         : semantics_(std::move(semantics)) {}
 
     void setTraceSink(TraceSink *sink) { traceSink_ = sink; }
+    void setScheduleMode(ScheduleMode mode) { scheduleMode_ = mode; }
+    void setScheduleSeed(std::uint64_t seed) {
+        scheduleSeed_ = seed;
+        rng_.seed(seed);
+    }
 
     StateType &state() { return state_; }
     const StateType &state() const { return state_; }
@@ -210,7 +217,7 @@ public:
             dumpReadyQueue();
             dumpContinuations();
         }
-        state_.readyQueue.push(
+        state_.readyQueue.push_back(
             ReadyContinuation<ValueType, StepType>{wave, block, lane, std::move(step)});
     }
 
@@ -218,7 +225,7 @@ public:
         if (!EnableCPSDebugLogs)
             return;
         cpsDebugStream() << "[CPS] ReadyQueue size=" << state_.readyQueue.size() << "\n";
-        std::queue<ReadyContinuation<ValueType, StepType>> tmp = state_.readyQueue;
+        std::deque<ReadyContinuation<ValueType, StepType>> tmp = state_.readyQueue;
         std::size_t idx = 0;
         while (!tmp.empty()) {
             const auto &item = tmp.front();
@@ -226,7 +233,7 @@ public:
                          << " block=" << item.block.block
                          << " seq=" << item.block.sequenceId
                          << " lane=" << item.lane << "\n";
-            tmp.pop();
+            tmp.pop_front();
         }
     }
 
@@ -256,8 +263,21 @@ public:
     llvm::Error runOne() {
         if (state_.readyQueue.empty())
             return llvm::Error::success();
-        auto item = std::move(state_.readyQueue.front());
-        state_.readyQueue.pop();
+        if (scheduleMode_ == ScheduleMode::Deterministic) {
+            auto item = std::move(state_.readyQueue.front());
+            state_.readyQueue.pop_front();
+            return processReady(std::move(item));
+        }
+        std::size_t index = 0;
+        if (state_.readyQueue.size() > 1) {
+            std::uniform_int_distribution<std::size_t> dist(
+                0, state_.readyQueue.size() - 1);
+            index = dist(rng_);
+        }
+        auto item = std::move(state_.readyQueue[index]);
+        if (index + 1 != state_.readyQueue.size())
+            state_.readyQueue[index] = std::move(state_.readyQueue.back());
+        state_.readyQueue.pop_back();
         return processReady(std::move(item));
     }
 
@@ -1754,7 +1774,7 @@ private:
             auto contIt = parentIt->second.continuations.find(lane);
             if (contIt != parentIt->second.continuations.end()) {
                 parentIt->second.activeMask |= laneBit;
-                state_.readyQueue.push(ReadyContinuation<ValueType, StepType>{
+                state_.readyQueue.push_back(ReadyContinuation<ValueType, StepType>{
                     wave, entry->parent, lane, contIt->second});
                 parentIt->second.continuations.erase(contIt);
                 auto &laneCtx = waveCtx.lanes[lane];
@@ -2484,7 +2504,7 @@ private:
             auto contIt = parentIt->second.continuations.find(lane);
             if (contIt != parentIt->second.continuations.end()) {
                 parentIt->second.activeMask |= laneBit;
-                state_.readyQueue.push(ReadyContinuation<ValueType, StepType>{
+                state_.readyQueue.push_back(ReadyContinuation<ValueType, StepType>{
                     wave, entry.parent, lane, contIt->second});
                 parentIt->second.continuations.erase(contIt);
             }
@@ -2542,7 +2562,7 @@ private:
             auto contIt = parentIt->second.continuations.find(lane);
             if (contIt != parentIt->second.continuations.end()) {
                 parentIt->second.activeMask |= laneBit;
-                state_.readyQueue.push(ReadyContinuation<ValueType, StepType>{
+                state_.readyQueue.push_back(ReadyContinuation<ValueType, StepType>{
                     wave, entry.parent, lane, contIt->second});
                 parentIt->second.continuations.erase(contIt);
             }
@@ -2833,7 +2853,7 @@ private:
         if (contIt != parentBlock.continuations.end()) {
             parentBlock.activeMask |= (1ull << lane);
             waveCtx.lanes[lane].currentBlock = key;
-            state_.readyQueue.push(
+            state_.readyQueue.push_back(
                 ReadyContinuation<ValueType, StepType>{wave, key, lane, contIt->second});
             parentBlock.continuations.erase(contIt);
         }
@@ -3248,7 +3268,7 @@ private:
                     auto contIt = syncPoint.continuations.find(l);
                     if (contIt != syncPoint.continuations.end()) {
                         blockCtx->activeMask |= (1ull << l);
-                        state_.readyQueue.push(
+                        state_.readyQueue.push_back(
                             ReadyContinuation<ValueType, StepType>{wave, block, l,
                                                                    contIt->second});
                     }
@@ -3314,7 +3334,7 @@ private:
                                 blockKindLabel(blockCtx->kind),
                                 blockCtx->loopIteration);
                         }
-                        state_.readyQueue.push(
+                        state_.readyQueue.push_back(
                             ReadyContinuation<ValueType, StepType>{wave, block, l,
                                                                    contIt->second});
                     }
@@ -3433,7 +3453,7 @@ private:
                         auto contIt = it->second.continuations.find(l);
                         if (contIt != it->second.continuations.end()) {
                             blockCtx->activeMask |= (1ull << l);
-                            state_.readyQueue.push(
+                            state_.readyQueue.push_back(
                                 ReadyContinuation<ValueType, StepType>{
                                     waveId, it->second.block, l, contIt->second});
                         }
@@ -3472,7 +3492,7 @@ private:
                         auto contIt = it->second.continuations.find(l);
                         if (contIt != it->second.continuations.end()) {
                             blockCtx->activeMask |= (1ull << l);
-                            state_.readyQueue.push(
+                            state_.readyQueue.push_back(
                                 ReadyContinuation<ValueType, StepType>{
                                     waveId, it->second.block, l, contIt->second});
                         }
@@ -3606,7 +3626,7 @@ private:
                         auto contIt = it->second.continuations.find(l);
                         if (contIt != it->second.continuations.end()) {
                             blockCtx->activeMask |= (1ull << l);
-                            state_.readyQueue.push(
+                            state_.readyQueue.push_back(
                                 ReadyContinuation<ValueType, StepType>{
                                     waveId, it->second.block, l, contIt->second});
                         }
@@ -3650,7 +3670,7 @@ private:
                         auto contIt = it->second.continuations.find(l);
                         if (contIt != it->second.continuations.end()) {
                             blockCtx->activeMask |= (1ull << l);
-                            state_.readyQueue.push(
+                            state_.readyQueue.push_back(
                                 ReadyContinuation<ValueType, StepType>{
                                     waveId, it->second.block, l, contIt->second});
                         }
@@ -3800,7 +3820,7 @@ private:
                         auto contIt = it->second.continuations.find(l);
                         if (contIt != it->second.continuations.end()) {
                             blockCtx->activeMask |= (1ull << l);
-                            state_.readyQueue.push(
+                            state_.readyQueue.push_back(
                                 ReadyContinuation<ValueType, StepType>{
                                     waveId, it->second.block, l, contIt->second});
                         }
@@ -3886,7 +3906,7 @@ private:
                                      << " parent=" << parentKey.block
                                      << " seq=" << parentKey.sequenceId << "\n";
                     }
-                    state_.readyQueue.push(
+                    state_.readyQueue.push_back(
                         ReadyContinuation<ValueType, StepType>{waveId, parentKey, lane,
                                                                contIt->second});
                     dumpReadyQueue();
@@ -3935,7 +3955,7 @@ private:
                 //         if (contIt != parentBlock.continuations.end()) {
                 //             parentBlock.activeMask |= (1ull << l);
                 //             waveCtx.lanes[l].currentBlock = parentKey;
-                //             state_.readyQueue.push(
+                //             state_.readyQueue.push_back(
                 //                 ReadyContinuation<ValueType, StepType>{waveId, parentKey, l,
                 //                                                        contIt->second});
                 //             if (EnableCPSDebugLogs) {
@@ -3962,6 +3982,9 @@ private:
     SemanticsT semantics_;
     TraceSink *traceSink_ = nullptr;
     StateType state_;
+    ScheduleMode scheduleMode_ = ScheduleMode::Deterministic;
+    std::uint64_t scheduleSeed_ = 0;
+    std::mt19937_64 rng_{0};
 };
 
 } // namespace simt::semantics
