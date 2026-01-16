@@ -30,6 +30,7 @@ struct BuildState {
     GeneratorConfig cfg;
     RNG &rng;
     int waveId = 0;
+    unsigned controlOps = 0;
     Value tid;
     Value outWave;
 };
@@ -144,6 +145,7 @@ static Value buildPattern(OpBuilder &b, Location loc, BuildState &st,
 
 static Value buildSwitch(OpBuilder &b, Location loc, BuildState &st,
                          unsigned depth, unsigned maxDepth) {
+    st.controlOps++;
     int numCases = st.rng.pick(2, 4);
     bool includeDefault = st.rng.coin();
     bool allowFallthrough = st.rng.coin();
@@ -219,6 +221,7 @@ static Value buildSwitch(OpBuilder &b, Location loc, BuildState &st,
 
 static Value buildIf(OpBuilder &b, Location loc, BuildState &st, unsigned depth,
                      unsigned maxDepth) {
+    st.controlOps++;
     Value cond = makeNonUniformCond(b, loc, st.rng, st.cfg, st.tid);
     auto ifOp = b.create<simt::dialect::IfOp>(loc, TypeRange{b.getI32Type()},
                                               cond, /*withElseRegion=*/true);
@@ -244,6 +247,7 @@ static Value buildIf(OpBuilder &b, Location loc, BuildState &st, unsigned depth,
 
 static Value buildLoop(OpBuilder &b, Location loc, BuildState &st, unsigned depth,
                        unsigned maxDepth) {
+    st.controlOps++;
     int trip = std::max(1, st.rng.pick(1, static_cast<int>(st.cfg.maxTripCount)));
     Value acc0 = makeI32(b, loc, 0);
     Value idx0 = makeI32(b, loc, 0);
@@ -307,6 +311,16 @@ static Value buildPattern(OpBuilder &b, Location loc, BuildState &st,
     int choice = st.rng.pick(0, 3); // 0 leaf, 1 if, 2 loop, 3 switch
     if (choice == 0)
         return buildValue(b, loc, st);
+    if (choice == 1)
+        return buildIf(b, loc, st, depth, maxDepth);
+    if (choice == 2)
+        return buildLoop(b, loc, st, depth, maxDepth);
+    return buildSwitch(b, loc, st, depth, maxDepth);
+}
+
+static Value buildControlPattern(OpBuilder &b, Location loc, BuildState &st,
+                                 unsigned depth, unsigned maxDepth) {
+    int choice = st.rng.pick(1, 3); // 1 if, 2 loop, 3 switch
     if (choice == 1)
         return buildIf(b, loc, st, depth, maxDepth);
     if (choice == 2)
@@ -604,11 +618,14 @@ createRicherRandomModule(mlir::MLIRContext &context,
     Value callIdx = builder.create<arith::AddIOp>(loc, callBase, tid);
     builder.create<simt::dialect::BufferStoreOp>(loc, outWave, callIdx, callRes);
 
-    BuildState st{cfg, rng, /*waveId=*/0, tid, outWave};
+    BuildState st{cfg, rng, /*waveId=*/0, /*controlOps=*/0, tid, outWave};
 
     int roots = rng.pick(1, 3);
     for (int r = 0; r < roots; ++r) {
         (void)buildPattern(builder, loc, st, /*depth=*/0, /*maxDepth=*/3);
+    }
+    while (st.controlOps < cfg.minControlOps) {
+        (void)buildControlPattern(builder, loc, st, /*depth=*/0, /*maxDepth=*/3);
     }
 
     builder.create<func::ReturnOp>(loc);

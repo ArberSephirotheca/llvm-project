@@ -14,6 +14,7 @@ struct GeneratorConfig {
     std::uint32_t subgroupWidth = 8;
     std::uint64_t seed = 0; // 0 = deterministic default
     std::uint32_t maxTripCount = 4;
+    std::uint32_t minControlOps = 4;
 };
 
 /// Build a simple, deterministic SIMT-Step module:

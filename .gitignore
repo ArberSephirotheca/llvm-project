@@ -11,3 +11,4 @@ Agent.md
 *.jsonl
 /ref
 /skills
+/fuzz-tests
