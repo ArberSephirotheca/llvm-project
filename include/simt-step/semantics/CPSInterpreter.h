@@ -39,7 +39,7 @@ inline bool EnableCPSDebugLogs = []() {
 }();
 
 inline llvm::raw_ostream &cpsDebugStream() {
-    return EnableCPSDebugLogs ? cpsDebugStream() : llvm::nulls();
+    return EnableCPSDebugLogs ? llvm::errs() : llvm::nulls();
 }
 
 inline std::string formatMaskBits(std::uint64_t mask, unsigned width) {
@@ -1443,6 +1443,8 @@ private:
             for (auto it = ctx.mergeStack.rbegin(); it != ctx.mergeStack.rend(); ++it) {
                 if (it->loopFrame || it->parent != parentKey)
                     continue;
+                if (it->ifOp)
+                    continue;
                 if (it->switchFrame && it->switchFrame->switchOp != op)
                     continue;
                 return &*it;
@@ -1454,6 +1456,7 @@ private:
         if (!entry) {
             MergeStackEntry<ValueType, StepType> newEntry;
             newEntry.parent = key;
+            newEntry.ifOp = nullptr;
             waveCtx.mergeStack.push_back(std::move(newEntry));
             entry = &waveCtx.mergeStack.back();
             if (EnableCPSDebugLogs) {
@@ -1563,7 +1566,7 @@ private:
                             ? DynamicBlockKind::SwitchDefault
                             : DynamicBlockKind::SwitchCase;
         childCtx.switchOp = switchOp.getOperation();
-        childCtx.loopOp = nullptr;
+        childCtx.loopOp = parentBlock.loopOp;
         childCtx.ifOp = nullptr;
 
         for (unsigned pathIdx = caseIdx + 1; pathIdx <= lastIdx; ++pathIdx) {
@@ -1573,7 +1576,7 @@ private:
             pathCtx.sequenceId = pathKey.sequenceId;
             pathCtx.parentKey = key;
             pathCtx.switchOp = switchOp.getOperation();
-            pathCtx.loopOp = nullptr;
+            pathCtx.loopOp = parentBlock.loopOp;
             pathCtx.ifOp = nullptr;
             pathCtx.kind = (pathIdx == static_cast<unsigned>(defaultIndex))
                                ? DynamicBlockKind::SwitchDefault
@@ -1593,7 +1596,7 @@ private:
             otherCtx.sequenceId = otherKey.sequenceId;
             otherCtx.parentKey = key;
             otherCtx.switchOp = switchOp.getOperation();
-            otherCtx.loopOp = nullptr;
+            otherCtx.loopOp = parentBlock.loopOp;
             otherCtx.ifOp = nullptr;
             otherCtx.kind = (otherIdx == static_cast<unsigned>(defaultIndex))
                                 ? DynamicBlockKind::SwitchDefault
@@ -2123,14 +2126,6 @@ private:
                "dynamic block cannot have both loopOp and switchOp");
         if ((blockCtx->activeMask & (1ull << lane)) == 0)
             llvm::report_fatal_error("handleBreak: invalid active mask");
-        // Drop any parent continuation for the enclosing split so we don't resume
-        // the rest of the block after breaking.
-        if (blockCtx->parentKey) {
-            auto parentIt = waveCtx.blocks.find(*blockCtx->parentKey);
-            if (parentIt != waveCtx.blocks.end())
-                parentIt->second.continuations.erase(lane);
-        }
-
         // Find nearest enclosing loop (preferred) or switch merge entry that matches this block.
         MergeStackEntry<ValueType, StepType> *entry = nullptr;
         for (auto it = waveCtx.mergeStack.rbegin(); it != waveCtx.mergeStack.rend(); ++it) {
@@ -2216,7 +2211,7 @@ private:
 
         MergeStackEntry<ValueType, StepType> *entry = nullptr;
         for (auto it = waveCtx.mergeStack.rbegin(); it != waveCtx.mergeStack.rend(); ++it) {
-            if (!it->loopFrame && it->switchFrame &&
+            if (!it->loopFrame && !it->ifOp && it->switchFrame &&
                 it->switchFrame->switchOp == blockCtx->switchOp) {
                 entry = &*it;
                 break;
@@ -2225,7 +2220,7 @@ private:
         if (!entry && blockCtx->parentKey) {
             for (auto it = waveCtx.mergeStack.rbegin();
                  it != waveCtx.mergeStack.rend(); ++it) {
-                if (it->loopFrame || it->parent != *blockCtx->parentKey)
+                if (it->loopFrame || it->ifOp || it->parent != *blockCtx->parentKey)
                     continue;
                 if (it->switchFrame &&
                     it->switchFrame->switchOp != blockCtx->switchOp)
@@ -2355,7 +2350,7 @@ private:
                            ? DynamicBlockKind::SwitchDefault
                            : DynamicBlockKind::SwitchCase;
         nextCtx.switchOp = blockCtx->switchOp;
-        nextCtx.loopOp = nullptr;
+        nextCtx.loopOp = blockCtx->loopOp;
         nextCtx.ifOp = nullptr;
 
         auto &env = nextCtx.valueEnvs[lane];
@@ -2642,7 +2637,9 @@ private:
         parentBlock.continuations[lane] = parentCont;
 
         std::uint64_t parentExpected =
-            parentBlock.expectedMask;
+            parentBlock.expectedMask ? parentBlock.expectedMask : parentBlock.activeMask;
+        std::uint64_t laneMask =
+            parentExpected ? (parentExpected & (1ull << lane)) : (1ull << lane);
 
         // Evaluate predicate only for this lane.
         std::uint64_t evalActive =
@@ -2694,8 +2691,13 @@ private:
         auto findMergeEntry = [&](WaveContext<ValueType, StepType> &ctx)
             -> MergeStackEntry<ValueType, StepType> * {
             for (auto it = ctx.mergeStack.rbegin(); it != ctx.mergeStack.rend(); ++it) {
-                if (!it->loopFrame && it->parent == key)
-                    return &*it;
+                if (it->loopFrame || it->parent != key)
+                    continue;
+                if (it->switchFrame)
+                    continue;
+                if (it->ifOp && it->ifOp != ifOp.getOperation())
+                    continue;
+                return &*it;
             }
             return nullptr;
         };
@@ -2704,15 +2706,20 @@ private:
         if (!entry) {
             MergeStackEntry<ValueType, StepType> newEntry;
             newEntry.parent = key;
+            newEntry.ifOp = ifOp.getOperation();
             waveCtx.mergeStack.push_back(std::move(newEntry));
             entry = &waveCtx.mergeStack.back();
-            entry->expectedMask = parentExpected;
+            entry->expectedMask = parentExpected ? parentExpected : laneMask;
             if (EnableCPSDebugLogs) {
                 cpsDebugStream() << "[CPS] push merge (if) parent=" << key.block
                              << " seq=" << key.sequenceId << "\n";
                 logMergeStackState<ValueType, StepType>(waveCtx);
             }
         }
+        entry->ifOp = ifOp.getOperation();
+        if (entry->expectedMask == 0)
+            entry->expectedMask = parentExpected ? parentExpected : laneMask;
+        entry->expectedMask |= laneMask;
         // Start from a clean slate for this lane; add it back only to the taken path.
         // entry->expectedMask &= ~laneBit;
 
@@ -2724,8 +2731,6 @@ private:
         child.ifOp = ifOp.getOperation();
         child.loopOp = parentBlock.loopOp;
         child.switchOp = parentBlock.switchOp;
-        std::uint64_t laneMask =
-            parentExpected ? (parentExpected & (1ull << lane)) : (1ull << lane);
         if (child.expectedMask == 0)
             child.expectedMask = parentExpected ? parentExpected : (1ull << lane);
         child.expectedMask |= laneMask;
@@ -2797,8 +2802,6 @@ private:
         child.ifOp = ifOp.getOperation();
         child.loopOp = parentBlock.loopOp;
         child.switchOp = parentBlock.switchOp;
-        std::uint64_t laneMask =
-            parentExpected ? (parentExpected & (1ull << lane)) : (1ull << lane);
         if (child.expectedMask == 0)
             child.expectedMask = parentExpected ? parentExpected : (1ull << lane);
         child.expectedMask |= laneMask;
@@ -3112,6 +3115,13 @@ private:
                                  << " (continuation exhausted)\n";
                 }
                 if (auto *blockCtx = getBlock(waveCtx, item.block)) {
+                    if (blockCtx->kind == DynamicBlockKind::IfThen ||
+                        blockCtx->kind == DynamicBlockKind::IfElse ||
+                        blockCtx->kind == DynamicBlockKind::SwitchCase ||
+                        blockCtx->kind == DynamicBlockKind::SwitchDefault) {
+                        // Control-flow terminators already handled reconvergence.
+                        return llvm::Error::success();
+                    }
                     if (blockCtx->loopOp) {
                         // Let loop handlers drive reconvergence and parent resumption;
                         // don't treat this as end-of-function for the lane.
@@ -3394,15 +3404,23 @@ private:
     void shrinkExpectedForLane(WaveId waveId,
                                WaveContext<ValueType, StepType> &waveCtx,
                                LaneId lane) {
+        std::uint64_t laneBit = 1ull << lane;
         // Clear from dynamic blocks.
         for (auto &entry : waveCtx.blocks) {
-            entry.second.expectedMask &= ~(1ull << lane);
+            entry.second.expectedMask &= ~laneBit;
+            entry.second.completedMask &= ~laneBit;
+            entry.second.continuations.erase(lane);
+            entry.second.pendingOps.erase(lane);
+        }
+        for (auto &entry : waveCtx.mergeStack) {
+            entry.expectedMask &= ~laneBit;
+            entry.completedMask &= ~laneBit;
         }
         // Clear from collectives and release if now satisfied.
         for (auto it = waveCtx.collectives.begin();
              it != waveCtx.collectives.end();) {
             CollectiveKey key = it->first;
-            it->second.expectedMask &= ~(1ull << lane);
+            it->second.expectedMask &= ~laneBit;
             it->second.arrivals.erase(lane);
             it->second.continuations.erase(lane);
             it->second.operands.erase(lane);
@@ -3521,7 +3539,7 @@ private:
         // Clear from sync points and release if now satisfied.
         for (auto it = waveCtx.syncPoints.begin();
              it != waveCtx.syncPoints.end();) {
-            it->second.expectedMask &= ~(1ull << lane);
+            it->second.expectedMask &= ~laneBit;
             it->second.arrivals.erase(lane);
             it->second.continuations.erase(lane);
             if (it->second.expectedMask == 0) {
@@ -3570,8 +3588,18 @@ private:
         };
 
         for (auto &entry : waveCtx.blocks) {
-            if (inSubtree(entry.first))
+            if (inSubtree(entry.first)) {
                 entry.second.expectedMask &= ~laneBit;
+                entry.second.completedMask &= ~laneBit;
+                entry.second.continuations.erase(lane);
+                entry.second.pendingOps.erase(lane);
+            }
+        }
+        for (auto &entry : waveCtx.mergeStack) {
+            if (inSubtree(entry.parent)) {
+                entry.expectedMask &= ~laneBit;
+                entry.completedMask &= ~laneBit;
+            }
         }
 
         for (auto it = waveCtx.collectives.begin();
@@ -3768,12 +3796,23 @@ private:
             return;
         std::uint64_t laneBit = 1ull << lane;
         for (auto &entry : waveCtx.mergeStack) {
-            if (entry.loopFrame && entry.loopFrame->loopOp == loopOp)
+            if (entry.loopFrame && entry.loopFrame->loopOp == loopOp) {
                 entry.expectedMask &= ~laneBit;
+                entry.completedMask &= ~laneBit;
+                continue;
+            }
+            if (!entry.loopFrame && isUnderLoop(waveCtx, entry.parent, loopOp)) {
+                entry.expectedMask &= ~laneBit;
+                entry.completedMask &= ~laneBit;
+            }
         }
         for (auto &entry : waveCtx.blocks) {
-            if (isUnderLoop(waveCtx, entry.first, loopOp))
+            if (isUnderLoop(waveCtx, entry.first, loopOp)) {
                 entry.second.expectedMask &= ~laneBit;
+                entry.second.completedMask &= ~laneBit;
+                entry.second.continuations.erase(lane);
+                entry.second.pendingOps.erase(lane);
+            }
         }
         for (auto it = waveCtx.collectives.begin();
              it != waveCtx.collectives.end();) {
@@ -3952,6 +3991,7 @@ private:
                              LaneId lane) {
         if (waveCtx.mergeStack.empty())
             return;
+        std::uint64_t laneBit = 1ull << lane;
         for (auto it = waveCtx.mergeStack.rbegin();
              it != waveCtx.mergeStack.rend(); ++it) {
             bool matchesChild = llvm::any_of(it->pendingChildren,
@@ -3960,7 +4000,10 @@ private:
                                              });
             if (!matchesChild)
                 continue;
-            it->completedMask |= (1ull << lane);
+            if (it->expectedMask & laneBit)
+                it->completedMask |= laneBit;
+            else
+                it->completedMask &= ~laneBit;
             if (it->completedMask == it->expectedMask) {
                 auto base = it.base();
                 waveCtx.mergeStack.erase(--base);
@@ -3975,6 +4018,7 @@ private:
                              LaneId lane) {
         if (waveCtx.mergeStack.empty())
             return;
+        std::uint64_t laneBit = 1ull << lane;
         for (auto it = waveCtx.mergeStack.rbegin();
              it != waveCtx.mergeStack.rend(); ++it) {
             bool matchesChild = llvm::any_of(it->pendingChildren,
@@ -3996,7 +4040,10 @@ private:
                              << "\n";
             }
 
-            it->completedMask |= (1ull << lane);
+            if (it->expectedMask & laneBit)
+                it->completedMask |= laneBit;
+            else
+                it->completedMask &= ~laneBit;
 
             DynamicBlockKey parentKey = it->parent;
             auto parentBlockIt = waveCtx.blocks.find(parentKey);

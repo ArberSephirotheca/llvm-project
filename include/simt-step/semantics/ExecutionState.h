@@ -156,6 +156,7 @@ struct MergeStackEntry {
     std::uint64_t completedMask = 0;
     std::optional<LoopFrameState<ValueT>> loopFrame;
     std::optional<SwitchFrameState<ValueT>> switchFrame;
+    const mlir::Operation *ifOp = nullptr;
 };
 
 template <typename ValueT, typename StepT>
