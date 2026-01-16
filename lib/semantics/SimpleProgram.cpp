@@ -143,8 +143,26 @@ llvm::Error SimpleProgramRunner::runBlock(mlir::Block *block,
                 "runBlock: wave left pending collectives or sync points",
                 llvm::inconvertibleErrorCode());
         }
-        for (const auto &laneIt : waveCtx.lanes) {
-            if (!laneIt.second.hasReturned) {
+    }
+    for (const auto &waveMaskIt : waveMasks) {
+        auto waveIt = state.waves.find(waveMaskIt.first);
+        if (waveIt == state.waves.end()) {
+            return llvm::make_error<llvm::StringError>(
+                "runBlock: missing wave context",
+                llvm::inconvertibleErrorCode());
+        }
+        const auto &waveCtx = waveIt->second;
+        std::uint64_t laneMask = waveMaskIt.second;
+        while (laneMask) {
+            unsigned lane = std::countr_zero(laneMask);
+            laneMask &= laneMask - 1;
+            auto laneIt = waveCtx.lanes.find(lane);
+            if (laneIt == waveCtx.lanes.end()) {
+                return llvm::make_error<llvm::StringError>(
+                    "runBlock: missing lane context",
+                    llvm::inconvertibleErrorCode());
+            }
+            if (!laneIt->second.hasReturned) {
                 return llvm::make_error<llvm::StringError>(
                     "runBlock: lane did not return",
                     llvm::inconvertibleErrorCode());
