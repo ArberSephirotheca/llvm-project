@@ -706,7 +706,11 @@ createRicherRandomModule(mlir::MLIRContext &context,
     auto resTy = simt::dialect::ResourceType::get(
         &context, simt::dialect::MemorySpace::Global, builder.getI32Type());
     auto helper = buildScalarHelper(builder, loc, "helper0", &rng);
-    auto funcType = builder.getFunctionType({resTy}, {});
+    llvm::SmallVector<Type, 2> argTypes;
+    argTypes.push_back(resTy);
+    if (cfg.predicateBuffer)
+        argTypes.push_back(resTy);
+    auto funcType = builder.getFunctionType(argTypes, {});
     auto func = builder.create<func::FuncOp>(loc, "main", funcType);
     func->setAttr("simt.num_threads",
                   builder.getI64ArrayAttr(
@@ -718,6 +722,9 @@ createRicherRandomModule(mlir::MLIRContext &context,
     builder.setInsertionPointToStart(entry);
 
     Value outWave = entry->getArgument(0);
+    Value predBuffer;
+    if (cfg.predicateBuffer && cfg.predicateBufferArgIndex < argTypes.size())
+        predBuffer = entry->getArgument(cfg.predicateBufferArgIndex);
     Value tid =
         builder.create<simt::dialect::DispatchThreadIdOp>(loc, builder.getI32Type());
     auto call = builder.create<func::CallOp>(loc, helper, ValueRange{tid});
