@@ -2507,13 +2507,6 @@ private:
                     parentEnv[res] = results[idx];
                 ++idx;
             }
-            auto contIt = parentIt->second.continuations.find(lane);
-            if (contIt != parentIt->second.continuations.end()) {
-                parentIt->second.activeMask |= laneBit;
-                state_.readyQueue.push_back(ReadyContinuation<ValueType, StepType>{
-                    wave, entry.parent, lane, contIt->second});
-                parentIt->second.continuations.erase(contIt);
-            }
         }
 
         blockCtx->activeMask &= ~laneBit;

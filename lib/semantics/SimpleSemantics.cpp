@@ -78,6 +78,9 @@ auto SimpleSemantics::evalOperation(mlir::Operation *op,
     if (auto addOp = llvm::dyn_cast<mlir::arith::AddIOp>(op))
         return handleAddIOp(addOp, context);
 
+    if (auto mulOp = llvm::dyn_cast<mlir::arith::MulIOp>(op))
+        return handleMulIOp(mulOp, context);
+
     if (auto remOp = llvm::dyn_cast<mlir::arith::RemSIOp>(op))
         return handleRemSIOp(remOp, context);
 
@@ -152,6 +155,22 @@ auto SimpleSemantics::handleAddIOp(mlir::arith::AddIOp op,
         return StepType::halt();
     }
     auto result = lhsOrErr->add(*rhsOrErr);
+    return StepType::produce(std::move(result));
+}
+
+auto SimpleSemantics::handleMulIOp(mlir::arith::MulIOp op,
+                                   SemanticsContext &context) -> StepType {
+    auto lhsOrErr = evaluateValue(op.getLhs(), context);
+    if (!lhsOrErr) {
+        llvm::consumeError(lhsOrErr.takeError());
+        return StepType::halt();
+    }
+    auto rhsOrErr = evaluateValue(op.getRhs(), context);
+    if (!rhsOrErr) {
+        llvm::consumeError(rhsOrErr.takeError());
+        return StepType::halt();
+    }
+    auto result = lhsOrErr->mul(*rhsOrErr);
     return StepType::produce(std::move(result));
 }
 
@@ -266,6 +285,17 @@ SimpleSemantics::evaluateValue(mlir::Value value,
         if (!step.isProduce())
             return llvm::make_error<llvm::StringError>(
                 "addi did not produce a value", llvm::inconvertibleErrorCode());
+        auto state = std::move(step).takeState();
+        auto v = std::get<typename StepType::Produce>(std::move(state)).value;
+        logVal(v);
+        return v;
+    }
+
+    if (auto mulOp = value.getDefiningOp<mlir::arith::MulIOp>()) {
+        auto step = handleMulIOp(mulOp, context);
+        if (!step.isProduce())
+            return llvm::make_error<llvm::StringError>(
+                "muli did not produce a value", llvm::inconvertibleErrorCode());
         auto state = std::move(step).takeState();
         auto v = std::get<typename StepType::Produce>(std::move(state)).value;
         logVal(v);

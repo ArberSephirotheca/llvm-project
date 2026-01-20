@@ -82,10 +82,10 @@ static Value loadPredicateBool(OpBuilder &b, Location loc, BuildState &st,
 }
 
 static Value scaleIndexByLanes(OpBuilder &b, Location loc, Value idx, int lanes) {
-    Value scaled = idx;
-    for (int i = 1; i < lanes; ++i)
-        scaled = b.create<arith::AddIOp>(loc, scaled, idx);
-    return scaled;
+    if (lanes <= 1)
+        return idx;
+    Value lanesVal = makeI32(b, loc, lanes);
+    return b.create<arith::MulIOp>(loc, idx, lanesVal);
 }
 
 static func::FuncOp buildScalarHelper(OpBuilder &b, Location loc,
@@ -170,10 +170,8 @@ static void emitWaveCount(OpBuilder &b, Location loc, BuildState &st,
     int waveBase = st.waveId * stride;
     Value idx = makeI32(b, loc, waveBase);
     if (iteration) {
-        // iterScaled = iteration * lanes using adds (avoid mul).
-        Value iterScaled = iteration;
-        for (int i = 1; i < lanes; ++i)
-            iterScaled = b.create<arith::AddIOp>(loc, iterScaled, iteration);
+        Value lanesVal = makeI32(b, loc, lanes);
+        Value iterScaled = b.create<arith::MulIOp>(loc, iteration, lanesVal);
         idx = b.create<arith::AddIOp>(loc, idx, iterScaled);
     }
     idx = b.create<arith::AddIOp>(loc, idx, st.tid);

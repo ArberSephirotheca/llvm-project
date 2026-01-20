@@ -35,6 +35,8 @@ private:
     StepType handleSubgroupId(SemanticsContext &context);
     StepType handleAddIOp(mlir::arith::AddIOp op,
                           SemanticsContext &context);
+    StepType handleMulIOp(mlir::arith::MulIOp op,
+                          SemanticsContext &context);
     StepType handleRemSIOp(mlir::arith::RemSIOp op,
                            SemanticsContext &context);
     StepType handleIndexCastOp(mlir::arith::IndexCastOp op,
