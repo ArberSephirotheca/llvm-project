@@ -1,8 +1,9 @@
 // Simple driver that generates a SIMT-Step kernel and optionally raises it to
-// HLSL or runs it through the CPS interpreter.
+// HLSL/CUDA or runs it through the CPS interpreter.
 
 #include "SimtProgramGenerator.h"
 
+#include "CudaEmitter.h"
 #include "HlslEmitter.h"
 #include "simt-step/Dialect/SimtStep/SimtStepDialect.h"
 #include "simt-step/semantics/SimpleProgram.h"
@@ -196,6 +197,9 @@ int main(int argc, char **argv) {
     llvm::cl::opt<bool> dumpHlsl("raise-hlsl",
                                  llvm::cl::desc("Print raised HLSL for generated module"),
                                  llvm::cl::init(false));
+    llvm::cl::opt<bool> dumpCuda("raise-cuda",
+                                 llvm::cl::desc("Print raised CUDA for generated module"),
+                                 llvm::cl::init(false));
     llvm::cl::opt<bool> runInterp("run", llvm::cl::desc("Run generated module in interpreter"),
                                   llvm::cl::init(false));
     llvm::cl::opt<std::uint64_t> seedOpt("seed", llvm::cl::desc("Seed for RNG (0=deterministic)"),
@@ -299,6 +303,10 @@ int main(int argc, char **argv) {
 
     if (dumpHlsl) {
         if (failed(simt::raise::emitModuleAsHlsl(*module, llvm::outs())))
+            return 1;
+    }
+    if (dumpCuda) {
+        if (failed(simt::raise::emitModuleAsCuda(*module, llvm::outs())))
             return 1;
     }
 

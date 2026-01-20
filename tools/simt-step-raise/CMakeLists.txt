@@ -1,4 +1,5 @@
 add_library(simt-step-raise-lib
+    CudaEmitter.cpp
     HlslEmitter.cpp
 )
 

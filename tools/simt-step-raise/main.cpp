@@ -1,3 +1,4 @@
+#include "CudaEmitter.h"
 #include "HlslEmitter.h"
 
 #include "simt-step/Dialect/SimtStep/SimtStepDialect.h"
@@ -19,7 +20,11 @@ int main(int argc, char **argv) {
     llvm::cl::opt<std::string> inputFile(llvm::cl::Positional,
                                          llvm::cl::desc("<input mlir>"),
                                          llvm::cl::init("-"));
-    llvm::cl::ParseCommandLineOptions(argc, argv, "simt-step raise to HLSL\n");
+    llvm::cl::opt<std::string> target(
+        "target",
+        llvm::cl::desc("Output target: hlsl or cuda"),
+        llvm::cl::init("hlsl"));
+    llvm::cl::ParseCommandLineOptions(argc, argv, "simt-step raise\n");
 
     DialectRegistry registry;
     simt::dialect::registerSimtStepDialect(registry);
@@ -33,8 +38,18 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    if (failed(simt::raise::emitModuleAsHlsl(*module, llvm::outs()))) {
-        llvm::errs() << "failed to raise module\n";
+    if (target == "hlsl") {
+        if (failed(simt::raise::emitModuleAsHlsl(*module, llvm::outs()))) {
+            llvm::errs() << "failed to raise module\n";
+            return 1;
+        }
+    } else if (target == "cuda") {
+        if (failed(simt::raise::emitModuleAsCuda(*module, llvm::outs()))) {
+            llvm::errs() << "failed to raise module\n";
+            return 1;
+        }
+    } else {
+        llvm::errs() << "unknown target: " << target << "\n";
         return 1;
     }
 

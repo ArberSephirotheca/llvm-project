@@ -239,9 +239,9 @@ class TraceHandler(http.server.SimpleHTTPRequestHandler):
             payload = {"trace": trace_text}
             if ir_text:
                 payload["ir"] = ir_text
-            if raise_target in ("glsl", "cuda"):
-                raise_error = f"{raise_target.upper()} raiser not supported yet"
-            elif raise_target == "hlsl":
+            if raise_target == "glsl":
+                raise_error = "GLSL raiser not supported yet"
+            elif raise_target in ("hlsl", "cuda"):
                 if use_runner:
                     if not RAISE_BIN.exists():
                         raise_error = f"simt-step-raise not found at {RAISE_BIN}"
@@ -250,6 +250,8 @@ class TraceHandler(http.server.SimpleHTTPRequestHandler):
                             str(RAISE_BIN),
                             ir_path,
                         ]
+                        if raise_target == "cuda":
+                            raise_cmd.extend(["--target", "cuda"])
                         raise_result = subprocess.run(
                             raise_cmd,
                             cwd=str(ROOT),
@@ -270,8 +272,11 @@ class TraceHandler(http.server.SimpleHTTPRequestHandler):
                         f"--lanes={lanes}",
                         f"--subgroup-width={subgroup_width}",
                         f"--seed={seed}",
-                        "--raise-hlsl",
                     ]
+                    if raise_target == "cuda":
+                        raise_cmd.append("--raise-cuda")
+                    else:
+                        raise_cmd.append("--raise-hlsl")
                     raise_result = subprocess.run(
                         raise_cmd,
                         cwd=str(ROOT),
